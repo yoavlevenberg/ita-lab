@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ITA Lab — מתכנן מסלולים פיזיים</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e;
+    --free:#3fb950; --used:#f85149; --amber:#d29922;
+    --src:#58a6ff; --dst:#bc8cff; --path:#e3b341; --eor:#f0883e;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:"Segoe UI",system-ui,-apple-system,Arial,sans-serif; font-size:14px;
+  }
+  code,.mono{font-family:Consolas,"Courier New",monospace; direction:ltr; unicode-bidi:embed}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+  }
+  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+  header h1 span{color:var(--muted); font-weight:400; font-size:13px}
+  .stats{color:var(--muted); font-size:12px}
+  .spacer{flex:1}
+
+  .slot{
+    display:flex; align-items:center; gap:8px; background:var(--panel2);
+    border:1px solid var(--border); border-radius:6px; padding:5px 10px; min-width:190px;
+  }
+  .slot b{font-size:11px; color:var(--muted); font-weight:600}
+  .slot .val{font-size:11.5px}
+  .slot.src{border-color:var(--src)} .slot.dst{border-color:var(--dst)}
+  .slot .val:empty::before{content:"— לחץ על פורט פנוי —"; color:#586069}
+
+  select,button{
+    font-family:inherit; font-size:13px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--border); border-radius:6px; padding:6px 12px; cursor:pointer;
+  }
+  button:hover{border-color:var(--muted)}
+  button.primary{background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:600}
+  button.primary:hover{background:#388bfd}
+  button.ghost{background:transparent}
+
+  /* ---------- layout ---------- */
+  #app{
+    display:grid; grid-template-columns:minmax(430px,1.15fr) 290px minmax(340px,1fr);
+    gap:12px; padding:12px; align-items:stretch;
+    height:calc(100vh - 53px); overflow:hidden;
+  }
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    display:flex; flex-direction:column; max-height:100%; overflow:hidden;
+  }
+  .card > h2{
+    margin:0; padding:9px 12px; font-size:12.5px; font-weight:600; color:var(--muted);
+    border-bottom:1px solid var(--border); letter-spacing:.3px; flex:none;
+    display:flex; align-items:center; gap:8px;
+  }
+  .card .body{padding:12px; overflow:auto; flex:1}
+
+  /* ---------- pod / row map ---------- */
+  .map{direction:ltr}
+  .pod{margin-bottom:14px}
+  .pod-title{
+    font-size:12px; color:var(--muted); margin:0 0 6px; font-weight:600;
+    display:flex; align-items:center; gap:8px;
+  }
+  .row-wrap{display:flex; align-items:center; gap:8px; margin-bottom:7px}
+  .row-tag{
+    width:74px; flex:none; font-size:11px; color:var(--muted);
+    font-family:Consolas,monospace;
+  }
+  .row-tag b{color:var(--text); font-size:12px}
+  .racks{display:flex; gap:4px; flex-wrap:wrap}
+  .rack{
+    width:52px; padding:4px 3px 3px; border:1px solid var(--border); border-radius:5px;
+    background:var(--panel2); cursor:pointer; position:relative; text-align:center;
+    transition:.12s;
+  }
+  .rack:hover{border-color:var(--muted); transform:translateY(-1px)}
+  .rack .rid{font-family:Consolas,monospace; font-size:11px; font-weight:600}
+  .rack .pct{font-size:9.5px; color:var(--muted); margin-top:1px}
+  .bar{height:3px; border-radius:2px; background:#2d333b; margin-top:3px; overflow:hidden}
+  .bar > i{display:block; height:100%}
+  .rack.eor{border-color:var(--eor); background:#20160e}
+  .rack.eor .rid{color:var(--eor)}
+  .rack.active{outline:2px solid var(--src); outline-offset:1px}
+  .rack.on-path{border-color:var(--path); background:#241f0d}
+  .hop{
+    position:absolute; top:-7px; right:-7px; width:16px; height:16px; border-radius:50%;
+    background:var(--path); color:#000; font-size:10px; font-weight:700;
+    line-height:16px; text-align:center;
+  }
+  .backbone{
+    border:1px dashed var(--border); border-radius:6px; padding:7px 10px; margin-top:4px;
+    font-size:11px; color:var(--muted);
+  }
+  .backbone .bb{display:flex; align-items:center; gap:8px; margin:3px 0}
+  .backbone .bb.on-path{color:var(--path)}
+  .backbone .bb .bar{flex:1; margin:0}
+
+  /* ---------- rack elevation ---------- */
+  .elev{direction:ltr; display:flex; gap:5px}
+  .ugutter{
+    flex:none; width:26px; font-family:Consolas,monospace; font-size:8.5px;
+    color:#586069; text-align:right; padding-right:3px;
+  }
+  .ugutter div{height:15px; line-height:15px}
+  .ubody{flex:1; position:relative; border:1px solid var(--border); border-radius:4px;
+         background:repeating-linear-gradient(180deg,#12161c 0 14px,#0d1117 14px 15px)}
+  .dev{
+    position:absolute; left:2px; right:2px; border-radius:3px; cursor:pointer;
+    font-size:10px; padding:0 5px; overflow:hidden; white-space:nowrap;
+    display:flex; align-items:center; gap:5px; border:1px solid; transition:.1s;
+  }
+  .dev:hover{filter:brightness(1.35)}
+  .dev.sel{outline:2px solid var(--src); outline-offset:-1px; z-index:3}
+  .dev .nm{font-family:Consolas,monospace; font-weight:600}
+  .dev .po{margin-left:auto; font-size:9px; opacity:.85}
+  .dev.fiber_patch_panel{background:#12313f; border-color:#1f6f8b; color:#7ee0ff}
+  .dev.copper_patch_panel{background:#3a2a12; border-color:#8b6a1f; color:#ffd479}
+  .dev.switch{background:#1b3320; border-color:#2f6b3a; color:#8ee6a0}
+  .dev.server{background:#22262c; border-color:#3d444d; color:#b9c3cf}
+
+  /* ---------- device detail / ports ---------- */
+  .dmeta{font-size:12px; margin-bottom:10px; line-height:1.75}
+  .dmeta .k{color:var(--muted); display:inline-block; min-width:78px}
+  .grp{margin-bottom:12px}
+  .grp h3{font-size:11px; color:var(--muted); margin:0 0 6px; font-weight:600}
+  .ports{display:flex; flex-wrap:wrap; gap:3px; direction:ltr}
+  .p{
+    width:26px; height:22px; border-radius:3px; border:1px solid var(--border);
+    font-family:Consolas,monospace; font-size:9.5px; line-height:20px; text-align:center;
+    cursor:pointer; transition:.1s; background:#1b2027;
+  }
+  .p:hover{transform:scale(1.14); z-index:2}
+  .p.free{border-color:#2c6b36; background:#122a17; color:#7ee495}
+  .p.used{border-color:#7d2b28; background:#2a1414; color:#ff9d97}
+  .p.transit{border-color:#7a5a1c; background:#2a2110; color:#f0cd76}
+  .p.src{border-color:var(--src); background:#0d2d4d; color:#9fd0ff; box-shadow:0 0 0 1px var(--src)}
+  .p.dst{border-color:var(--dst); background:#2a1a45; color:#dcc3ff; box-shadow:0 0 0 1px var(--dst)}
+  .p.focus{outline:2px solid var(--path); outline-offset:1px}
+
+  table.conn{width:100%; border-collapse:collapse; font-size:11px; margin-top:4px}
+  table.conn th{
+    text-align:right; color:var(--muted); font-weight:600; padding:4px 6px;
+    border-bottom:1px solid var(--border); font-size:10.5px;
+  }
+  table.conn td{padding:4px 6px; border-bottom:1px solid #21262d}
+  table.conn tr:hover td{background:#1b2027; cursor:pointer}
+  table.conn .mono{font-size:10.5px}
+
+  /* ---------- route drawer ---------- */
+  #drawer{
+    position:fixed; inset:auto 0 0 0; max-height:74vh; background:var(--panel);
+    border-top:2px solid var(--path); box-shadow:0 -8px 30px rgba(0,0,0,.55);
+    transform:translateY(101%); transition:transform .22s ease; z-index:50;
+    display:flex; flex-direction:column;
+  }
+  #drawer.open{transform:translateY(0)}
+  #drawer .dh{
+    display:flex; align-items:center; gap:12px; padding:8px 16px;
+    border-bottom:1px solid var(--border); flex:none;
+  }
+  #drawer .dh h2{font-size:14px; margin:0}
+  #drawer .db{padding:14px 16px; overflow:auto; display:grid;
+               grid-template-columns:1fr 1fr; gap:18px}
+  .chain{display:flex; flex-wrap:wrap; gap:6px; align-items:center; direction:ltr; margin:8px 0 14px}
+  .chain .n{
+    background:#241f0d; border:1px solid var(--path); color:var(--path);
+    border-radius:5px; padding:3px 9px; font-family:Consolas,monospace; font-size:12px;
+  }
+  .chain .ar{color:var(--muted)}
+  .seg{margin-bottom:9px; font-size:11.5px}
+  .seg .st{display:flex; justify-content:space-between; gap:10px; margin-bottom:3px}
+  .kv{font-size:12px; line-height:1.9}
+  .kv .k{color:var(--muted); display:inline-block; min-width:92px}
+  pre.wo{
+    background:#0b0f14; border:1px solid var(--border); border-radius:6px; padding:12px;
+    font-family:Consolas,monospace; font-size:11px; line-height:1.5; overflow:auto;
+    max-height:44vh; direction:ltr; margin:0; white-space:pre;
+  }
+  .err{background:#2a1414; border:1px solid #7d2b28; color:#ff9d97;
+       padding:10px 12px; border-radius:6px; font-size:12.5px}
+  .pill{font-size:10.5px; padding:2px 8px; border-radius:10px; border:1px solid var(--border); color:var(--muted)}
+  .pill.a{border-color:var(--src); color:var(--src)}
+  .pill.b{border-color:var(--dst); color:var(--dst)}
+  .legend{display:flex; gap:12px; flex-wrap:wrap; font-size:10.5px; color:var(--muted); padding:8px 12px 0}
+  .legend i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-left:4px; vertical-align:-1px}
+  .empty{color:#586069; font-size:12px; text-align:center; padding:28px 10px; line-height:1.7}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ITA Lab <span>— מתכנן מסלולים פיזיים (סביבת בדיקות)</span></h1>
+  <div class="stats" id="stats">טוען…</div>
+  <div class="spacer"></div>
+
+  <div class="slot src"><b>מקור</b><span class="val mono" id="slotSrc"></span></div>
+  <div class="slot dst"><b>יעד</b><span class="val mono" id="slotDst"></span></div>
+
+  <select id="domainSel" title="רגל רדונדנטיות">
+    <option value="">דומיין: אוטומטי</option>
+    <option value="A">דומיין A (שדרה S)</option>
+    <option value="B">דומיין B (שדרה N)</option>
+  </select>
+  <button class="primary" id="btnRoute">SHOW ROUTE</button>
+  <button class="ghost" id="btnClear">נקה</button>
+</header>
+
+<div id="app">
+
+  <section class="card">
+    <h2>מפת חווה — פודים ושדרות</h2>
+    <div class="legend">
+      <span><i style="background:var(--free)"></i>פנוי</span>
+      <span><i style="background:var(--amber)"></i>תפוסה בינונית</span>
+      <span><i style="background:var(--used)"></i>עמוס</span>
+      <span><i style="background:var(--eor)"></i>מסד EOR</span>
+      <span><i style="background:var(--path)"></i>על המסלול</span>
+    </div>
+    <div class="body map" id="map"></div>
+  </section>
+
+  <section class="card">
+    <h2 id="rackTitle">תצוגת מסד (42U)</h2>
+    <div class="body" id="rackPanel">
+      <div class="empty">בחר מסד מהמפה<br>כדי לראות את תכולת ה-42U</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 id="devTitle">פרטי רכיב ופורטים</h2>
+    <div class="body" id="devPanel">
+      <div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>
+    </div>
+  </section>
+
+</div>
+
+<div id="drawer">
+  <div class="dh">
+    <h2 id="drawerTitle">מסלול</h2>
+    <span class="spacer" style="flex:1"></span>
+    <button id="btnDownload">הורד Work Order</button>
+    <button class="ghost" id="btnCloseDrawer">סגור</button>
+  </div>
+  <div class="db" id="drawerBody"></div>
+</div>
+
+<script>
+"use strict";
+
+let T = null;                       // the whole topology
+let rackStats = {};                 // rackId -> {free, used, total}
+let devicesByRack = {};             // rackId -> [device]
+let portsByDevice = {};             // deviceId -> [port]
+let sel = { src:null, dst:null, rack:null, device:null, focusPort:null };
+let currentPath = [];               // rack ids highlighted
+let currentSegIds = [];
+let lastWorkOrder = null;
+
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- boot ---
+fetch("/api/topology").then(r => r.json()).then(t => {
+  T = t;
+  index();
+  renderMap();
+  renderStats();
+});
+
+function index(){
+  for (const d of Object.values(T.devices)){
+    (devicesByRack[d.rack] ||= []).push(d);
+    portsByDevice[d.id] = [];
+  }
+  for (const r in devicesByRack) devicesByRack[r].sort((a,b) => b.u_start - a.u_start);
+
+  for (const p of Object.values(T.ports)){
+    portsByDevice[p.device].push(p);
+    const s = (rackStats[p.rack] ||= {free:0, used:0, total:0});
+    s.total++; p.status === "used" ? s.used++ : s.free++;
+  }
+  for (const d in portsByDevice) portsByDevice[d].sort((a,b) => a.index - b.index);
+}
+
+function renderStats(){
+  const ports = Object.keys(T.ports).length;
+  const used = Object.values(T.ports).filter(p => p.status === "used").length;
+  $("stats").textContent =
+    `${Object.keys(T.racks).length} מסדים · ${Object.keys(T.devices).length} רכיבים · ` +
+    `${ports} פורטים (${used} תפוסים) · ${Object.keys(T.circuits).length} חיבורים קיימים`;
+}
+
+const heat = pct => pct < 50 ? "var(--free)" : pct < 80 ? "var(--amber)" : "var(--used)";
+
+// ----------------------------------------------------------------- map ---
+function renderMap(){
+  const el = $("map"); el.innerHTML = "";
+  for (const podId of Object.keys(T.pods)){
+    const pod = document.createElement("div"); pod.className = "pod";
+    pod.innerHTML = `<p class="pod-title">POD ${podId}</p>`;
+
+    for (const rowId of Object.keys(T.pods[podId].rows)){
+      const row = T.pods[podId].rows[rowId];
+      const wrap = document.createElement("div"); wrap.className = "row-wrap";
+      wrap.innerHTML = `<div class="row-tag">שדרה <b>${rowId}</b></div>`;
+      const box = document.createElement("div"); box.className = "racks";
+
+      for (const rid of row.racks){
+        const meta = T.racks[rid], st = rackStats[rid] || {used:0,total:1};
+        const pct = Math.round(st.used / st.total * 100);
+        const hop = currentPath.indexOf(rid);
+        const d = document.createElement("div");
+        d.className = "rack" + (meta.is_eor ? " eor" : "")
+                    + (sel.rack === rid ? " active" : "")
+                    + (hop >= 0 ? " on-path" : "");
+        d.title = `${rid} — ${st.used}/${st.total} פורטים תפוסים`;
+        d.innerHTML =
+          (hop >= 0 ? `<span class="hop">${hop+1}</span>` : "") +
+          `<div class="rid">${rowId}${String(meta.position).padStart(2,"0")}</div>` +
+          `<div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div>` +
+          `<div class="pct">${meta.is_eor ? "EOR" : pct + "%"}</div>`;
+        d.onclick = () => selectRack(rid);
+        box.appendChild(d);
+      }
+      wrap.appendChild(box); pod.appendChild(wrap);
+    }
+    el.appendChild(pod);
+  }
+
+  // inter-pod backbone trunks
+  const bb = document.createElement("div"); bb.className = "backbone";
+  bb.innerHTML = `<div style="margin-bottom:4px">גישורי Backbone בין פודים (סיב בלבד)</div>`;
+  for (const e of T.edges.filter(e => e.id.includes("<->"))){
+    const f = e.cable_types.fiber, pct = Math.round(f.used / f.capacity * 100);
+    const on = currentSegIds.includes(e.id);
+    bb.innerHTML += `<div class="bb ${on ? "on-path" : ""}">
+        <span class="mono" style="width:132px">${e.id}</span>
+        <span class="pill ${e.domain === "A" ? "a" : "b"}">domain ${e.domain}</span>
+        <span class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></span>
+        <span style="width:64px;text-align:left">${f.used}/${f.capacity}</span>
+      </div>`;
+  }
+  $("map").appendChild(bb);
+}
+
+// ------------------------------------------------------- rack elevation ---
+function selectRack(rid){
+  sel.rack = rid; sel.device = null;
+  renderMap(); renderRack();
+  $("devPanel").innerHTML = `<div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>`;
+  $("devTitle").textContent = "פרטי רכיב ופורטים";
+}
+
+function renderRack(){
+  const rid = sel.rack, meta = T.racks[rid], st = rackStats[rid];
+  $("rackTitle").innerHTML = `תצוגת מסד <span class="mono" style="color:var(--text)">${rid}</span>` +
+      (meta.is_eor ? ` <span class="pill" style="border-color:var(--eor);color:var(--eor)">EOR · domain ${meta.domain}</span>` : "");
+
+  const U = T.meta.rack_u, H = 15;
+  let gut = "", body = "";
+  for (let u = U; u >= 1; u--) gut += `<div>${u}</div>`;
+
+  for (const d of devicesByRack[rid] || []){
+    const ports = portsByDevice[d.id];
+    const used = ports.filter(p => p.status === "used").length;
+    body += `<div class="dev ${d.type} ${sel.device === d.id ? "sel" : ""}"
+                  style="top:${(U - d.u_start) * H + 1}px;height:${d.u_size * H - 2}px"
+                  data-dev="${d.id}" title="${d.label}">
+               <span class="nm">${d.name}</span>
+               <span class="po">${used}/${ports.length}</span>
+             </div>`;
+  }
+
+  $("rackPanel").innerHTML =
+    `<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px">
+       פוד ${meta.pod} · שדרה ${meta.row} · עמדה ${meta.position} · ${st.used}/${st.total} פורטים תפוסים
+     </div>
+     <div class="elev">
+       <div class="ugutter">${gut}</div>
+       <div class="ubody" style="height:${U * H}px">${body}</div>
+     </div>`;
+
+  $("rackPanel").querySelectorAll(".dev").forEach(n =>
+    n.onclick = () => selectDevice(n.dataset.dev));
+}
+
+// -------------------------------------------------------- device detail ---
+const TYPE_HE = {
+  fiber_patch_panel:"פאנל גישור סיב", copper_patch_panel:"פאנל גישור נחושת",
+  switch:"מתג", server:"שרת"
+};
+
+function selectDevice(devId){
+  sel.device = devId; renderRack(); renderDevice();
+}
+
+function renderDevice(){
+  const d = T.devices[sel.device], ports = portsByDevice[d.id];
+  const fib = ports.filter(p => p.type === "fiber");
+  const cu  = ports.filter(p => p.type === "copper");
+  const used = ports.filter(p => p.status === "used");
+
+  $("devTitle").innerHTML = `רכיב <span class="mono" style="color:var(--text)">${d.name}</span>`;
+
+  let html = `<div class="dmeta">
+      <div><span class="k">סוג רכיב</span> ${TYPE_HE[d.type] || d.type}</div>
+      <div><span class="k">דגם / תיאור</span> ${d.label}</div>
+      <div><span class="k">מיקום</span> <span class="mono">${d.rack}</span> · U${d.u_start}${d.u_size > 1 ? "–U" + (d.u_start - d.u_size + 1) : ""} (${d.u_size}U)</div>
+      <div><span class="k">פורטים</span> ${ports.length} סה"כ · ${used.length} תפוסים · ${ports.length - used.length} פנויים</div>
+    </div>`;
+
+  html += portGroup("פורטי סיב (Fiber / LC)", fib);
+  html += portGroup("פורטי נחושת (Copper / RJ45)", cu);
+
+  if (used.length){
+    html += `<div class="grp"><h3>פורטים תפוסים — לאן כל אחד מגיע</h3>
+      <table class="conn"><thead><tr>
+        <th style="width:38px">פורט</th><th>יעד הקצה השני</th><th style="width:78px">חיבור</th>
+      </tr></thead><tbody>`;
+    for (const p of used){
+      const target = p.role === "transit"
+        ? `<span style="color:var(--path)">מעבר (Cross-connect) בתוך מסלול</span>`
+        : `<span class="mono">${p.peer ? locate(p.peer) : "—"}</span>`;
+      html += `<tr data-cir="${p.circuit}" data-port="${p.id}">
+                 <td class="mono">${p.index}</td><td>${target}</td>
+                 <td class="mono" style="color:var(--muted)">${p.circuit}</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+  }
+
+  $("devPanel").innerHTML = html;
+
+  $("devPanel").querySelectorAll(".p").forEach(n => n.onclick = () => clickPort(n.dataset.port));
+  $("devPanel").querySelectorAll("tr[data-cir]").forEach(n =>
+    n.onclick = () => { sel.focusPort = n.dataset.port; showExistingCircuit(n.dataset.cir); });
+}
+
+function portGroup(title, ports){
+  if (!ports.length) return "";
+  let h = `<div class="grp"><h3>${title} — ${ports.length}</h3><div class="ports">`;
+  for (const p of ports){
+    let cls = p.status === "free" ? "free" : (p.role === "transit" ? "transit" : "used");
+    if (sel.src === p.id) cls = "src";
+    if (sel.dst === p.id) cls = "dst";
+    if (sel.focusPort === p.id) cls += " focus";
+    const tip = p.status === "free"
+      ? `${p.id} — פנוי (לחץ לבחירה)`
+      : `${p.id} — ${p.circuit}` + (p.peer ? ` → ${locate(p.peer)}` : " (מעבר)");
+    h += `<div class="p ${cls}" data-port="${p.id}" title="${tip}">${p.index}</div>`;
+  }
+  return h + `</div></div>`;
+}
+
+function locate(portId){
+  const p = T.ports[portId], d = T.devices[p.device];
+  return `${p.rack} / U${d.u_start} ${d.name} / ${p.index}`;
+}
+
+// ------------------------------------------------------------ selection ---
+function clickPort(portId){
+  const p = T.ports[portId];
+  sel.focusPort = portId;
+
+  if (p.status === "used"){                 // inspecting an existing circuit
+    if (p.circuit) showExistingCircuit(p.circuit);
+    renderDevice();
+    return;
+  }
+  if (sel.src === portId) sel.src = null;
+  else if (sel.dst === portId) sel.dst = null;
+  else if (!sel.src) sel.src = portId;
+  else sel.dst = portId;                    // second click fills the destination
+
+  refreshSlots(); renderDevice();
+}
+
+function refreshSlots(){
+  $("slotSrc").textContent = sel.src ? locate(sel.src) : "";
+  $("slotDst").textContent = sel.dst ? locate(sel.dst) : "";
+}
+
+$("btnClear").onclick = () => {
+  sel = { src:null, dst:null, rack:sel.rack, device:sel.device, focusPort:null };
+  currentPath = []; currentSegIds = []; lastWorkOrder = null;
+  refreshSlots(); renderMap(); if (sel.device) renderDevice(); closeDrawer();
+};
+
+// --------------------------------------------------------------- routing ---
+$("btnRoute").onclick = () => {
+  const fp = sel.focusPort && T.ports[sel.focusPort];
+  if (fp && fp.status === "used" && fp.circuit) return showExistingCircuit(fp.circuit);
+  if (!sel.src || !sel.dst)
+    return drawerError("בחר פורט מקור ופורט יעד (לחיצה על פורט ירוק פנוי), או לחץ על פורט תפוס כדי לראות את המסלול הקיים שלו.");
+
+  fetch("/api/route", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ src:sel.src, dst:sel.dst, domain:$("domainSel").value })
+  }).then(r => r.json()).then(showRoute).catch(e => drawerError(String(e)));
+};
+
+function showRoute(route){
+  if (route.status === "failed" || route.error){
+    currentPath = []; currentSegIds = []; renderMap();
+    return drawerError(route.reason || route.error);
+  }
+  currentPath = route.hop_racks;
+  currentSegIds = route.segments.map(s => s.edge_id);
+  lastWorkOrder = { name:`WO_${route.src_port}_${route.dst_port}`.replace(/[:|]/g,"-") + ".txt",
+                    text:route.work_order };
+  renderMap();
+
+  $("drawerTitle").innerHTML = `מסלול מוצע <span class="pill ${route.domain === "A" ? "a" : "b"}">domain ${route.domain}</span>`;
+  $("drawerBody").innerHTML = `
+    <div>
+      <div class="kv">
+        <div><span class="k">סוג כבל</span> ${route.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
+        <div><span class="k">רגל רדונדנטיות</span> domain ${route.domain}</div>
+        <div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>
+        <div><span class="k">מקור</span> <span class="mono">${route.src_location}</span></div>
+        <div><span class="k">יעד</span> <span class="mono">${route.dst_location}</span></div>
+      </div>
+      <h3 style="font-size:12px;color:var(--muted);margin:14px 0 0">מסדים שהמסלול עובר דרכם</h3>
+      <div class="chain">${route.hop_racks.map((r,i) =>
+          `<span class="n">${i+1}. ${r}</span>`).join('<span class="ar">→</span>')}</div>
+      <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים ותפוסה (לפני העבודה)</h3>
+      ${route.segments.map(s => {
+        const pct = Math.round(s.used_before / s.capacity * 100);
+        return `<div class="seg">
+          <div class="st"><span class="mono">${s.edge_id}</span>
+            <span style="color:var(--muted)">${s.length_m} מ' · ${s.used_before}/${s.capacity} · ${s.remaining_before} פנויים</span></div>
+          <div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div></div>`;
+      }).join("")}
+      ${route.transit_points.length ? `<h3 style="font-size:12px;color:var(--muted);margin:14px 0 6px">נקודות גישור (Cross-connect)</h3>
+        ${route.transit_points.map(t => `<div class="mono" style="font-size:11.5px;margin:3px 0">${t.location}</div>`).join("")}` : ""}
+    </div>
+    <div>
+      <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">Work Order</h3>
+      <pre class="wo">${escapeHtml(route.work_order)}</pre>
+    </div>`;
+  openDrawer();
+}
+
+function showExistingCircuit(cid){
+  fetch("/api/circuit?id=" + encodeURIComponent(cid)).then(r => r.json()).then(c => {
+    if (c.error) return drawerError(c.error);
+    currentPath = c.hop_racks; currentSegIds = c.segment_ids; lastWorkOrder = null;
+    renderMap();
+    $("drawerTitle").innerHTML = `חיבור קיים <span class="mono">${c.id}</span>
+        <span class="pill ${c.domain === "A" ? "a" : "b"}">domain ${c.domain}</span>`;
+    $("drawerBody").innerHTML = `
+      <div>
+        <div class="kv">
+          <div><span class="k">סוג כבל</span> ${c.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
+          <div><span class="k">אורך</span> ~${c.total_length_m} מ'</div>
+          <div><span class="k">קצה A</span> <span class="mono">${c.a_location}</span></div>
+          <div><span class="k">קצה B</span> <span class="mono">${c.b_location}</span></div>
+        </div>
+        <h3 style="font-size:12px;color:var(--muted);margin:14px 0 0">מסדים שהחיבור עובר דרכם</h3>
+        <div class="chain">${c.hop_racks.map((r,i) =>
+            `<span class="n">${i+1}. ${r}</span>`).join('<span class="ar">→</span>')}</div>
+      </div>
+      <div>
+        <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים פיזיים</h3>
+        ${c.segment_ids.map(s => `<div class="mono" style="font-size:11.5px;margin:4px 0">${s}</div>`).join("")}
+        ${c.transit_ports.length ? `<h3 style="font-size:12px;color:var(--muted);margin:14px 0 6px">פורטי גישור בדרך</h3>
+          ${c.transit_ports.map(p => `<div class="mono" style="font-size:11.5px;margin:3px 0">${locate(p)}</div>`).join("")}` : ""}
+      </div>`;
+    openDrawer();
+  });
+}
+
+function drawerError(msg){
+  $("drawerTitle").textContent = "לא נמצא מסלול";
+  $("drawerBody").innerHTML = `<div class="err" style="grid-column:1/-1">${escapeHtml(msg)}</div>`;
+  lastWorkOrder = null; openDrawer();
+}
+
+const openDrawer  = () => {
+  $("btnDownload").style.display = lastWorkOrder ? "" : "none";
+  $("drawer").classList.add("open");
+};
+const closeDrawer = () => $("drawer").classList.remove("open");
+$("btnCloseDrawer").onclick = closeDrawer;
+
+$("btnDownload").onclick = () => {
+  if (!lastWorkOrder) return alert("אין Work Order להורדה — חשב מסלול חדש קודם.");
+  const b = new Blob([lastWorkOrder.text], {type:"text/plain;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(b); a.download = lastWorkOrder.name; a.click();
+};
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+</script>
+</body>
+</html>
