@@ -44,8 +44,8 @@ pathengine.py
 | `generate_topology.py` | בונה את `data/topology.json` הסינתטי |
 | `pathengine.py` | מנוע הניתוב + כל האילוצים + `commit_route` |
 | `workorder.py` | הפקת הוראות עבודה לטכנאי |
-| `server.py` | שרת מקומי (stdlib בלבד, בלי Flask/npm) + API |
-| `ui.html` | ממשק גרפי: מפת חווה (grid 4×8) → פוד → מסד → רכיב → פורט |
+| `server.py` | שרת מקומי (stdlib בלבד, בלי Flask/npm) + API (`/api/topology`, `/api/route`, `/api/execute`, `/api/circuit`) |
+| `ui.html` | ממשק גרפי: מפת חווה (grid 4×8) → פוד → מסד → רכיב → פורט, כולל ביצוע מסלול |
 | `cli.py` | גישה משורת פקודה |
 | `test_scenarios.py` | 33/33 בדיקות עוברות |
 
@@ -67,12 +67,24 @@ pathengine.py
    כל ה-map) → לחיצה על מסד פותחת 42U כרגיל.
 6. נבדק חזותית בדפדפן (claude-in-chrome): המפה, ה-drill-down, וחישוב
    מסלול מלא (כולל Work Order) עובדים מקצה לקצה.
+7. **הוספת ביצוע מסלול (Execute)**: כפתור "בצע התקנה" מופיע ב-drawer
+   אחרי SHOW ROUTE (רק על מסלול מוצע חדש, לא על חיבור קיים). לחיצה
+   שולחת ל-`POST /api/execute`, שמאמת מחדש שהמסלול עדיין תקף
+   (`pathengine.revalidate_route`) ואז קורא ל-`commit_route` +
+   `save_topology` — כך שהמסלול נכתב בפועל ל-`topology.json`. הממשק
+   מעדכן את המצב המקומי ישירות (בלי refetch של קובץ 24MB), והפורטים
+   שהתחדשו הופכים ללחיצים בדיוק כמו חיבור קיים (`showExistingCircuit`).
+   פונקציות מנוע חדשות: `next_circuit_id()`, `revalidate_route()`.
+   נבדק ידנית בדפדפן מקצה לקצה: SHOW ROUTE → EXECUTE → לחיצה חוזרת על
+   הפורט מציגה את החיבור החדש.
 
 ## מה עוד לא נעשה (TODO לפעם הבאה)
 
 1. **חיבור אמיתי ל-API של ITA** — רק `load_topology()`/`commit_route()`
    ב-`pathengine.py` צריכים implementation חדש.
-2. **אין כתיבה אמיתית** — כל Work Order מסתיים ב-`STATUS: PROPOSED`.
+2. **Work Order עדיין תמיד אומר `STATUS: PROPOSED`**, גם אחרי שהמסלול
+   בוצע בפועל דרך כפתור ה-Execute — כדאי לבדוק אם זה מבלבל ולתקן את
+   הניסוח כשמסלול כבר בוצע.
 3. **גישור מעבר ב-EOR/hub כפורט אחד**, לא זוג כניסה/יציאה.
 4. **Work Order כטקסט**, לא Word מעוצב.
 5. **18 העמדות הרזרבה בכל פוד MDA** לא מחוברות בגרף הניתוב כרגע.
@@ -81,7 +93,6 @@ pathengine.py
 ## סטטוס נכון ל-2026-08-19
 
 - Git repo, remote: `github.com/yoavlevenberg/ita-lab.git`.
-- הגרסה הזו (32 פודים + MDA) עוד **לא committed** — המשתמש רוצה לספר
-  (לשפר/לסקור) את הגרסה הראשונית לפני שמציגים אותה, לפני שמתחברים
-  ל-ITA האמיתי.
-- לבדוק `git status` בתחילת סשן.
+- **הכל דחוף ל-GitHub** — מקומי ו-remote מסונכרנים ב-commit `76bad04`
+  (כולל גרסה 3 המלאה + פיצ'ר ה-Execute).
+- לבדוק `git status` בתחילת סשן, ליתר ביטחון.
