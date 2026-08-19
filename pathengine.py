@@ -117,10 +117,10 @@ def _pick_transit_port(topology, rack_id, cable_type, exclude):
 
 
 def describe_port(topology, port_id):
-    """Human-friendly location string, e.g. 'A-S05 / U42 FIB-PP-01 / port 12'."""
+    """Human-friendly location string, e.g. 'D5-N05-U20-P33 (FIB-PP-01)'."""
     p = topology["ports"][port_id]
     dev = topology["devices"][p["device"]]
-    return f"{p['rack']} / U{dev['u_start']} {dev['name']} / port {p['index']}"
+    return f"{p['rack']}-U{dev['u_start']}-P{p['index']} ({dev['name']})"
 
 
 # --------------------------------------------------------------------------

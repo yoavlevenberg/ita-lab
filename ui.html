@@ -9,7 +9,7 @@
     --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
     --text:#e6edf3; --muted:#8b949e;
     --free:#3fb950; --used:#f85149; --amber:#d29922;
-    --src:#58a6ff; --dst:#bc8cff; --path:#e3b341; --eor:#f0883e;
+    --src:#58a6ff; --dst:#bc8cff; --path:#e3b341; --eor:#f0883e; --mda:#3fd9c7;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -63,6 +63,47 @@
     display:flex; align-items:center; gap:8px;
   }
   .card .body{padding:12px; overflow:auto; flex:1}
+
+  /* ---------- data-center overview grid ---------- */
+  .dcmap{display:flex; gap:22px; direction:ltr; align-items:flex-start; flex-wrap:wrap}
+  .column{display:flex; flex-direction:column; gap:6px}
+  .column .colhead{
+    font-size:11px; color:var(--muted); text-align:center; font-weight:700;
+    margin-bottom:2px; letter-spacing:.4px;
+  }
+  .room-label{
+    width:100%; font-size:10.5px; color:var(--muted); text-align:center;
+    margin:0 0 4px; letter-spacing:.5px;
+  }
+  .room-group{display:flex; gap:22px; padding:0 8px 10px; border-radius:8px}
+  .room-group + .room-group{border-right:1px dashed var(--border)}
+  .podtile{
+    width:96px; padding:6px 6px 5px; border:1px solid var(--border); border-radius:6px;
+    background:var(--panel2); cursor:pointer; text-align:center; transition:.12s;
+  }
+  .podtile:hover{border-color:var(--muted); transform:translateY(-1px)}
+  .podtile .pid{font-family:Consolas,monospace; font-size:12.5px; font-weight:700}
+  .podtile .pct{font-size:9.5px; color:var(--muted); margin-top:2px}
+  .podtile .bar{height:3px; border-radius:2px; background:#2d333b; margin-top:3px; overflow:hidden}
+  .podtile.mda{border-color:var(--mda); background:#132321}
+  .podtile.mda .pid{color:var(--mda)}
+  .podtile.on-path{outline:2px solid var(--path); outline-offset:1px}
+  .back-btn{
+    display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted);
+    cursor:pointer; margin-bottom:10px; background:none; border:none; padding:0;
+    font-family:inherit;
+  }
+  .back-btn:hover{color:var(--text)}
+  .mda-info{
+    border:1px dashed var(--mda); border-radius:6px; padding:8px 10px; margin-bottom:12px;
+    font-size:11.5px; color:var(--muted); line-height:1.8;
+  }
+  .mda-info b{color:var(--mda)}
+  .servedchip{
+    display:inline-block; font-family:Consolas,monospace; font-size:10.5px; padding:1px 7px;
+    border:1px solid var(--border); border-radius:9px; margin:2px 3px 0 0; cursor:pointer;
+  }
+  .servedchip:hover{border-color:var(--muted); color:var(--text)}
 
   /* ---------- pod / row map ---------- */
   .map{direction:ltr}
@@ -218,12 +259,13 @@
 <div id="app">
 
   <section class="card">
-    <h2>מפת חווה — פודים ושדרות</h2>
+    <h2 id="mapTitle">מפת חווה — 4 טורים × 8 פודים</h2>
     <div class="legend">
       <span><i style="background:var(--free)"></i>פנוי</span>
       <span><i style="background:var(--amber)"></i>תפוסה בינונית</span>
       <span><i style="background:var(--used)"></i>עמוס</span>
       <span><i style="background:var(--eor)"></i>מסד EOR</span>
+      <span><i style="background:var(--mda)"></i>פוד MDA</span>
       <span><i style="background:var(--path)"></i>על המסלול</span>
     </div>
     <div class="body map" id="map"></div>
@@ -260,9 +302,10 @@
 
 let T = null;                       // the whole topology
 let rackStats = {};                 // rackId -> {free, used, total}
+let podStats = {};                  // podId -> {free, used, total}
 let devicesByRack = {};             // rackId -> [device]
 let portsByDevice = {};             // deviceId -> [port]
-let sel = { src:null, dst:null, rack:null, device:null, focusPort:null };
+let sel = { src:null, dst:null, rack:null, device:null, focusPort:null, view:"overview", pod:null };
 let currentPath = [];               // rack ids highlighted
 let currentSegIds = [];
 let lastWorkOrder = null;
@@ -290,6 +333,12 @@ function index(){
     s.total++; p.status === "used" ? s.used++ : s.free++;
   }
   for (const d in portsByDevice) portsByDevice[d].sort((a,b) => a.index - b.index);
+
+  for (const rid in rackStats){
+    const pod = T.racks[rid].pod, rs = rackStats[rid];
+    const s = (podStats[pod] ||= {free:0, used:0, total:0});
+    s.free += rs.free; s.used += rs.used; s.total += rs.total;
+  }
 }
 
 function renderStats(){
@@ -304,53 +353,132 @@ const heat = pct => pct < 50 ? "var(--free)" : pct < 80 ? "var(--amber)" : "var(
 
 // ----------------------------------------------------------------- map ---
 function renderMap(){
+  $("mapTitle").textContent = sel.view === "pod"
+    ? `פוד ${sel.pod}` : "מפת חווה — 4 טורים × 8 פודים";
+  if (sel.view === "pod" && sel.pod) renderPodDetail(sel.pod);
+  else renderOverview();
+}
+
+function renderOverview(){
   const el = $("map"); el.innerHTML = "";
-  for (const podId of Object.keys(T.pods)){
-    const pod = document.createElement("div"); pod.className = "pod";
-    pod.innerHTML = `<p class="pod-title">POD ${podId}</p>`;
+  const onPathPods = new Set(currentPath.map(r => T.racks[r].pod));
 
-    for (const rowId of Object.keys(T.pods[podId].rows)){
-      const row = T.pods[podId].rows[rowId];
-      const wrap = document.createElement("div"); wrap.className = "row-wrap";
-      wrap.innerHTML = `<div class="row-tag">שדרה <b>${rowId}</b></div>`;
-      const box = document.createElement("div"); box.className = "racks";
+  for (const roomId of Object.keys(T.meta.rooms)){
+    const group = document.createElement("div"); group.className = "room-group";
+    const wrap = document.createElement("div"); wrap.style.width = "100%";
+    wrap.innerHTML = `<div class="room-label">חדר ${roomId}</div>`;
+    const inner = document.createElement("div"); inner.style.display = "flex"; inner.style.gap = "22px";
 
-      for (const rid of row.racks){
-        const meta = T.racks[rid], st = rackStats[rid] || {used:0,total:1};
+    for (const col of T.meta.rooms[roomId]){
+      const colEl = document.createElement("div"); colEl.className = "column";
+      colEl.innerHTML = `<div class="colhead">טור ${col}</div>`;
+
+      for (let num = 1; num <= T.meta.pods_per_column; num++){
+        const pid = col + num, pod = T.pods[pid];
+        const st = podStats[pid] || {used:0, total:1};
         const pct = Math.round(st.used / st.total * 100);
-        const hop = currentPath.indexOf(rid);
-        const d = document.createElement("div");
-        d.className = "rack" + (meta.is_eor ? " eor" : "")
-                    + (sel.rack === rid ? " active" : "")
-                    + (hop >= 0 ? " on-path" : "");
-        d.title = `${rid} — ${st.used}/${st.total} פורטים תפוסים`;
-        d.innerHTML =
-          (hop >= 0 ? `<span class="hop">${hop+1}</span>` : "") +
-          `<div class="rid">${rowId}${String(meta.position).padStart(2,"0")}</div>` +
+        const tile = document.createElement("div");
+        tile.className = "podtile" + (pod.is_mda ? " mda" : "")
+                        + (onPathPods.has(pid) ? " on-path" : "");
+        tile.title = `${pid} — ${st.used}/${st.total} פורטים תפוסים`;
+        tile.innerHTML =
+          `<div class="pid">${pid}</div>` +
           `<div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div>` +
-          `<div class="pct">${meta.is_eor ? "EOR" : pct + "%"}</div>`;
-        d.onclick = () => selectRack(rid);
-        box.appendChild(d);
+          `<div class="pct">${pod.is_mda ? "MDA" : pct + "%"}</div>`;
+        tile.onclick = () => selectPod(pid);
+        colEl.appendChild(tile);
       }
-      wrap.appendChild(box); pod.appendChild(wrap);
+      inner.appendChild(colEl);
     }
-    el.appendChild(pod);
+    wrap.appendChild(inner); group.appendChild(wrap); el.appendChild(group);
   }
 
-  // inter-pod backbone trunks
+  // MDA <-> MDA backbone
   const bb = document.createElement("div"); bb.className = "backbone";
-  bb.innerHTML = `<div style="margin-bottom:4px">גישורי Backbone בין פודים (סיב בלבד)</div>`;
+  bb.innerHTML = `<div style="margin-bottom:4px">גישורי Backbone בין MDA (סיב בלבד)</div>`;
   for (const e of T.edges.filter(e => e.id.includes("<->"))){
     const f = e.cable_types.fiber, pct = Math.round(f.used / f.capacity * 100);
     const on = currentSegIds.includes(e.id);
     bb.innerHTML += `<div class="bb ${on ? "on-path" : ""}">
-        <span class="mono" style="width:132px">${e.id}</span>
+        <span class="mono" style="width:190px">${e.id}</span>
         <span class="pill ${e.domain === "A" ? "a" : "b"}">domain ${e.domain}</span>
         <span class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></span>
         <span style="width:64px;text-align:left">${f.used}/${f.capacity}</span>
       </div>`;
   }
-  $("map").appendChild(bb);
+  el.appendChild(bb);
+}
+
+function renderPodDetail(pid){
+  const el = $("map"); el.innerHTML = "";
+  const pod = T.pods[pid];
+
+  const back = document.createElement("button"); back.className = "back-btn";
+  back.textContent = "→ חזרה למפת החווה";
+  back.onclick = backToOverview;
+  el.appendChild(back);
+
+  const title = document.createElement("p"); title.className = "pod-title";
+  title.innerHTML = `POD <span class="mono">${pid}</span> · חדר ${pod.room} · טור ${pod.column} עמדה ${pod.number}` +
+      (pod.is_mda ? ` <span class="pill" style="border-color:var(--mda);color:var(--mda)">MDA hub</span>` : "");
+  el.appendChild(title);
+
+  const info = document.createElement("div"); info.className = "mda-info";
+  if (pod.is_mda){
+    info.innerHTML = `<b>פוד ייעודי לחיבורים בלבד — אין בו מחשוב.</b><br>
+      משרת ${pod.serves.length} פודים רגילים:
+      ${pod.serves.map(p => `<span class="servedchip" data-pod="${p}">${p}</span>`).join("")}`;
+  } else {
+    info.innerHTML = `שני ה-EOR של הפוד הזה מתחברים ל-MDA
+      <span class="servedchip" data-pod="${pod.mda}">${pod.mda}</span>
+      (דומיין A דרך ${pid}-S01, דומיין B דרך ${pid}-N10).`;
+  }
+  el.appendChild(info);
+  info.querySelectorAll(".servedchip").forEach(n => n.onclick = () => selectPod(n.dataset.pod));
+
+  for (const rowId of Object.keys(pod.rows)){
+    const row = pod.rows[rowId];
+    const wrap = document.createElement("div"); wrap.className = "row-wrap";
+    wrap.innerHTML = `<div class="row-tag">שדרה <b>${rowId}</b></div>`;
+    const box = document.createElement("div"); box.className = "racks";
+
+    for (const rid of row.racks){
+      const meta = T.racks[rid], st = rackStats[rid] || {used:0,total:1};
+      const pct = Math.round(st.used / st.total * 100);
+      const hop = currentPath.indexOf(rid);
+      const d = document.createElement("div");
+      d.className = "rack" + (meta.is_eor ? " eor" : "")
+                  + (sel.rack === rid ? " active" : "")
+                  + (hop >= 0 ? " on-path" : "");
+      d.title = `${rid} — ${st.used}/${st.total} פורטים תפוסים`;
+      d.innerHTML =
+        (hop >= 0 ? `<span class="hop">${hop+1}</span>` : "") +
+        `<div class="rid">${rowId}${String(meta.position).padStart(2,"0")}</div>` +
+        `<div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div>` +
+        `<div class="pct">${meta.is_eor ? "EOR" : pct + "%"}</div>`;
+      d.onclick = () => selectRack(rid);
+      box.appendChild(d);
+    }
+    wrap.appendChild(box); el.appendChild(wrap);
+  }
+}
+
+function selectPod(pid){
+  sel.view = "pod"; sel.pod = pid; sel.rack = null; sel.device = null;
+  renderMap();
+  $("rackPanel").innerHTML = `<div class="empty">בחר מסד מהפוד<br>כדי לראות את תכולת ה-42U</div>`;
+  $("rackTitle").textContent = "תצוגת מסד (42U)";
+  $("devPanel").innerHTML = `<div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>`;
+  $("devTitle").textContent = "פרטי רכיב ופורטים";
+}
+
+function backToOverview(){
+  sel.view = "overview"; sel.pod = null; sel.rack = null; sel.device = null;
+  renderMap();
+  $("rackPanel").innerHTML = `<div class="empty">בחר פוד ואז מסד<br>כדי לראות את תכולת ה-42U</div>`;
+  $("rackTitle").textContent = "תצוגת מסד (42U)";
+  $("devPanel").innerHTML = `<div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>`;
+  $("devTitle").textContent = "פרטי רכיב ופורטים";
 }
 
 // ------------------------------------------------------- rack elevation ---
@@ -463,7 +591,7 @@ function portGroup(title, ports){
 
 function locate(portId){
   const p = T.ports[portId], d = T.devices[p.device];
-  return `${p.rack} / U${d.u_start} ${d.name} / ${p.index}`;
+  return `${p.rack}-U${d.u_start}-P${p.index} (${d.name})`;
 }
 
 // ------------------------------------------------------------ selection ---
@@ -490,7 +618,8 @@ function refreshSlots(){
 }
 
 $("btnClear").onclick = () => {
-  sel = { src:null, dst:null, rack:sel.rack, device:sel.device, focusPort:null };
+  sel = { src:null, dst:null, rack:sel.rack, device:sel.device, focusPort:null,
+          view:sel.view, pod:sel.pod };
   currentPath = []; currentSegIds = []; lastWorkOrder = null;
   refreshSlots(); renderMap(); if (sel.device) renderDevice(); closeDrawer();
 };
