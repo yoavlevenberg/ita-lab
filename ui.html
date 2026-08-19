@@ -46,6 +46,8 @@
   button.primary{background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:600}
   button.primary:hover{background:#388bfd}
   button.ghost{background:transparent}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  button.executed{background:var(--free); border-color:var(--free); color:#04220a}
 
   /* ---------- layout ---------- */
   #app{
@@ -291,6 +293,7 @@
   <div class="dh">
     <h2 id="drawerTitle">מסלול</h2>
     <span class="spacer" style="flex:1"></span>
+    <button class="primary" id="btnExecute">בצע התקנה</button>
     <button id="btnDownload">הורד Work Order</button>
     <button class="ghost" id="btnCloseDrawer">סגור</button>
   </div>
@@ -309,6 +312,7 @@ let sel = { src:null, dst:null, rack:null, device:null, focusPort:null, view:"ov
 let currentPath = [];               // rack ids highlighted
 let currentSegIds = [];
 let lastWorkOrder = null;
+let lastRoute = null;               // the proposed route object, executable until committed
 
 const $ = id => document.getElementById(id);
 
@@ -620,7 +624,7 @@ function refreshSlots(){
 $("btnClear").onclick = () => {
   sel = { src:null, dst:null, rack:sel.rack, device:sel.device, focusPort:null,
           view:sel.view, pod:sel.pod };
-  currentPath = []; currentSegIds = []; lastWorkOrder = null;
+  currentPath = []; currentSegIds = []; lastWorkOrder = null; lastRoute = null;
   refreshSlots(); renderMap(); if (sel.device) renderDevice(); closeDrawer();
 };
 
@@ -646,6 +650,7 @@ function showRoute(route){
   currentSegIds = route.segments.map(s => s.edge_id);
   lastWorkOrder = { name:`WO_${route.src_port}_${route.dst_port}`.replace(/[:|]/g,"-") + ".txt",
                     text:route.work_order };
+  lastRoute = route;
   renderMap();
 
   $("drawerTitle").innerHTML = `מסלול מוצע <span class="pill ${route.domain === "A" ? "a" : "b"}">domain ${route.domain}</span>`;
@@ -682,7 +687,8 @@ function showRoute(route){
 function showExistingCircuit(cid){
   fetch("/api/circuit?id=" + encodeURIComponent(cid)).then(r => r.json()).then(c => {
     if (c.error) return drawerError(c.error);
-    currentPath = c.hop_racks; currentSegIds = c.segment_ids; lastWorkOrder = null;
+    currentPath = c.hop_racks; currentSegIds = c.segment_ids;
+    lastWorkOrder = null; lastRoute = null;
     renderMap();
     $("drawerTitle").innerHTML = `חיבור קיים <span class="mono">${c.id}</span>
         <span class="pill ${c.domain === "A" ? "a" : "b"}">domain ${c.domain}</span>`;
@@ -711,15 +717,79 @@ function showExistingCircuit(cid){
 function drawerError(msg){
   $("drawerTitle").textContent = "לא נמצא מסלול";
   $("drawerBody").innerHTML = `<div class="err" style="grid-column:1/-1">${escapeHtml(msg)}</div>`;
-  lastWorkOrder = null; openDrawer();
+  lastWorkOrder = null; lastRoute = null; openDrawer();
 }
 
 const openDrawer  = () => {
   $("btnDownload").style.display = lastWorkOrder ? "" : "none";
+  $("btnExecute").style.display = lastRoute ? "" : "none";
+  $("btnExecute").disabled = false;
+  $("btnExecute").className = "primary";
+  $("btnExecute").textContent = "בצע התקנה";
   $("drawer").classList.add("open");
 };
 const closeDrawer = () => $("drawer").classList.remove("open");
 $("btnCloseDrawer").onclick = closeDrawer;
+
+// --------------------------------------------------------------- execute ---
+$("btnExecute").onclick = () => {
+  if (!lastRoute) return;
+  $("btnExecute").disabled = true;
+  $("btnExecute").textContent = "מבצע…";
+  fetch("/api/execute", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ route:lastRoute })
+  }).then(r => r.json()).then(res => {
+    if (res.error){
+      $("btnExecute").disabled = false;
+      $("btnExecute").textContent = "בצע התקנה";
+      alert("ביצוע נכשל: " + res.error);
+      return;
+    }
+    applyExecutedCircuit(res.circuit);
+  }).catch(e => {
+    $("btnExecute").disabled = false;
+    $("btnExecute").textContent = "בצע התקנה";
+    alert("שגיאה: " + e);
+  });
+};
+
+function bumpPortStats(portId){
+  const p = T.ports[portId];
+  const rs = rackStats[p.rack]; if (rs){ rs.free--; rs.used++; }
+  const pod = T.racks[p.rack].pod, ps = podStats[pod]; if (ps){ ps.free--; ps.used++; }
+}
+
+function applyExecutedCircuit(circuit){
+  const endpoints = [circuit.a_port, circuit.b_port];
+  for (const pid of endpoints){
+    const p = T.ports[pid];
+    p.status = "used"; p.circuit = circuit.id; p.role = "endpoint";
+    p.peer = pid === circuit.a_port ? circuit.b_port : circuit.a_port;
+    bumpPortStats(pid);
+  }
+  for (const pid of circuit.transit_ports){
+    const p = T.ports[pid];
+    p.status = "used"; p.circuit = circuit.id; p.role = "transit"; p.peer = null;
+    bumpPortStats(pid);
+  }
+  for (const eid of circuit.segment_ids){
+    const e = T.edges.find(e => e.id === eid);
+    if (e) e.cable_types[circuit.cable_type].used++;
+  }
+  (T.circuits ||= {})[circuit.id] = circuit;
+
+  sel.src = null; sel.dst = null; sel.focusPort = null;
+  lastRoute = null;
+  refreshSlots(); renderStats(); renderMap();
+  if (sel.rack) renderRack();
+  if (sel.device) renderDevice();
+
+  $("drawerTitle").innerHTML = `בוצע ✓ <span class="mono">${circuit.id}</span>
+      <span class="pill ${circuit.domain === "A" ? "a" : "b"}">domain ${circuit.domain}</span>
+      <span style="font-size:11px;color:var(--muted);font-weight:400">— נכתב ל-topology.json, אפשר ללחוץ על הפורטים כדי לראות אותו</span>`;
+  $("btnExecute").style.display = "none";
+}
 
 $("btnDownload").onclick = () => {
   if (!lastWorkOrder) return alert("אין Work Order להורדה — חשב מסלול חדש קודם.");

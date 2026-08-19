@@ -211,6 +211,31 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
 # committing  (this is the function that will one day call the ITA API)
 # --------------------------------------------------------------------------
 
+def next_circuit_id(topology):
+    """Next free CIR-#### id, continuing from whatever's already seeded."""
+    nums = [int(cid.split("-", 1)[1]) for cid in topology.get("circuits", {})
+            if cid.startswith("CIR-") and cid.split("-", 1)[1].isdigit()]
+    return f"CIR-{(max(nums) + 1) if nums else 1:04d}"
+
+
+def revalidate_route(topology, route):
+    """A route computed earlier can go stale if something else consumed the
+    same ports/capacity in the meantime. Re-check before committing so
+    commit_route() never has to trust caller-supplied state blindly."""
+    for port_id in (route["src_port"], route["dst_port"]):
+        if topology["ports"][port_id]["status"] != "free":
+            raise RouteError(f"Port '{port_id}' is no longer free — recompute the route.")
+    for tp in route["transit_points"]:
+        if topology["ports"][tp["port"]]["status"] != "free":
+            raise RouteError(f"Transit port '{tp['port']}' is no longer free — recompute the route.")
+    edges = {e["id"]: e for e in topology["edges"]}
+    for seg in route["segments"]:
+        edge = edges.get(seg["edge_id"])
+        ct = edge["cable_types"].get(route["cable_type"]) if edge else None
+        if not ct or ct["used"] >= ct["capacity"]:
+            raise RouteError(f"Trunk '{seg['edge_id']}' no longer has spare capacity — recompute the route.")
+
+
 def commit_route(topology, route, circuit_id):
     """Apply an approved route: consume the ports, charge the trunks, and
     record the circuit. In production this is where the ITA write-back goes."""

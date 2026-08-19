@@ -23,6 +23,9 @@ Endpoints
   GET  /                       the UI
   GET  /api/topology           the whole map (racks, devices, ports, trunks)
   POST /api/route              {src, dst, domain?} -> proposed route + work order
+  POST /api/execute            {route} -> commits a previously-proposed route,
+                                consuming ports/trunk capacity and persisting
+                                it to topology.json as a real circuit
   GET  /api/circuit?id=CIR-1   an existing circuit's path (for SHOW ROUTE on a used port)
 """
 
@@ -76,27 +79,49 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
-        if url.path != "/api/route":
-            return self._send(404, {"error": "not found"})
 
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            req = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            return self._send(400, {"error": "invalid JSON"})
+        if url.path == "/api/route":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._send(400, {"error": "invalid JSON"})
 
-        src, dst = req.get("src"), req.get("dst")
-        domain = req.get("domain") or None
-        if not src or not dst:
-            return self._send(400, {"error": "src and dst are required"})
+            src, dst = req.get("src"), req.get("dst")
+            domain = req.get("domain") or None
+            if not src or not dst:
+                return self._send(400, {"error": "src and dst are required"})
 
-        try:
-            route = pathengine.resolve_path(src, dst, domain=domain, topology=TOPOLOGY)
-        except pathengine.RouteError as e:
-            return self._send(200, {"status": "failed", "reason": str(e)})
+            try:
+                route = pathengine.resolve_path(src, dst, domain=domain, topology=TOPOLOGY)
+            except pathengine.RouteError as e:
+                return self._send(200, {"status": "failed", "reason": str(e)})
 
-        route["work_order"] = workorder.render(route)
-        return self._send(200, route)
+            route["work_order"] = workorder.render(route)
+            return self._send(200, route)
+
+        if url.path == "/api/execute":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                return self._send(400, {"error": "invalid JSON"})
+
+            route = req.get("route")
+            if not route:
+                return self._send(400, {"error": "route is required"})
+
+            try:
+                pathengine.revalidate_route(TOPOLOGY, route)
+            except pathengine.RouteError as e:
+                return self._send(409, {"error": str(e)})
+
+            circuit_id = pathengine.next_circuit_id(TOPOLOGY)
+            circuit = pathengine.commit_route(TOPOLOGY, route, circuit_id)
+            pathengine.save_topology(TOPOLOGY)
+            return self._send(200, {"status": "ok", "circuit": circuit})
+
+        return self._send(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):
         pass  # keep the console clean
