@@ -19,14 +19,29 @@
   }
   code,.mono{font-family:Consolas,"Courier New",monospace; direction:ltr; unicode-bidi:embed}
 
+  ::-webkit-scrollbar{width:9px; height:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#30363d; border-radius:5px}
+  ::-webkit-scrollbar-thumb:hover{background:#484f58}
+
   /* ---------- header ---------- */
   header{
-    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
-    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    padding:11px 18px; background:linear-gradient(180deg,#171c26,var(--panel));
+    border-bottom:1px solid var(--border);
   }
-  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+  header h1{font-size:16.5px; margin:0; font-weight:700; letter-spacing:.2px}
   header h1 span{color:var(--muted); font-weight:400; font-size:13px}
-  .stats{color:var(--muted); font-size:12px}
+  .badge-proto{
+    font-size:10.5px; color:#7ee0ff; background:#0f2733; border:1px solid #1f6f8b;
+    padding:3px 10px; border-radius:20px; font-weight:600; letter-spacing:.2px; white-space:nowrap;
+  }
+  .stats{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
+  .statchip{
+    display:flex; align-items:center; gap:5px; background:var(--panel2); border:1px solid var(--border);
+    border-radius:20px; padding:3.5px 11px 3.5px 10px; font-size:11px; color:var(--muted); white-space:nowrap;
+  }
+  .statchip b{color:var(--text); font-weight:700}
   .spacer{flex:1}
 
   .slot{
@@ -43,11 +58,13 @@
     border:1px solid var(--border); border-radius:6px; padding:6px 12px; cursor:pointer;
   }
   button:hover{border-color:var(--muted)}
-  button.primary{background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:600}
-  button.primary:hover{background:#388bfd}
+  button.primary{background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:600;
+                 box-shadow:0 2px 10px -2px rgba(31,111,235,.55)}
+  button.primary:hover{background:#388bfd; box-shadow:0 2px 14px -1px rgba(56,139,253,.65)}
   button.ghost{background:transparent}
-  button:disabled{opacity:.5; cursor:not-allowed}
-  button.executed{background:var(--free); border-color:var(--free); color:#04220a}
+  button:disabled{opacity:.6; cursor:not-allowed}
+  button.executed{background:var(--free); border-color:var(--free); color:#04220a; font-weight:700}
+  button.executed:disabled{opacity:1}
 
   /* ---------- layout ---------- */
   #app{
@@ -56,14 +73,16 @@
     height:calc(100vh - 53px); overflow:hidden;
   }
   .card{
-    background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
     display:flex; flex-direction:column; max-height:100%; overflow:hidden;
+    box-shadow:0 8px 22px -10px rgba(0,0,0,.55);
   }
   .card > h2{
     margin:0; padding:9px 12px; font-size:12.5px; font-weight:600; color:var(--muted);
     border-bottom:1px solid var(--border); letter-spacing:.3px; flex:none;
     display:flex; align-items:center; gap:8px;
   }
+  .card > h2 .dot{width:7px; height:7px; border-radius:50%; flex:none}
   .card .body{padding:12px; overflow:auto; flex:1}
 
   /* ---------- data-center overview grid ---------- */
@@ -214,12 +233,21 @@
   #drawer .dh h2{font-size:14px; margin:0}
   #drawer .db{padding:14px 16px; overflow:auto; display:grid;
                grid-template-columns:1fr 1fr; gap:18px}
-  .chain{display:flex; flex-wrap:wrap; gap:6px; align-items:center; direction:ltr; margin:8px 0 14px}
-  .chain .n{
-    background:#241f0d; border:1px solid var(--path); color:var(--path);
-    border-radius:5px; padding:3px 9px; font-family:Consolas,monospace; font-size:12px;
+  .jumpwrap{overflow-x:auto; padding:4px 0 2px}
+  .jumpsvg{display:block}
+  .checks{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 2px}
+  .check{
+    display:flex; align-items:center; gap:6px; font-size:11px; padding:4px 10px;
+    border-radius:20px; border:1px solid #2c6b36; background:#122a17; color:#7ee495;
   }
-  .chain .ar{color:var(--muted)}
+  .exec-banner{
+    display:flex; align-items:center; gap:11px; background:#0f2417; border:1px solid #2c6b36;
+    color:#adf0bd; padding:10px 14px; border-radius:8px; font-size:12.5px; margin-bottom:12px;
+  }
+  .exec-banner .ck{
+    width:22px; height:22px; border-radius:50%; background:var(--free); color:#04220a;
+    display:flex; align-items:center; justify-content:center; font-weight:900; font-size:13px; flex:none;
+  }
   .seg{margin-bottom:9px; font-size:11.5px}
   .seg .st{display:flex; justify-content:space-between; gap:10px; margin-bottom:3px}
   .kv{font-size:12px; line-height:1.9}
@@ -242,7 +270,8 @@
 <body>
 
 <header>
-  <h1>ITA Lab <span>— מתכנן מסלולים פיזיים (סביבת בדיקות)</span></h1>
+  <h1>ITA Lab <span>— מתכנן מסלולים פיזיים</span></h1>
+  <span class="badge-proto">אב-טיפוס עצמאי · לא מחובר ל-ITA</span>
   <div class="stats" id="stats">טוען…</div>
   <div class="spacer"></div>
 
@@ -261,7 +290,7 @@
 <div id="app">
 
   <section class="card">
-    <h2 id="mapTitle">מפת חווה — 4 טורים × 8 פודים</h2>
+    <h2><span class="dot" style="background:var(--src)"></span><span id="mapTitle">מפת חווה — 4 טורים × 8 פודים</span></h2>
     <div class="legend">
       <span><i style="background:var(--free)"></i>פנוי</span>
       <span><i style="background:var(--amber)"></i>תפוסה בינונית</span>
@@ -274,14 +303,14 @@
   </section>
 
   <section class="card">
-    <h2 id="rackTitle">תצוגת מסד (42U)</h2>
+    <h2><span class="dot" style="background:var(--eor)"></span><span id="rackTitle">תצוגת מסד (42U)</span></h2>
     <div class="body" id="rackPanel">
       <div class="empty">בחר מסד מהמפה<br>כדי לראות את תכולת ה-42U</div>
     </div>
   </section>
 
   <section class="card">
-    <h2 id="devTitle">פרטי רכיב ופורטים</h2>
+    <h2><span class="dot" style="background:var(--dst)"></span><span id="devTitle">פרטי רכיב ופורטים</span></h2>
     <div class="body" id="devPanel">
       <div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>
     </div>
@@ -348,9 +377,13 @@ function index(){
 function renderStats(){
   const ports = Object.keys(T.ports).length;
   const used = Object.values(T.ports).filter(p => p.status === "used").length;
-  $("stats").textContent =
-    `${Object.keys(T.racks).length} מסדים · ${Object.keys(T.devices).length} רכיבים · ` +
-    `${ports} פורטים (${used} תפוסים) · ${Object.keys(T.circuits).length} חיבורים קיימים`;
+  const chips = [
+    [Object.keys(T.racks).length, "מסדים"],
+    [Object.keys(T.devices).length, "רכיבים"],
+    [`${ports} (${used} תפוסים)`, "פורטים"],
+    [Object.keys(T.circuits).length, "חיבורים קיימים"],
+  ];
+  $("stats").innerHTML = chips.map(([v, l]) => `<span class="statchip"><b>${v}</b>${l}</span>`).join("");
 }
 
 const heat = pct => pct < 50 ? "var(--free)" : pct < 80 ? "var(--amber)" : "var(--used)";
@@ -628,6 +661,43 @@ $("btnClear").onclick = () => {
   refreshSlots(); renderMap(); if (sel.device) renderDevice(); closeDrawer();
 };
 
+// ------------------------------------------------------- cable jump diagram ---
+function renderJumpChain(hopRacks, portIds){
+  const RACK_W = 64, GAP = 54, JH = 5, U = T.meta.rack_u, TOP = 26, BODY_H = U * JH;
+  const W = hopRacks.length * RACK_W + (hopRacks.length - 1) * GAP;
+  const H = TOP + BODY_H + 34;
+
+  const nodes = hopRacks.map((rid, i) => {
+    const p = T.ports[portIds[i]], d = T.devices[p.device];
+    const cy = TOP + (U - d.u_start) * JH + JH / 2;
+    const color = i === 0 ? "var(--src)" : i === hopRacks.length - 1 ? "var(--dst)" : "var(--path)";
+    return { x: i * (RACK_W + GAP), rid, u: d.u_start, idx: p.index, cy, color,
+             isEor: T.racks[rid].is_eor };
+  });
+
+  let svg = `<svg class="jumpsvg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`;
+  for (let i = 0; i < nodes.length - 1; i++){
+    const a = nodes[i], b = nodes[i + 1], x1 = a.x + RACK_W, x2 = b.x, cx = GAP * 0.5;
+    svg += `<path d="M${x1},${a.cy} C${x1 + cx},${a.cy} ${x2 - cx},${b.cy} ${x2},${b.cy}"
+             fill="none" stroke="var(--path)" stroke-width="2.4" opacity=".9"/>`;
+  }
+  nodes.forEach((n, i) => {
+    const strokeCol = n.isEor ? "var(--eor)" : "var(--border)";
+    svg += `<rect x="${n.x}" y="${TOP}" width="${RACK_W}" height="${BODY_H}" rx="4"
+             fill="var(--panel2)" stroke="${strokeCol}"/>`;
+    svg += `<rect x="${n.x}" y="${TOP + (U - n.u) * JH}" width="${RACK_W}" height="${JH}"
+             fill="${n.color}" opacity=".9"/>`;
+    if (i > 0) svg += `<circle cx="${n.x}" cy="${n.cy}" r="3.4" fill="${n.color}"/>`;
+    if (i < nodes.length - 1) svg += `<circle cx="${n.x + RACK_W}" cy="${n.cy}" r="3.4" fill="${n.color}"/>`;
+    svg += `<text x="${n.x + RACK_W / 2}" y="${TOP - 9}" text-anchor="middle"
+             font-family="Consolas,monospace" font-size="10.5" fill="${n.isEor ? 'var(--eor)' : 'var(--text)'}">${n.rid}</text>`;
+    svg += `<text x="${n.x + RACK_W / 2}" y="${TOP + BODY_H + 15}" text-anchor="middle"
+             font-family="Consolas,monospace" font-size="10" fill="${n.color}">U${n.u}-P${n.idx}</text>`;
+  });
+  svg += `</svg>`;
+  return `<div class="jumpwrap">${svg}</div>`;
+}
+
 // --------------------------------------------------------------- routing ---
 $("btnRoute").onclick = () => {
   const fp = sel.focusPort && T.ports[sel.focusPort];
@@ -654,7 +724,17 @@ function showRoute(route){
   renderMap();
 
   $("drawerTitle").innerHTML = `מסלול מוצע <span class="pill ${route.domain === "A" ? "a" : "b"}">domain ${route.domain}</span>`;
+  const jumpPorts = [route.src_port, ...route.transit_points.map(t => t.port), route.dst_port];
   $("drawerBody").innerHTML = `
+    <div style="grid-column:1/-1">
+      <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
+      ${renderJumpChain(route.hop_racks, jumpPorts)}
+      <div class="checks">
+        <span class="check">✓ סוג כבל תואם קצה-לקצה (${route.cable_type === "fiber" ? "סיב↔סיב" : "נחושת↔נחושת"})</span>
+        <span class="check">✓ קיבולת פנויה אומתה בכל אחד מ-${route.segments.length} המקטעים</span>
+        <span class="check">✓ המסלול כולו בדומיין ${route.domain} — אפס חפיפה עם הרגל השנייה</span>
+      </div>
+    </div>
     <div>
       <div class="kv">
         <div><span class="k">סוג כבל</span> ${route.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
@@ -663,10 +743,7 @@ function showRoute(route){
         <div><span class="k">מקור</span> <span class="mono">${route.src_location}</span></div>
         <div><span class="k">יעד</span> <span class="mono">${route.dst_location}</span></div>
       </div>
-      <h3 style="font-size:12px;color:var(--muted);margin:14px 0 0">מסדים שהמסלול עובר דרכם</h3>
-      <div class="chain">${route.hop_racks.map((r,i) =>
-          `<span class="n">${i+1}. ${r}</span>`).join('<span class="ar">→</span>')}</div>
-      <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים ותפוסה (לפני העבודה)</h3>
+      <h3 style="font-size:12px;color:var(--muted);margin:14px 0 8px">מקטעים ותפוסה (לפני העבודה)</h3>
       ${route.segments.map(s => {
         const pct = Math.round(s.used_before / s.capacity * 100);
         return `<div class="seg">
@@ -679,7 +756,7 @@ function showRoute(route){
     </div>
     <div>
       <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">Work Order</h3>
-      <pre class="wo">${escapeHtml(route.work_order)}</pre>
+      <pre class="wo" id="woText">${escapeHtml(route.work_order)}</pre>
     </div>`;
   openDrawer();
 }
@@ -692,7 +769,12 @@ function showExistingCircuit(cid){
     renderMap();
     $("drawerTitle").innerHTML = `חיבור קיים <span class="mono">${c.id}</span>
         <span class="pill ${c.domain === "A" ? "a" : "b"}">domain ${c.domain}</span>`;
+    const jumpPorts = [c.a_port, ...c.transit_ports, c.b_port];
     $("drawerBody").innerHTML = `
+      <div style="grid-column:1/-1">
+        <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
+        ${renderJumpChain(c.hop_racks, jumpPorts)}
+      </div>
       <div>
         <div class="kv">
           <div><span class="k">סוג כבל</span> ${c.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
@@ -700,9 +782,6 @@ function showExistingCircuit(cid){
           <div><span class="k">קצה A</span> <span class="mono">${c.a_location}</span></div>
           <div><span class="k">קצה B</span> <span class="mono">${c.b_location}</span></div>
         </div>
-        <h3 style="font-size:12px;color:var(--muted);margin:14px 0 0">מסדים שהחיבור עובר דרכם</h3>
-        <div class="chain">${c.hop_racks.map((r,i) =>
-            `<span class="n">${i+1}. ${r}</span>`).join('<span class="ar">→</span>')}</div>
       </div>
       <div>
         <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים פיזיים</h3>
@@ -746,7 +825,7 @@ $("btnExecute").onclick = () => {
       alert("ביצוע נכשל: " + res.error);
       return;
     }
-    applyExecutedCircuit(res.circuit);
+    applyExecutedCircuit(res.circuit, res.work_order);
   }).catch(e => {
     $("btnExecute").disabled = false;
     $("btnExecute").textContent = "בצע התקנה";
@@ -760,7 +839,11 @@ function bumpPortStats(portId){
   const pod = T.racks[p.rack].pod, ps = podStats[pod]; if (ps){ ps.free--; ps.used++; }
 }
 
-function applyExecutedCircuit(circuit){
+function applyExecutedCircuit(circuit, workOrderText){
+  if (workOrderText){
+    lastWorkOrder = { name:`WO_${circuit.id}.txt`, text:workOrderText };
+    const wo = $("woText"); if (wo) wo.textContent = workOrderText;
+  }
   const endpoints = [circuit.a_port, circuit.b_port];
   for (const pid of endpoints){
     const p = T.ports[pid];
@@ -785,10 +868,17 @@ function applyExecutedCircuit(circuit){
   if (sel.rack) renderRack();
   if (sel.device) renderDevice();
 
-  $("drawerTitle").innerHTML = `בוצע ✓ <span class="mono">${circuit.id}</span>
-      <span class="pill ${circuit.domain === "A" ? "a" : "b"}">domain ${circuit.domain}</span>
-      <span style="font-size:11px;color:var(--muted);font-weight:400">— נכתב ל-topology.json, אפשר ללחוץ על הפורטים כדי לראות אותו</span>`;
-  $("btnExecute").style.display = "none";
+  $("drawerTitle").innerHTML = `<span class="mono">${circuit.id}</span>
+      <span class="pill ${circuit.domain === "A" ? "a" : "b"}">domain ${circuit.domain}</span>`;
+  const banner = document.createElement("div");
+  banner.className = "exec-banner";
+  banner.style.gridColumn = "1/-1";
+  banner.innerHTML = `<span class="ck">✓</span><div><b>ההתקנה בוצעה ונכתבה בפועל ל-topology.json</b><br>
+      <span style="color:var(--muted)">מזהה חיבור <span class="mono">${circuit.id}</span> — אפשר ללחוץ על הפורטים במפה כדי לראות את החיבור</span></div>`;
+  $("drawerBody").prepend(banner);
+  $("btnExecute").disabled = true;
+  $("btnExecute").className = "executed";
+  $("btnExecute").textContent = `✓ בוצע — ${circuit.id}`;
 }
 
 $("btnDownload").onclick = () => {

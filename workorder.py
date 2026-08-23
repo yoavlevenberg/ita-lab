@@ -14,7 +14,7 @@ Word template.
 from datetime import datetime
 
 
-def render(route, order_id=None):
+def render(route, order_id=None, circuit_id=None):
     order_id = order_id or f"WO-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     L = []
     L.append("=" * 68)
@@ -58,7 +58,10 @@ def render(route, order_id=None):
         L.append(f"  {seg['edge_id']:<24} {seg['used_before']:>3}/{seg['capacity']:<3} used, "
                  f"{seg['remaining_before']:>3} free")
     L.append("")
-    L.append("STATUS: PROPOSED — not yet written to ITA.")
-    L.append("        Requires network engineer approval before commit.")
+    if circuit_id:
+        L.append(f"STATUS: EXECUTED — committed as {circuit_id}, written to topology.json.")
+    else:
+        L.append("STATUS: PROPOSED — not yet written to ITA.")
+        L.append("        Requires network engineer approval before commit.")
     L.append("=" * 68)
     return "\n".join(L)

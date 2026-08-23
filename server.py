@@ -25,7 +25,9 @@ Endpoints
   POST /api/route              {src, dst, domain?} -> proposed route + work order
   POST /api/execute            {route} -> commits a previously-proposed route,
                                 consuming ports/trunk capacity and persisting
-                                it to topology.json as a real circuit
+                                it to topology.json as a real circuit; also
+                                returns a re-rendered Work Order stamped
+                                EXECUTED with the new circuit id
   GET  /api/circuit?id=CIR-1   an existing circuit's path (for SHOW ROUTE on a used port)
 """
 
@@ -119,7 +121,8 @@ class Handler(BaseHTTPRequestHandler):
             circuit_id = pathengine.next_circuit_id(TOPOLOGY)
             circuit = pathengine.commit_route(TOPOLOGY, route, circuit_id)
             pathengine.save_topology(TOPOLOGY)
-            return self._send(200, {"status": "ok", "circuit": circuit})
+            work_order = workorder.render(route, circuit_id=circuit_id)
+            return self._send(200, {"status": "ok", "circuit": circuit, "work_order": work_order})
 
         return self._send(404, {"error": "not found"})
 
