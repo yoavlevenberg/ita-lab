@@ -53,9 +53,13 @@ def _shared_strings(z):
     return [_text_of(si) for si in root.findall(f"{NS}si")]
 
 
-def _first_sheet_path(z):
-    """Resolve the first sheet through the workbook rels, rather than assuming
-    xl/worksheets/sheet1.xml — Excel does not always name it that."""
+def _sheet_paths(z):
+    """Every sheet in the workbook, as an ordered {name: part path}.
+
+    Resolved through the workbook relationships rather than by assuming
+    xl/worksheets/sheet1.xml — Excel does not always name the parts that way,
+    and a file with several tabs needs them matched by name.
+    """
     try:
         wb = ET.fromstring(z.read("xl/workbook.xml"))
         rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
@@ -67,12 +71,28 @@ def _first_sheet_path(z):
     if sheets is None or not len(sheets):
         raise XlsxError("the workbook has no sheets")
 
-    rid = sheets[0].get(f"{DOC_REL}id")
-    target = targets.get(rid)
-    if not target:
-        raise XlsxError("could not resolve the first sheet")
-    target = target.lstrip("/")
-    return target if target.startswith("xl/") else f"xl/{target}"
+    out = {}
+    for sheet in sheets:
+        target = targets.get(sheet.get(f"{DOC_REL}id"))
+        if not target:
+            continue
+        target = target.lstrip("/")
+        out[sheet.get("name") or f"Sheet{len(out) + 1}"] = (
+            target if target.startswith("xl/") else f"xl/{target}")
+    if not out:
+        raise XlsxError("could not resolve any sheet in the workbook")
+    return out
+
+
+def sheet_names(path_or_file):
+    """Tab names, in workbook order — so a caller can ask 'is there a Devices
+    tab?' without reading the whole file."""
+    with zipfile.ZipFile(path_or_file) as z:
+        return list(_sheet_paths(z))
+
+
+def _first_sheet_path(z):
+    return next(iter(_sheet_paths(z).values()))
 
 
 def _cell_value(cell, shared):
@@ -102,7 +122,7 @@ def _cell_value(cell, shared):
     return raw
 
 
-def read_rows(path_or_file):
+def read_rows(path_or_file, sheet=None):
     """Every row as (excel_row_number, [cell strings]), padded so all rows are
     equal width. Blank trailing rows are dropped.
 
@@ -118,10 +138,21 @@ def read_rows(path_or_file):
                         "is an old .xls, re-save it as .xlsx")
     with z:
         shared = _shared_strings(z)
-        sheet = ET.fromstring(z.read(_first_sheet_path(z)))
+        if sheet is None:
+            part = _first_sheet_path(z)
+        else:
+            paths = _sheet_paths(z)
+            # tab names are typed by hand, so match them forgivingly
+            match = next((p for name, p in paths.items()
+                          if _norm(name) == _norm(sheet)), None)
+            if match is None:
+                raise XlsxError(f"no sheet named '{sheet}' — this workbook has: "
+                                + ", ".join(paths))
+            part = match
+        doc = ET.fromstring(z.read(part))
 
         rows, width = [], 0
-        for n, row in enumerate(sheet.iter(f"{NS}row"), start=1):
+        for n, row in enumerate(doc.iter(f"{NS}row"), start=1):
             try:
                 rownum = int(row.get("r"))
             except (TypeError, ValueError):
@@ -147,7 +178,7 @@ def read_rows(path_or_file):
 ROW_KEY = "__row__"      # real Excel line number, attached to every returned dict
 
 
-def read_sheet(path_or_file, required=(), required_any=()):
+def read_sheet(path_or_file, required=(), required_any=(), sheet=None):
     """Rows as dicts keyed by the header row, each carrying its true Excel
     line number under ROW_KEY. Header matching is case- and space-insensitive
     so 'Src Port', 'SRC_PORT' and 'src port' all work — real demand sheets are
@@ -164,7 +195,7 @@ def read_sheet(path_or_file, required=(), required_any=()):
     non-empty row did contain, which is far easier to act on than a KeyError
     deep inside the planner.
     """
-    rows = read_rows(path_or_file)
+    rows = read_rows(path_or_file, sheet=sheet)
     if not rows:
         raise XlsxError("the sheet is empty")
 

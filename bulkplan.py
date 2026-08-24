@@ -30,9 +30,12 @@ PREFERENCES
 """
 
 import copy
+import re
 from collections import Counter, OrderedDict, defaultdict
 
 import pathengine
+import placement
+import serials
 import xlsxreader
 
 DEFAULT_PREFS = {
@@ -50,10 +53,32 @@ class BulkError(Exception):
 # reading the demand list
 # --------------------------------------------------------------------------
 
-SRC_ALIASES = ("SRC_PORT", "SOURCE_PORT", "SRC", "SOURCE", "A_PORT", "FROM_PORT", "FROM")
+SRC_ALIASES = ("SRC_PORT", "SOURCE_PORT", "SRC", "SOURCE", "A_PORT", "FROM_PORT", "FROM",
+               "SRC_SERIAL", "A_SERIAL")
 DST_ALIASES = ("DST_PORT", "DEST_PORT", "DESTINATION_PORT", "DST", "DEST",
-               "B_PORT", "TO_PORT", "TO")
+               "B_PORT", "TO_PORT", "TO", "DST_SERIAL", "B_SERIAL")
 GROUP_ALIASES = ("GROUP", "GROUP_ID", "BUNDLE", "SERVICE", "NETWORK", "VLAN")
+CABLE_ALIASES = ("CABLE", "CABLE_TYPE", "MEDIA", "TYPE", "CONNECTION_TYPE", "LINK_TYPE")
+
+# ---- the Devices tab: what is arriving, not what it connects to -----------
+DEV_SERIAL_ALIASES = ("SERIAL", "SERIAL_NUMBER", "SN", "S_N", "ASSET", "ASSET_TAG")
+DEV_TYPE_ALIASES = ("TYPE", "DEVICE_TYPE", "KIND", "CATEGORY", "ROLE")
+DEV_USIZE_ALIASES = ("U_SIZE", "U", "USIZE", "HEIGHT", "RU", "SIZE_U", "UNITS")
+DEV_FIBER_ALIASES = ("FIBER", "FIBER_PORTS", "FIBRE", "FIBRE_PORTS", "SFP", "OPTICAL_PORTS")
+DEV_COPPER_ALIASES = ("COPPER", "COPPER_PORTS", "RJ45", "ETHERNET_PORTS", "UTP")
+DEV_LABEL_ALIASES = ("LABEL", "MODEL", "DESCRIPTION", "NAME", "PRODUCT")
+
+# what TYPE strings people actually write, mapped to the model's vocabulary
+TYPE_SYNONYMS = {
+    "switch": "switch", "sw": "switch", "tor": "switch", "leaf": "switch",
+    "spine": "switch", "core": "switch", "router": "switch",
+    "server": "server", "srv": "server", "host": "server", "node": "server",
+    "compute": "server", "storage": "server", "appliance": "server",
+    "fiber_patch_panel": "fiber_patch_panel", "fiber_panel": "fiber_patch_panel",
+    "fibre_panel": "fiber_patch_panel", "fpp": "fiber_patch_panel",
+    "copper_patch_panel": "copper_patch_panel", "copper_panel": "copper_patch_panel",
+    "cpp": "copper_patch_panel", "patch_panel": "copper_patch_panel",
+}
 
 
 def _pick(row, aliases):
@@ -64,12 +89,74 @@ def _pick(row, aliases):
     return ""
 
 
+P2P_SHEET_NAMES = ("P2P", "DEMANDS", "PORT_TO_PORT", "CONNECTIONS", "LINKS")
+DEVICES_SHEET_NAMES = ("DEVICES", "NEW_DEVICES", "EQUIPMENT", "HARDWARE")
+
+
+def _find_sheet(path_or_file, candidates):
+    """Locate a tab by any of its accepted names, case- and spacing-insensitive."""
+    have = {xlsxreader._norm(n): n for n in xlsxreader.sheet_names(path_or_file)}
+    for want in candidates:
+        if want in have:
+            return have[want]
+    return None
+
+
 def read_demand_sheet(path_or_file):
-    """Read a demand spreadsheet into demand records. Keeps the knowledge of
-    which columns matter in one place — callers just hand over the file."""
-    rows = xlsxreader.read_sheet(path_or_file,
+    """Read the port-to-port tab into demand records. Keeps the knowledge of
+    which columns matter in one place — callers just hand over the file.
+
+    A single-tab workbook is read as-is, so sheets written before the Devices
+    tab existed keep working.
+    """
+    sheet = _find_sheet(path_or_file, P2P_SHEET_NAMES)
+    rows = xlsxreader.read_sheet(path_or_file, sheet=sheet,
                                  required_any=(SRC_ALIASES, DST_ALIASES))
     return demands_from_rows(rows)
+
+
+def read_device_sheet(path_or_file):
+    """Read the Devices tab: the spec of kit that has not been installed yet.
+
+    Returns [] when there is no such tab, so the caller can tell "no new
+    devices" apart from "a broken Devices tab".
+    """
+    sheet = _find_sheet(path_or_file, DEVICES_SHEET_NAMES)
+    if sheet is None:
+        return []
+    rows = xlsxreader.read_sheet(path_or_file, sheet=sheet,
+                                 required_any=(DEV_SERIAL_ALIASES,))
+    return devices_from_rows(rows)
+
+
+def _int(value, default=0):
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def devices_from_rows(rows):
+    """Turn Devices-tab rows into device specs. Nothing is resolved or placed
+    here — this only says what each box IS."""
+    out = []
+    for i, row in enumerate(rows, start=2):
+        serial = _pick(row, DEV_SERIAL_ALIASES)
+        if not serial:
+            continue
+        raw_type = _pick(row, DEV_TYPE_ALIASES)
+        key = re.sub(r"[\s\-]+", "_", raw_type.strip().lower())
+        out.append({
+            "row": row.get(xlsxreader.ROW_KEY, i),
+            "serial": serials.normalise(serial),
+            "raw_type": raw_type,
+            "type": TYPE_SYNONYMS.get(key, key or "server"),
+            "u_size": _int(_pick(row, DEV_USIZE_ALIASES), 0),
+            "fiber_ports": _int(_pick(row, DEV_FIBER_ALIASES), 0),
+            "copper_ports": _int(_pick(row, DEV_COPPER_ALIASES), 0),
+            "label": _pick(row, DEV_LABEL_ALIASES) or raw_type or "New device",
+        })
+    return out
 
 
 def demands_from_rows(rows):
@@ -89,6 +176,9 @@ def demands_from_rows(rows):
             "src": src,
             "dst": dst,
             "group": _pick(row, GROUP_ALIASES),
+            # only needed when an endpoint is given as a serial: the device has
+            # both fibre and copper ports, so the sheet has to say which
+            "cable": _pick(row, CABLE_ALIASES).strip().lower(),
             # a half-filled row is a typo in the sheet, not a routing failure —
             # saying so here beats "Port '' does not exist" from deep inside
             "malformed": "" if (src and dst) else
@@ -104,20 +194,163 @@ def demands_from_rows(rows):
 
 
 # --------------------------------------------------------------------------
+# resolving what an endpoint refers to
+# --------------------------------------------------------------------------
+# A P2P cell holds either a port id (A1-S05:FIB-PP-01:2) or a device serial
+# (SN-7QK2M4XP01). A serial says "this box" without saying which of its ports,
+# so the planner picks a free one of the right media — the same way it already
+# picks cross-connect ports along a route.
+
+def looks_like_serial(text):
+    return str(text).strip().upper().startswith(serials.PREFIX)
+
+
+def endpoint_kind(topology, text, serial_index, new_serials):
+    """What a cell refers to: an existing port, an existing device, a device
+    the sheet is introducing, or nothing recognisable."""
+    if not text:
+        return "empty"
+    if text in topology["ports"]:
+        return "port"
+    if looks_like_serial(text):
+        s = serials.normalise(text)
+        if s in new_serials:
+            return "new_device"
+        if s in serial_index:
+            return "device"
+        return "unknown_serial"
+    return "unknown_port"
+
+
+def free_port_on_device(topology, device_id, cable_type, exclude=()):
+    """Lowest-numbered free port of the right media on a device."""
+    best = None
+    for pid, p in topology["ports"].items():
+        if (p["device"] == device_id and p["status"] == "free"
+                and p["type"] == cable_type and pid not in exclude):
+            if best is None or p["index"] < topology["ports"][best]["index"]:
+                best = pid
+    return best
+
+
+# --------------------------------------------------------------------------
 # preflight validation
 # --------------------------------------------------------------------------
 # Checked BEFORE any routing happens, so a sheet with typos comes back as one
 # list of problems to fix rather than as a half-planned run. Everything here is
 # read-only and cheap — no graph search, no copying of the topology.
 
-def validate(topology, demands):
+VALID_TYPES = ("switch", "server", "fiber_patch_panel", "copper_patch_panel")
+
+
+def validate_devices(topology, new_devices, demands=()):
+    """Check the Devices tab before anything is sited.
+
+    Placement is the expensive step and it mutates a working copy, so every
+    problem that can be seen from the spec alone is reported first.
+    """
+    issues = []
+    known = serials.index(topology)
+    seen = {}
+
+    def fault(d, kind, message):
+        issues.append({"row": d["row"], "kind": kind, "message": message,
+                       "serial": d.get("serial", "")})
+
+    for d in sorted(new_devices, key=lambda x: x["row"]):
+        serial = d["serial"]
+
+        if not serial or serial == serials.PREFIX:
+            fault(d, "no_serial", "this row has no serial number")
+            continue
+        if serial in seen:
+            fault(d, "duplicate_serial",
+                  f"serial {serial} is already declared on row {seen[serial]}")
+            continue
+        if serial in known:
+            dev = topology["devices"][known[serial]]
+            fault(d, "serial_exists",
+                  f"serial {serial} already belongs to {dev['label']} in {dev['rack']} "
+                  "— it is installed, not new")
+            continue
+        seen[serial] = d["row"]
+
+        if not 1 <= d["u_size"] <= placement.RACK_U:
+            fault(d, "bad_u_size",
+                  f"U_SIZE must be between 1 and {placement.RACK_U} (got '{d['u_size']}')")
+            continue
+        if d["fiber_ports"] + d["copper_ports"] <= 0:
+            fault(d, "no_ports",
+                  "this device declares no ports, so nothing can be cabled to it "
+                  "(set FIBER and/or COPPER)")
+            continue
+        if d["type"] not in VALID_TYPES:
+            fault(d, "unknown_type",
+                  f"unrecognised TYPE '{d['raw_type']}' — use one of: "
+                  + ", ".join(VALID_TYPES))
+            continue
+
+        # is there anywhere at all it could go?
+        if not any(placement.positions_for(topology, r, d["u_size"])
+                   for r in placement.eligible_racks(topology)):
+            fault(d, "no_space",
+                  f"no cabinet anywhere has {d['u_size']}U of contiguous free space")
+            continue
+
+        # how many links does the sheet ask of it, and can its ports carry them?
+        wanted = Counter()
+        for dem in demands:
+            ends = [dem.get("src", ""), dem.get("dst", "")]
+            if not any(looks_like_serial(e) and serials.normalise(e) == serial for e in ends):
+                continue
+            cable = (dem.get("cable") or "").strip().lower()
+            wanted[{"fibre": "fiber"}.get(cable, cable)] += 1
+        over = [f"{n} {k} link(s) but only "
+                f"{d['fiber_ports'] if k == 'fiber' else d['copper_ports']} {k} port(s)"
+                for k, n in wanted.items()
+                if k in ("fiber", "copper")
+                and n > (d["fiber_ports"] if k == "fiber" else d["copper_ports"])]
+        if over:
+            fault(d, "not_enough_ports",
+                  "the P2P tab asks for " + "; ".join(over))
+            continue
+
+    # a mutual dependency can only be seen across rows
+    links = [(serials.normalise(x.get("src", "")), serials.normalise(x.get("dst", "")))
+             for x in demands
+             if looks_like_serial(x.get("src", "")) and looks_like_serial(x.get("dst", ""))]
+    _, cycles = placement.order_by_dependency(new_devices, links)
+    for serial in cycles:
+        spec = next((d for d in new_devices if d["serial"] == serial), None)
+        if spec and not any(i["row"] == spec["row"] for i in issues):
+            fault(spec, "dependency_cycle",
+                  "this device and another new device each wait for the other to be "
+                  "placed — one of them must connect to something already installed")
+
+    bad = {i["row"] for i in issues}
+    return {
+        "total": len(new_devices),
+        "ok": len(new_devices) - len(bad),
+        "problems": len(bad),
+        "issues": sorted(issues, key=lambda i: i["row"]),
+        "by_kind": dict(Counter(i["kind"] for i in issues)),
+    }
+
+
+def validate(topology, demands, new_devices=()):
     """Check every row against the map and against the rest of the sheet.
 
     Returns one issue record per problem row plus a summary. A row can only
     hold one fault: the first thing wrong with it is the thing to fix, and
     listing three consequences of one typo just makes the report harder to read.
+
+    `new_devices` are the specs from the Devices tab. A row may name one of
+    them by serial even though it is not installed yet — that is the whole
+    point of declaring it — so those serials count as resolvable here.
     """
     ports = topology["ports"]
+    known_serials = serials.index(topology)
+    new_serials = {d["serial"] for d in new_devices}
     issues, seen_pairs = [], {}
 
     # A physical port can host exactly one connection, so the same port must
@@ -146,6 +379,30 @@ def validate(topology, demands):
             fault(d, "same_port", "source and destination are the same port")
             continue
 
+        # An endpoint given as a serial names a BOX, not a port. Which port it
+        # lands on is decided during planning, so the checks below — port
+        # exists, port free, media matches — cannot apply to it. What can be
+        # checked is that the serial resolves and that the row says which media.
+        serial_ends = [e for e in (src, dst) if looks_like_serial(e)]
+        if serial_ends:
+            unresolved = [e for e in serial_ends
+                          if serials.normalise(e) not in new_serials
+                          and serials.normalise(e) not in known_serials]
+            if unresolved:
+                fault(d, "unknown_serial",
+                      "no device has serial " + ", ".join(serials.normalise(e)
+                                                          for e in unresolved)
+                      + " — it is neither installed nor declared on the Devices tab")
+                continue
+            cable = (d.get("cable") or "").strip().lower()
+            if cable.replace("fibre", "fiber") not in ("fiber", "copper"):
+                fault(d, "no_cable_type",
+                      "this row names a device by serial, so it must also say which "
+                      "media to use — add a CABLE column with 'fiber' or 'copper'")
+                continue
+            # anything further depends on placement, which has not happened yet
+            continue
+
         missing = [p for p in (src, dst) if p not in ports]
         if missing:
             fault(d, "unknown_port",
@@ -165,10 +422,9 @@ def validate(topology, demands):
                   f"cable type mismatch: source is {a['type']}, destination is {b['type']}")
             continue
 
-        if a["rack"] == b["rack"]:
-            fault(d, "same_rack",
-                  f"both ports are in {a['rack']} — an intra-rack patch needs no trunk routing")
-            continue
+        # Two ports in one cabinet used to be rejected; it is now the cheapest
+        # possible connection (a single patch lead, no trunk consumed) and is
+        # exactly what the placement planner aims for.
 
         clash = sorted({claimed_by[p] for p in (src, dst) if p in claimed_by})
         if clash:
@@ -193,6 +449,125 @@ def validate(topology, demands):
         "issues": sorted(issues, key=lambda i: i["row"]),
         "by_kind": dict(Counter(i["kind"] for i in issues)),
     }
+
+
+# --------------------------------------------------------------------------
+# placing new devices
+# --------------------------------------------------------------------------
+
+def _neighbour_racks(topology, serial, demands, serial_index, placed):
+    """Which cabinets a not-yet-installed device has to reach, taken from the
+    P2P rows that name it. This is the whole reason placement can be automatic:
+    the sheet already says what the box talks to."""
+    racks = []
+    for d in demands:
+        ends = [d["src"], d["dst"]]
+        if not any(looks_like_serial(e) and serials.normalise(e) == serial for e in ends):
+            continue
+        for other in ends:
+            if looks_like_serial(other) and serials.normalise(other) == serial:
+                continue
+            if other in topology["ports"]:
+                racks.append(topology["ports"][other]["rack"])
+            elif looks_like_serial(other):
+                o = serials.normalise(other)
+                if o in placed:                       # another new box, already sited
+                    racks.append(placed[o]["rack"])
+                elif o in serial_index:
+                    racks.append(topology["devices"][serial_index[o]]["rack"])
+    return racks
+
+
+def plan_devices(topology, new_devices, demands, limit=4):
+    """Choose a cabinet and U position for every new device.
+
+    Devices are sited in dependency order so that a box hanging off another new
+    box is placed once its neighbour's location is known. Space taken by an
+    earlier placement is reserved before the next one is scored, so two new
+    devices never get handed the same U.
+    """
+    serial_index = serials.index(topology)
+    by_serial = {d["serial"]: d for d in new_devices}
+
+    links = []
+    for d in demands:
+        if looks_like_serial(d["src"]) and looks_like_serial(d["dst"]):
+            links.append((serials.normalise(d["src"]), serials.normalise(d["dst"])))
+    order, cycles = placement.order_by_dependency(new_devices, links)
+
+    placed, results, reserved = {}, [], defaultdict(set)
+    for serial in order:
+        spec = by_serial[serial]
+        base = {"row": spec["row"], "serial": serial, "type": spec["type"],
+                "u_size": spec["u_size"], "label": spec["label"]}
+
+        neighbours = _neighbour_racks(topology, serial, demands, serial_index, placed)
+        try:
+            options = placement.rank_positions(topology, spec, neighbours,
+                                               extra_taken=reserved, limit=limit)
+        except placement.PlacementError as e:
+            results.append({**base, "status": "failed", "reason": str(e)})
+            continue
+
+        best = options[0]
+        placed[serial] = best
+        for u in range(best["u_end"], best["u_start"] + 1):
+            reserved[best["rack"]].add(u)
+
+        results.append({**base, "status": "ok", "rack": best["rack"],
+                        "u_start": best["u_start"], "u_end": best["u_end"],
+                        "reason": best["reason"], "score": best["score"],
+                        "connects_to": sorted(set(neighbours)),
+                        "options": options})
+
+    for serial in cycles:
+        spec = by_serial[serial]
+        results.append({"row": spec["row"], "serial": serial, "type": spec["type"],
+                        "u_size": spec["u_size"], "label": spec["label"],
+                        "status": "failed",
+                        "reason": "circular dependency — this device and another new "
+                                  "device each wait for the other to be placed"})
+
+    results.sort(key=lambda r: r["row"])
+    return {"placements": results, "placed": placed,
+            "ok": sum(1 for r in results if r["status"] == "ok"),
+            "failed": sum(1 for r in results if r["status"] != "ok")}
+
+
+def materialise(topology, spec, site):
+    """Create a placed device (and its ports) in a topology, so the router can
+    treat it exactly like any other box. Used on the working copy while
+    planning, and again on the live map at execute time."""
+    rack = site["rack"]
+    # The device id must be unique, and a truncated serial is not: SN-NEWSRV01
+    # and SN-NEWSRV02 share their first characters, and the second box would
+    # silently overwrite the first. Use the whole serial, and still guard
+    # against a clash with something already in the rack.
+    name = f"NEW-{spec['serial'].removeprefix(serials.PREFIX)}"
+    dev_id = f"{rack}:{name}"
+    suffix = 2
+    while dev_id in topology["devices"]:
+        dev_id = f"{rack}:{name}-{suffix}"
+        suffix += 1
+    topology["devices"][dev_id] = {
+        "id": dev_id, "rack": rack, "name": name, "type": spec["type"],
+        "u_start": site["u_start"], "u_size": spec["u_size"],
+        "label": spec["label"], "serial": spec["serial"],
+        "fiber_ports": spec["fiber_ports"], "copper_ports": spec["copper_ports"],
+        "installed_by_plan": True,
+    }
+    for i in range(1, spec["fiber_ports"] + 1):
+        pid = f"{dev_id}:{i}"
+        topology["ports"][pid] = {"id": pid, "rack": rack, "device": dev_id, "index": i,
+                                  "type": "fiber", "status": "free",
+                                  "peer": None, "circuit": None, "role": None}
+    start = spec["fiber_ports"] + 1
+    for i in range(start, start + spec["copper_ports"]):
+        pid = f"{dev_id}:{i}"
+        topology["ports"][pid] = {"id": pid, "rack": rack, "device": dev_id, "index": i,
+                                  "type": "copper", "status": "free",
+                                  "peer": None, "circuit": None, "role": None}
+    return dev_id
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +636,52 @@ def _choose(options, prefs, seat):
 # planning
 # --------------------------------------------------------------------------
 
-def plan(topology, demands, prefs=None, already_isolated=False):
+def _resolve_endpoints(topology, demands):
+    """Replace any serial in a P2P row with a concrete free port on that
+    device, so the router downstream only ever deals in port ids.
+
+    Ports chosen here are remembered as the rows are walked, because two rows
+    naming the same device must land on two different ports of it — the whole
+    point of a switch is that it has many.
+    """
+    index = serials.index(topology)
+    taken, out = set(), []
+
+    for d in demands:
+        d = dict(d)
+        cable = d.get("cable") or ""
+        cable = {"fibre": "fiber", "optic": "fiber", "optical": "fiber",
+                 "rj45": "copper", "utp": "copper", "eth": "copper"}.get(cable, cable)
+
+        for side in ("src", "dst"):
+            value = d[side]
+            if not value or not looks_like_serial(value):
+                continue
+            serial = serials.normalise(value)
+            dev_id = index.get(serial)
+            if not dev_id:
+                d["malformed"] = f"serial {serial} is not a device on the map"
+                break
+            if cable not in ("fiber", "copper"):
+                # a device has both kinds of port, so the row must say which
+                d["malformed"] = (f"row refers to device {serial} by serial but does "
+                                  "not say which cable type to use "
+                                  "(add a CABLE column: fiber or copper)")
+                break
+            port = free_port_on_device(topology, dev_id, cable, taken)
+            if not port:
+                dev = topology["devices"][dev_id]
+                d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
+                                  f"{cable} port left")
+                break
+            taken.add(port)
+            d[side] = port
+            d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
+                                                 "device": dev_id}
+        out.append(d)
+    return out
+
+def plan(topology, demands, prefs=None, already_isolated=False, new_devices=()):
     """Route every demand against a working copy, in an order chosen by the
     preferences. Returns one result per demand plus a summary. Never mutates
     the topology it is given.
@@ -269,9 +689,25 @@ def plan(topology, demands, prefs=None, already_isolated=False):
     Set `already_isolated` when the caller has handed us a private snapshot
     that nobody else can touch — then we skip the defensive copy instead of
     paying for a second one.
+
+    `new_devices` are specs from the Devices tab. They are sited and created in
+    the working copy FIRST, so by the time the P2P rows are routed the new kit
+    is indistinguishable from equipment that was already racked — which is
+    exactly how the sheet is written.
     """
     prefs = {**DEFAULT_PREFS, **(prefs or {})}
     work = topology if already_isolated else copy.deepcopy(topology)
+
+    siting = None
+    if new_devices:
+        siting = plan_devices(work, list(new_devices), demands)
+        specs = {d["serial"]: d for d in new_devices}
+        for site in siting["placements"]:
+            if site["status"] == "ok":
+                site["device_id"] = materialise(work, specs[site["serial"]], site)
+
+    # serials only become resolvable once the new kit exists in `work`
+    demands = _resolve_endpoints(work, demands)
 
     ordered = _order_demands(work, demands, prefs["group_adjacent"])
     need_options = prefs["redundancy_split"] or prefs["load_balance"]
@@ -312,7 +748,12 @@ def plan(topology, demands, prefs=None, already_isolated=False):
                                     for s in route["segments"]]})
 
     results.sort(key=lambda r: r["row"])
-    return {"prefs": prefs, "results": results, "summary": _summary(results)}
+    out = {"prefs": prefs, "results": results, "summary": _summary(results)}
+    if siting is not None:
+        out["siting"] = siting
+        out["summary"]["devices_placed"] = siting["ok"]
+        out["summary"]["devices_failed"] = siting["failed"]
+    return out
 
 
 def _summary(results):
@@ -337,6 +778,40 @@ def _summary(results):
 # --------------------------------------------------------------------------
 # executing
 # --------------------------------------------------------------------------
+
+def execute_devices(topology, siting, new_devices):
+    """Create the sited devices on the LIVE map, before their cabling is
+    committed. Idempotent by serial: a plan committed twice does not rack the
+    same box a second time."""
+    if not siting:
+        return {"installed": [], "skipped": []}
+    specs = {d["serial"]: d for d in new_devices}
+    known = serials.index(topology)
+    installed, skipped = [], []
+
+    for site in siting["placements"]:
+        if site["status"] != "ok":
+            continue
+        if site["serial"] in known:
+            skipped.append({"serial": site["serial"],
+                            "reason": "already installed"})
+            continue
+        # the position was chosen against a working copy; make sure the live
+        # map still has that space before claiming it
+        free = {u for top, height in placement.free_gaps(topology, site["rack"])
+                for u in range(top - height + 1, top + 1)}
+        needed = set(range(site["u_end"], site["u_start"] + 1))
+        if not needed <= free:
+            skipped.append({"serial": site["serial"],
+                            "reason": f"{site['rack']} U{site['u_end']}-U{site['u_start']} "
+                                      "was taken since the plan was made"})
+            continue
+        dev_id = materialise(topology, specs[site["serial"]], site)
+        installed.append({"serial": site["serial"], "device_id": dev_id,
+                          "rack": site["rack"], "u_start": site["u_start"],
+                          "u_end": site["u_end"]})
+    return {"installed": installed, "skipped": skipped}
+
 
 def execute(topology, results):
     """Commit an approved plan to the live topology, in the same order it was

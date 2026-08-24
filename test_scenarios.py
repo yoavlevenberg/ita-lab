@@ -14,6 +14,8 @@ import sys
 from collections import Counter
 
 import bulkplan
+import placement
+import serials
 import wo_html
 from pathengine import (load_topology, resolve_path,
                         resolve_route_options, RouteError)
@@ -286,6 +288,143 @@ def main():
               for s in planned["results"][0]["route"]["segments"]))
     check("an unapproved Work Order is marked PROPOSED",
           "PROPOSED" in wo and "EXECUTED" not in wo)
+
+    # ---------- serials ----------
+    all_serials = [d.get("serial") for d in T["devices"].values()]
+    check("every device carries a serial", all(all_serials), "some are missing")
+    check("serials are unique across the whole map",
+          len(set(all_serials)) == len(all_serials),
+          f"{len(all_serials) - len(set(all_serials))} duplicated")
+    a_dev = T["devices"]["A1-S05:TOR-SW-01"]
+    check("serials are stable across a rebuild",
+          serials.serial_for("A1-S05:TOR-SW-01") == a_dev["serial"])
+    check("a serial typed loosely still resolves",
+          serials.normalise(" sn_" + a_dev["serial"][3:].lower() + " ") == a_dev["serial"])
+
+    # ---------- intra-rack patching ----------
+    # Two ports in one cabinet used to be refused. It is now the cheapest
+    # connection there is, and the placement planner exists to produce it.
+    in_rack, by_device = [], {}
+    for pid, p in T["ports"].items():
+        if p["rack"] == "A1-S05" and p["type"] == "copper" and p["status"] == "free":
+            by_device.setdefault(p["device"], pid)
+    in_rack = list(by_device.values())[:2]
+    local = resolve_route_options(in_rack[0], in_rack[1], topology=T)[0]
+    check("two ports in one cabinet can be patched together", local["status"] == "ok")
+    check("an intra-rack patch consumes no trunk strand", not local["segments"])
+    check("an intra-rack patch needs no cross-connect", not local["transit_points"])
+    check("an intra-rack patch is not labelled A or B", local["domain"] == "local")
+    try:
+        resolve_route_options(in_rack[0], in_rack[0], topology=T)
+        check("a port still cannot be patched to itself", False, "unexpectedly succeeded")
+    except RouteError:
+        check("a port still cannot be patched to itself", True)
+
+    # ---------- free U space ----------
+    # u_start is the TOP of a device and it grows downward. Getting that
+    # backwards would silently double-book space, so it is checked directly.
+    gaps = placement.free_gaps(T, "A1-S05")
+    occupied = placement.occupancy(T, "A1-S05")
+    from_gaps = {u for top, h in gaps for u in range(top - h + 1, top + 1)}
+    check("free gaps and occupancy account for all 42U",
+          from_gaps | occupied == set(range(1, 43)) and not (from_gaps & occupied),
+          f"{len(from_gaps)} free + {len(occupied)} used")
+
+    # ---------- placing new equipment ----------
+    tor_serial = a_dev["serial"]
+    specs = [
+        {"row": 2, "serial": "SN-TESTSW", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 48, "label": "Leaf"},
+        {"row": 3, "serial": "SN-TESTSRV1", "type": "server", "raw_type": "server",
+         "u_size": 2, "fiber_ports": 2, "copper_ports": 2, "label": "Server"},
+        {"row": 4, "serial": "SN-TESTSRV2", "type": "server", "raw_type": "server",
+         "u_size": 2, "fiber_ports": 2, "copper_ports": 2, "label": "Server"},
+    ]
+    wiring = [
+        {"row": 2, "src": "SN-TESTSW", "dst": tor_serial, "group": "", "cable": "fiber",
+         "malformed": ""},
+        {"row": 3, "src": "SN-TESTSRV1", "dst": "SN-TESTSW", "group": "", "cable": "copper",
+         "malformed": ""},
+        {"row": 4, "src": "SN-TESTSRV2", "dst": "SN-TESTSW", "group": "", "cable": "copper",
+         "malformed": ""},
+    ]
+    built = bulkplan.plan(T, wiring, new_devices=specs)
+    sited = {s["serial"]: s for s in built["siting"]["placements"]}
+    check("every declared device gets a position",
+          all(s["status"] == "ok" for s in sited.values()),
+          str([s.get("reason") for s in sited.values() if s["status"] != "ok"]))
+    check("a new device is racked beside what it connects to",
+          sited["SN-TESTSW"]["rack"] == a_dev["rack"],
+          f"went to {sited['SN-TESTSW']['rack']} instead of {a_dev['rack']}")
+
+    # two new devices must never be handed the same U
+    spans = []
+    for s in sited.values():
+        if s["status"] == "ok" and s["rack"] == a_dev["rack"]:
+            spans.append(set(range(s["u_end"], s["u_start"] + 1)))
+    overlap = any(x & y for i, x in enumerate(spans) for y in spans[i + 1:])
+    check("placements never overlap each other in the rack", not overlap, str(spans))
+
+    free_now = {u for top, h in placement.free_gaps(T, a_dev["rack"])
+                for u in range(top - h + 1, top + 1)}
+    check("placements only use space that was actually free",
+          all(span <= free_now for span in spans))
+
+    check("a device chained off another new device still gets cabled",
+          built["summary"]["planned"] == 3,
+          f"planned {built['summary']['planned']} of 3")
+    check("connections inside the chosen cabinet need no trunk",
+          all(r["hops"] == 0 for r in built["results"] if r["status"] == "ok"))
+
+    # the servers must land on DIFFERENT ports of the new switch
+    switch_ports = [r["dst"] for r in built["results"]
+                    if r["status"] == "ok" and "TESTSW" in r["dst"]]
+    check("two devices on one switch take different ports",
+          len(switch_ports) == len(set(switch_ports)), str(switch_ports))
+
+    # ---------- the Devices tab is checked before anything is sited ----------
+    bad_specs = [
+        {"row": 2, "serial": "SN-DUP", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 2, "copper_ports": 0, "label": "a"},
+        {"row": 3, "serial": "SN-DUP", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 2, "copper_ports": 0, "label": "b"},
+        {"row": 4, "serial": tor_serial, "type": "server", "raw_type": "server",
+         "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "c"},
+        {"row": 5, "serial": "SN-HUGE", "type": "server", "raw_type": "server",
+         "u_size": 99, "fiber_ports": 1, "copper_ports": 1, "label": "d"},
+        {"row": 6, "serial": "SN-NOPORT", "type": "server", "raw_type": "server",
+         "u_size": 1, "fiber_ports": 0, "copper_ports": 0, "label": "e"},
+        {"row": 7, "serial": "SN-ODD", "type": "toaster", "raw_type": "toaster",
+         "u_size": 1, "fiber_ports": 1, "copper_ports": 0, "label": "f"},
+    ]
+    dv = bulkplan.validate_devices(T, bad_specs, [])
+    got = {i["row"]: i["kind"] for i in dv["issues"]}
+    check("the Devices tab names each fault correctly",
+          got == {3: "duplicate_serial", 4: "serial_exists", 5: "bad_u_size",
+                  6: "no_ports", 7: "unknown_type"}, str(got))
+
+    cyc_specs = [
+        {"row": 2, "serial": "SN-CA", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "a"},
+        {"row": 3, "serial": "SN-CB", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "b"},
+    ]
+    cyc_wiring = [
+        {"row": 2, "src": "SN-CA", "dst": "SN-CB", "group": "", "cable": "fiber", "malformed": ""},
+        {"row": 3, "src": "SN-CB", "dst": "SN-CA", "group": "", "cable": "fiber", "malformed": ""},
+    ]
+    cv = bulkplan.validate_devices(T, cyc_specs, cyc_wiring)
+    check("two new devices that only reference each other are refused",
+          {i["kind"] for i in cv["issues"]} == {"dependency_cycle"},
+          str([i["kind"] for i in cv["issues"]]))
+
+    # ---------- a serial in a port column needs a cable type ----------
+    no_media = [{"row": 2, "src": "SN-TESTSW", "dst": tor_serial, "group": "",
+                 "cable": "", "malformed": ""}]
+    mv = bulkplan.validate(T, no_media, specs)
+    check("a row naming a device by serial must say which media",
+          [i["kind"] for i in mv["issues"]] == ["no_cable_type"],
+          str([i["kind"] for i in mv["issues"]]))
 
     print()
     passed = sum(results)

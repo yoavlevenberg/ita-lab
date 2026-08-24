@@ -376,6 +376,16 @@
       </div>
 
       <div class="prefs">
+        <h3>רכיבים חדשים</h3>
+        <label><input type="checkbox" id="prefDevices">
+          <span><b>הקובץ כולל רכיבים חדשים להתקנה</b> — תיקרא לשונית
+          <span class="mono">Devices</span> (סיריאל, סוג, כמה U, כמה פורטים), והכלי
+          ימליץ באיזה מסד ובאיזה U להרכיב כל רכיב. בלשונית
+          <span class="mono">P2P</span> פשוט תכתוב את הסיריאל בעמודת הפורט,
+          כאילו הרכיב כבר מותקן.</span></label>
+      </div>
+
+      <div class="prefs">
         <h3>העדפות שיבוץ</h3>
         <label><input type="checkbox" id="prefAdjacent" checked>
           <span><b>פורטים צמודים פיזית</b> — כל צרור מקבל בלוק גידים רציף באותו פאנל,
@@ -1086,6 +1096,7 @@ function prefQuery(extra){
     group_adjacent:   $("prefAdjacent").checked   ? "1" : "0",
     redundancy_split: $("prefRedundancy").checked ? "1" : "0",
     load_balance:     $("prefBalance").checked    ? "1" : "0",
+    with_devices:     $("prefDevices").checked    ? "1" : "0",
     ...(extra || {}),
   });
 }
@@ -1107,7 +1118,7 @@ function uploadSheet(file){
     })
   ).then(r => r.json()).then(res => {
     if (res.status === "failed" || res.error) return bulkError(res.reason || res.error);
-    renderReview(res.review, file.name);
+    renderReview(res, file.name);
   }).catch(e => bulkError(String(e)));
 }
 
@@ -1137,10 +1148,26 @@ const KIND_LABEL = {
   same_rack:      "שני הקצוות באותו מסד",
   duplicate_port: "פורט מופיע פעמיים בגיליון",
   duplicate_row:  "שורה כפולה",
+  unknown_serial: "סיריאל לא מוכר",
+  no_cable_type:  "חסר סוג כבל",
 };
 
-function renderReview(review, fileName){
-  const clean = review.problems === 0;
+const DEV_KIND_LABEL = {
+  no_serial:        "אין סיריאל",
+  duplicate_serial: "סיריאל כפול בגיליון",
+  serial_exists:    "הסיריאל כבר מותקן",
+  bad_u_size:       "גובה U לא תקין",
+  no_ports:         "לא הוגדרו פורטים",
+  unknown_type:     "סוג רכיב לא מוכר",
+  not_enough_ports: "אין מספיק פורטים",
+  no_space:         "אין מקום פנוי בגודל הזה",
+  dependency_cycle: "תלות מעגלית",
+};
+
+function renderReview(res, fileName){
+  const review = res.review;
+  const dev = res.device_review;
+  const clean = review.problems === 0 && (!dev || dev.problems === 0);
   const kinds = Object.entries(review.by_kind || {})
     .map(([k, n]) => `<span class="kindchip">${escapeHtml(KIND_LABEL[k] || k)} · ${n}</span>`)
     .join("");
@@ -1152,10 +1179,37 @@ function renderReview(review, fileName){
       <td class="mono">${escapeHtml(i.dst || "—")}</td>
       <td style="color:#ff9d97">${escapeHtml(i.message)}</td></tr>`).join("");
 
-  $("bulkResult").innerHTML = `
-    <div class="review ${clean ? "clean" : "dirty"}">
-      <h3>${clean ? "✓" : "⚠"}
-        <span>${escapeHtml(fileName)} — ${review.total} שורות נקראו</span>
+  // the Devices tab gets its own block: a fault there is about a box that has
+  // not arrived, not about a connection, and mixing the two reads badly
+  const devBlock = !dev ? (
+      res.has_devices_tab && !$("prefDevices").checked
+        ? `<div class="review dirty" style="margin-bottom:12px"><h3>⚠
+             <span>לקובץ יש לשונית <span class="mono">Devices</span> אבל לא סימנת
+             "הקובץ כולל רכיבים חדשים" — היא לא נקראה</span></h3></div>`
+        : "")
+    : `<div class="review ${dev.problems ? "dirty" : "clean"}" style="margin-bottom:12px">
+        <h3>${dev.problems ? "⚠" : "✓"}
+          <span>לשונית <span class="mono">Devices</span> — ${dev.total} רכיבים חדשים</span>
+          <span style="flex:1"></span>
+          <span>${dev.problems ? `${dev.problems} דורשים תיקון · ${dev.ok} תקינים`
+                                : "כל הרכיבים תקינים"}</span>
+        </h3>
+        ${dev.problems ? `<div class="rb">
+          ${Object.entries(dev.by_kind || {}).map(([k,n]) =>
+            `<span class="kindchip">${escapeHtml(DEV_KIND_LABEL[k] || k)} · ${n}</span>`).join("")}
+          <table class="bulk" style="margin-top:10px">
+            <thead><tr><th>שורה</th><th>הבעיה</th><th>סיריאל</th><th>פירוט</th></tr></thead>
+            <tbody>${dev.issues.map(i => `<tr class="bad"><td>${i.row}</td>
+              <td><span class="stat failed">${escapeHtml(DEV_KIND_LABEL[i.kind] || i.kind)}</span></td>
+              <td class="mono">${escapeHtml(i.serial || "—")}</td>
+              <td style="color:#ff9d97">${escapeHtml(i.message)}</td></tr>`).join("")}</tbody>
+          </table></div>` : ""}
+      </div>`;
+
+  $("bulkResult").innerHTML = devBlock + `
+    <div class="review ${review.problems ? "dirty" : "clean"}">
+      <h3>${review.problems ? "⚠" : "✓"}
+        <span>לשונית <span class="mono">P2P</span> — ${review.total} שורות נקראו</span>
         <span style="flex:1"></span>
         <span>${clean ? "לא נמצאו בעיות" :
                 `${review.problems} שורות דורשות תיקון · ${review.ok} תקינות`}</span>
@@ -1207,11 +1261,34 @@ function renderBulk(){
   const failed    = rows.filter(r => r.status === "failed").length;
   const anyPending = pending > 0;
 
-  $("bulkResult").innerHTML = `
+  const siteBlock = !bulkPlan.siting ? "" : `
+    <div class="review ${bulkPlan.siting.some(s => s.status !== "ok") ? "dirty" : "clean"}"
+         style="margin-bottom:14px">
+      <h3>🧰 <span>המלצות התקנה — ${bulkPlan.siting.length} רכיבים חדשים</span></h3>
+      <div class="rb">
+        <table class="bulk">
+          <thead><tr><th>שורה</th><th>סיריאל</th><th>רכיב</th><th>גובה</th>
+            <th>מסד מומלץ</th><th>מיקום U</th><th>למה שם</th></tr></thead>
+          <tbody>${bulkPlan.siting.map(s => s.status === "ok" ? `
+            <tr><td>${s.row}</td><td class="mono">${escapeHtml(s.serial)}</td>
+              <td>${escapeHtml(s.label)} <span style="color:var(--muted)">(${escapeHtml(s.type)})</span></td>
+              <td>${s.u_size}U</td>
+              <td class="mono" style="color:var(--mda)">${escapeHtml(s.rack)}</td>
+              <td class="mono">U${s.u_end}${s.u_size > 1 ? "–U" + s.u_start : ""}</td>
+              <td style="color:var(--muted);font-size:10.5px">${escapeHtml(s.reason)}</td></tr>` : `
+            <tr class="bad"><td>${s.row}</td><td class="mono">${escapeHtml(s.serial)}</td>
+              <td>${escapeHtml(s.label)}</td><td>${s.u_size}U</td>
+              <td colspan="3" style="color:#ff9d97">${escapeHtml(s.reason)}</td></tr>`).join("")}
+          </tbody></table>
+      </div>
+    </div>`;
+
+  $("bulkResult").innerHTML = siteBlock + `
     <div class="sumrow">
       <span class="sumchip">קובץ <b>${escapeHtml(bulkPlan.fileName)}</b></span>
       ${committed ? `<span class="sumchip good">בוצעו <b>${committed}</b> מתוך ${s.total}</span>`
                   : `<span class="sumchip good">שובצו <b>${pending}</b> מתוך ${s.total}</span>`}
+      ${s.devices_placed ? `<span class="sumchip">רכיבים חדשים <b>${s.devices_placed}</b></span>` : ""}
       ${failed ? `<span class="sumchip bad">נכשלו <b>${failed}</b></span>` : ""}
       <span class="sumchip">צרורות <b>${s.groups}</b></span>
       <span class="sumchip">ממוצע קפיצות <b>${s.hops_avg}</b></span>

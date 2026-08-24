@@ -81,6 +81,7 @@ Numbers below (CONFIG) are assumptions, same as v2 — easy to change.
 import random
 from pathlib import Path
 
+import serials
 from pathengine import resolve_path, commit_route, save_topology, RouteError
 
 random.seed(42)  # same map every run
@@ -152,6 +153,8 @@ def add_device(topology, rack, name, dev_type, u_start, u_size, fiber, copper, l
         "id": dev_id, "rack": rack, "name": name, "type": dev_type,
         "u_start": u_start, "u_size": u_size, "label": label,
         "fiber_ports": fiber, "copper_ports": copper,
+        # how a demand sheet refers to this box — see serials.py
+        "serial": serials.serial_for(dev_id),
     }
     for i in range(1, fiber + 1):
         pid = f"{dev_id}:{i}"

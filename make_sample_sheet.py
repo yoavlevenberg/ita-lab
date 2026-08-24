@@ -42,9 +42,13 @@ def _col(i):
     return s
 
 
-def write_xlsx(path, rows, sheet_name="Demands"):
-    """Write a sheet of strings. Every value goes through the shared-string
-    table, which is what Excel itself produces for text columns."""
+def write_xlsx(path, tabs):
+    """Write a workbook. `tabs` is an ordered {sheet_name: rows} mapping, so a
+    demand file can carry both its P2P tab and its Devices tab.
+
+    Every value goes through the shared-string table, which is what Excel
+    itself produces for text columns.
+    """
     shared, index = [], {}
 
     def sid(v):
@@ -53,45 +57,57 @@ def write_xlsx(path, rows, sheet_name="Demands"):
             shared.append(v)
         return index[v]
 
-    xml_rows = []
-    for r, row in enumerate(rows, start=1):
-        cells = "".join(
-            f'<c r="{_col(c)}{r}" t="s"><v>{sid(str(val))}</v></c>'
-            for c, val in enumerate(row) if str(val) != "")
-        xml_rows.append(f'<row r="{r}">{cells}</row>')
-
-    sheet = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-             f'<worksheet xmlns="{NS_MAIN}"><sheetData>{"".join(xml_rows)}</sheetData></worksheet>')
+    sheets_xml = []
+    for rows in tabs.values():
+        xml_rows = []
+        for r, row in enumerate(rows, start=1):
+            cells = "".join(
+                f'<c r="{_col(c)}{r}" t="s"><v>{sid(str(val))}</v></c>'
+                for c, val in enumerate(row) if str(val) != "")
+            xml_rows.append(f'<row r="{r}">{cells}</row>')
+        sheets_xml.append(
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<worksheet xmlns="{NS_MAIN}"><sheetData>{"".join(xml_rows)}</sheetData></worksheet>')
 
     sst = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
            f'<sst xmlns="{NS_MAIN}" count="{len(shared)}" uniqueCount="{len(shared)}">'
            + "".join(f"<si><t>{escape(v)}</t></si>" for v in shared) + "</sst>")
 
+    sheet_tags = "".join(
+        f'<sheet name="{escape(name)}" sheetId="{i}" r:id="rId{i}"/>'
+        for i, name in enumerate(tabs, start=1))
     workbook = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                f'<workbook xmlns="{NS_MAIN}" xmlns:r="{NS_REL}"><sheets>'
-                f'<sheet name="{escape(sheet_name)}" sheetId="1" r:id="rId1"/>'
-                f'</sheets></workbook>')
+                f'<workbook xmlns="{NS_MAIN}" xmlns:r="{NS_REL}">'
+                f'<sheets>{sheet_tags}</sheets></workbook>')
 
+    sst_rid = len(tabs) + 1
+    rel_tags = "".join(
+        f'<Relationship Id="rId{i}" Type="{NS_REL}/worksheet" '
+        f'Target="worksheets/sheet{i}.xml"/>'
+        for i in range(1, len(tabs) + 1))
     wb_rels = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-               f'<Relationships xmlns="{NS_PKG}">'
-               f'<Relationship Id="rId1" Type="{NS_REL}/worksheet" Target="worksheets/sheet1.xml"/>'
-               f'<Relationship Id="rId2" Type="{NS_REL}/sharedStrings" Target="sharedStrings.xml"/>'
-               f'</Relationships>')
+               f'<Relationships xmlns="{NS_PKG}">{rel_tags}'
+               f'<Relationship Id="rId{sst_rid}" Type="{NS_REL}/sharedStrings" '
+               f'Target="sharedStrings.xml"/></Relationships>')
 
     root_rels = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                  f'<Relationships xmlns="{NS_PKG}">'
                  f'<Relationship Id="rId1" Type="{NS_REL}/officeDocument" Target="xl/workbook.xml"/>'
                  f'</Relationships>')
 
-    # Excel is strict about content types — without these overrides it reports
-    # the file as corrupt even though the XML inside is perfectly good.
+    # Excel is strict about content types — without an override per part it
+    # reports the file as corrupt even though the XML inside is perfectly good.
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+        f'ContentType="{SPREADSHEET}.worksheet+xml"/>'
+        for i in range(1, len(tabs) + 1))
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
         f'<Override PartName="/xl/workbook.xml" ContentType="{SPREADSHEET}.sheet.main+xml"/>'
-        f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{SPREADSHEET}.worksheet+xml"/>'
+        f'{overrides}'
         f'<Override PartName="/xl/sharedStrings.xml" ContentType="{SPREADSHEET}.sharedStrings+xml"/>'
         '</Types>')
 
@@ -101,7 +117,8 @@ def write_xlsx(path, rows, sheet_name="Demands"):
         z.writestr("_rels/.rels", root_rels)
         z.writestr("xl/workbook.xml", workbook)
         z.writestr("xl/_rels/workbook.xml.rels", wb_rels)
-        z.writestr("xl/worksheets/sheet1.xml", sheet)
+        for i, doc in enumerate(sheets_xml, start=1):
+            z.writestr(f"xl/worksheets/sheet{i}.xml", doc)
         z.writestr("xl/sharedStrings.xml", sst)
     return path
 
@@ -163,27 +180,63 @@ def build_broken(topology):
     ]
 
 
+def build_new_devices(topology):
+    """A workbook showing the other half of the tool: kit that has not been
+    installed yet. The Devices tab says what is arriving; the P2P tab wires it
+    up by serial, exactly as if it were already racked."""
+    tor = topology["devices"]["A1-S05:TOR-SW-01"]["serial"]
+
+    devices = [
+        ["SERIAL", "TYPE", "U_SIZE", "FIBER", "COPPER", "LABEL"],
+        ["SN-NEWLEAF01", "switch", "1", "4", "48", "Leaf switch 48x RJ45 + 4x SFP+"],
+        ["SN-NEWSRV0001", "server", "2", "2", "2", "App server 2U"],
+        ["SN-NEWSRV0002", "server", "2", "2", "2", "App server 2U"],
+        ["SN-NEWSRV0003", "server", "2", "2", "2", "App server 2U"],
+    ]
+    # note the chaining: the servers hang off the NEW switch, which itself
+    # uplinks to an existing ToR
+    p2p = [
+        ["SRC_PORT", "DST_PORT", "GROUP", "CABLE"],
+        ["SN-NEWLEAF01", tor, "UPLINK", "fiber"],
+        ["SN-NEWSRV0001", "SN-NEWLEAF01", "ACCESS", "copper"],
+        ["SN-NEWSRV0002", "SN-NEWLEAF01", "ACCESS", "copper"],
+        ["SN-NEWSRV0003", "SN-NEWLEAF01", "ACCESS", "copper"],
+    ]
+    return {"P2P": p2p, "Devices": devices}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-o", "--out", default=str(OUT_DEFAULT))
     ap.add_argument("--with-errors", action="store_true",
                     help="also write a sheet containing every fault the review catches")
+    ap.add_argument("--with-devices", action="store_true",
+                    help="also write a workbook with a Devices tab of new equipment")
     args = ap.parse_args()
 
     topology = pathengine.load_topology()
     out = Path(args.out)
 
     rows = build_clean(topology)
-    write_xlsx(out, rows)
+    write_xlsx(out, {"P2P": rows})
     print(f"Wrote {out}  ({len(rows) - 1} demand rows)")
     for r in rows[1:]:
         print(f"   {r[2]:<12} {r[0]}  ->  {r[1]}")
 
     if args.with_errors:
         bad = out.with_name(out.stem + "_with_errors" + out.suffix)
-        write_xlsx(bad, build_broken(topology))
+        write_xlsx(bad, {"P2P": build_broken(topology)})
         print(f"\nWrote {bad}  (deliberately broken — drop it in to see the review)")
+
+    if args.with_devices:
+        newkit = out.with_name(out.stem + "_new_devices" + out.suffix)
+        tabs = build_new_devices(topology)
+        write_xlsx(newkit, tabs)
+        print(f"\nWrote {newkit}  (tabs: {', '.join(tabs)})")
+        print("   tick 'הקובץ כולל רכיבים חדשים' before uploading this one")
+        for r in tabs["Devices"][1:]:
+            print(f"   {r[0]:<15} {r[1]:<8} {r[2]}U  {r[4]}x copper  {r[5]}")
 
 
 if __name__ == "__main__":

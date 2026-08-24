@@ -38,6 +38,23 @@ def render(route, order_id=None, circuit_id=None):
     L.append("STEPS")
     L.append("-" * 68)
 
+    if route.get("intra_rack"):
+        # nothing to pull and nothing to cross-connect — one patch lead inside
+        # a single cabinet
+        L.append(f"1. Run a {route['cable_type']} patch lead inside {route['hop_racks'][0]}:")
+        L.append(f"     from {route['src_location']}")
+        L.append(f"     to   {route['dst_location']}")
+        L.append("")
+        L.append("No trunk segments are used — both ends are in the same cabinet.")
+        L.append("")
+        if circuit_id:
+            L.append(f"STATUS: EXECUTED — committed as {circuit_id}, written to topology.json.")
+        else:
+            L.append("STATUS: PROPOSED — not yet written to ITA.")
+            L.append("        Requires network engineer approval before commit.")
+        L.append("=" * 68)
+        return "\n".join(L)
+
     n = 1
     L.append(f"{n}. Terminate the {route['cable_type']} cable at the source:")
     L.append(f"     {route['src_location']}")

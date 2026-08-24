@@ -265,33 +265,53 @@ class Handler(BaseHTTPRequestHandler):
         prefs = {k: q.get(k, ["0"])[0] in ("1", "true", "on")
                  for k in ("group_adjacent", "redundancy_split", "load_balance")}
 
+        # Adding hardware is a bigger step than patching, so the Devices tab is
+        # only read when the user has said the file contains new equipment.
+        want_devices = q.get("with_devices", ["0"])[0] in ("1", "true", "on")
         try:
             demands = bulkplan.read_demand_sheet(io.BytesIO(blob))
+            new_devices = (bulkplan.read_device_sheet(io.BytesIO(blob))
+                           if want_devices else [])
         except (xlsxreader.XlsxError, bulkplan.BulkError) as e:
             return self._send(200, {"status": "failed", "reason": str(e)})
 
         # Preflight first: a sheet with typos comes back as one list of things
         # to fix, instead of a half-planned run the user has to unpick.
-        review = bulkplan.validate(TOPOLOGY, demands)
+        review = bulkplan.validate(TOPOLOGY, demands, new_devices)
+        device_review = (bulkplan.validate_devices(TOPOLOGY, new_devices, demands)
+                         if new_devices else None)
         if q.get("validate_only", ["0"])[0] in ("1", "true", "on"):
+            has_tab = bulkplan._find_sheet(io.BytesIO(blob),
+                                           bulkplan.DEVICES_SHEET_NAMES) is not None
             return self._send(200, {"status": "ok", "stage": "review",
-                                    "review": review, "prefs": prefs})
+                                    "review": review,
+                                    "device_review": device_review,
+                                    "has_devices_tab": has_tab,
+                                    "devices_read": len(new_devices),
+                                    "prefs": prefs})
 
         # Snapshot under the lock: deep-copying a dict that another thread is
         # committing into can raise "dictionary changed size during iteration".
         # The planning itself then runs outside the lock, on a private copy.
         with WRITE_LOCK:
             snapshot = copy.deepcopy(TOPOLOGY)
-        result = bulkplan.plan(snapshot, demands, prefs, already_isolated=True)
+        result = bulkplan.plan(snapshot, demands, prefs, already_isolated=True,
+                               new_devices=new_devices)
+        result["new_devices"] = new_devices
 
         plan_id = f"PLAN-{len(PLANS) + 1:04d}"
         PLANS[plan_id] = result
         # the routes themselves stay server-side; the browser gets the summary
         # it needs to render the table and decide whether to commit
+        siting = result.get("siting")
         return self._send(200, {
             "status": "ok", "stage": "plan", "plan_id": plan_id,
             "prefs": result["prefs"], "summary": result["summary"],
-            "review": review,
+            "review": review, "device_review": device_review,
+            # the ranked alternatives are large and only the chosen spot is
+            # shown, so they stay server-side with the plan
+            "siting": [{k: v for k, v in p.items() if k != "options"}
+                       for p in siting["placements"]] if siting else None,
             "results": [{k: v for k, v in r.items() if k != "route"}
                         for r in result["results"]],
         })
@@ -314,7 +334,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": f"nothing left to commit in this plan "
                                                  f"({done} row(s) already committed)."})
 
+            # rack the new kit before cabling it — the routes reference ports
+            # that only exist once the device does
+            racked = bulkplan.execute_devices(TOPOLOGY, plan.get("siting"),
+                                              plan.get("new_devices", []))
             outcome = bulkplan.execute(TOPOLOGY, plan["results"])
+            outcome["devices"] = racked
             # mark before releasing the lock, so a second click on the same plan
             # cannot slip in and commit the same rows twice
             committed_rows = {c["row"] for c in outcome["committed"]}

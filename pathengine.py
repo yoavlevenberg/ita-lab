@@ -46,6 +46,12 @@ TOPOLOGY_PATH = Path(__file__).parent / "data" / "topology.json"
 # this synthetic map are assumptions anyway, while the hop count is real.
 HOP_COST = 10_000.0
 
+# Two ports in the same cabinet are joined by a patch lead — no trunk, no
+# cross-connect, no strand consumed. This is the CHEAPEST possible connection
+# and, once the planner can place new equipment, the outcome it should be
+# aiming for: rack the new box beside what it talks to.
+INTRA_RACK_M = 3.0
+
 # When patching through an intermediate rack we prefer landing on a patch
 # panel rather than eating a switch port.
 _TRANSIT_DEVICE_PREFERENCE = ("fiber_patch_panel", "copper_patch_panel", "switch")
@@ -170,6 +176,27 @@ def _pick_transit_port(topology, rack_id, cable_type, exclude):
         raise RouteError(f"No free {cable_type} port left on {rack_id} to cross-connect through.")
     candidates.sort()
     return candidates[0][3]
+
+
+def intra_rack_route(topology, src_port_id, dst_port_id, cable_type):
+    """A direct patch between two ports in one cabinet: zero trunk segments,
+    zero transit ports, no strand consumed. Shaped exactly like any other
+    route so every consumer — Work Order, commit, the UI — handles it without
+    a special case."""
+    return {
+        "status": "ok",
+        "cable_type": cable_type,
+        "domain": "local",              # never leaves the cabinet, so no A/B leg
+        "src_port": src_port_id,
+        "dst_port": dst_port_id,
+        "src_location": describe_port(topology, src_port_id),
+        "dst_location": describe_port(topology, dst_port_id),
+        "hop_racks": [topology["ports"][src_port_id]["rack"]],
+        "segments": [],
+        "transit_points": [],
+        "total_length_m": INTRA_RACK_M,
+        "intra_rack": True,
+    }
 
 
 def _segment(e, a, b, cable_type, reserved=None):
@@ -368,6 +395,12 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
     """
     topology = topology if topology is not None else load_topology()
 
+    if src_port_id == dst_port_id:
+        # Until intra-rack patching was allowed, the same-cabinet check caught
+        # this by accident. It has to be explicit now: a port cannot be its own
+        # far end.
+        raise RouteError(f"Source and destination are the same port ({src_port_id}).")
+
     src, dst = _port(topology, src_port_id), _port(topology, dst_port_id)
     if src["status"] != "free":
         raise RouteError(f"Source port {src_port_id} is already in use.")
@@ -380,8 +413,9 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
     cable_type = src["type"]
     src_rack, dst_rack = src["rack"], dst["rack"]
     if src_rack == dst_rack:
-        raise RouteError("Both ports are in the same rack — this is an intra-rack patch, "
-                         "no trunk routing required.")
+        route = intra_rack_route(topology, src_port_id, dst_port_id, cable_type)
+        route.update(shared_segments=[], fully_disjoint_from_previous=True, option_index=1)
+        return [route]
 
     g = _build_graph(topology, cable_type, domain=domain)
     if src_rack not in g or dst_rack not in g:
@@ -508,6 +542,7 @@ def commit_route(topology, route, circuit_id):
         "hop_racks": route["hop_racks"],
         "segment_ids": [s["edge_id"] for s in route["segments"]],
         "strands": strand_log,
+        "intra_rack": bool(route.get("intra_rack")),
         "transit_ports": [t["port"] for t in route["transit_points"]],
         "total_length_m": route["total_length_m"],
     }
