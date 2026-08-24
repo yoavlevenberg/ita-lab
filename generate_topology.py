@@ -237,11 +237,14 @@ def populate_mda_filler_rack(topology, rack):
 
 
 def make_edge(edge_id, a, b, domain, fiber, copper, length_m):
+    # "strands" holds only the OCCUPIED strands ({index: circuit_id}); a strand
+    # with no entry is free. Every strand is still individually addressable as
+    # a port at each end — see strand_port_id() in pathengine.
     cable_types = {}
     if fiber:
-        cable_types["fiber"] = {"capacity": fiber, "used": 0}
+        cable_types["fiber"] = {"capacity": fiber, "used": 0, "strands": {}}
     if copper:
-        cable_types["copper"] = {"capacity": copper, "used": 0}
+        cable_types["copper"] = {"capacity": copper, "used": 0, "strands": {}}
     return {"id": edge_id, "from": a, "to": b, "domain": domain,
             "cable_types": cable_types, "length_m": round(length_m, 1)}
 

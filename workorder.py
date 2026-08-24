@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-workorder.py  (v2)
+workorder.py  (v3)
 ==================
 Turns a resolved route into a Work Order a field technician can follow
 without knowing anything about ITA or about this tool. Every step names the
-rack, the U position, the device and the port number.
+rack, the U position, the device, the port number and the exact strand.
 
-Plain text for now — deliberately, so we can iterate fast. Once the routing
-logic is signed off, this is the natural place to swap in a proper printable
-Word template.
+Two renderings of the same content:
+
+  render()            plain text — fast to read in a terminal, easy to paste
+                      into a ticket, and what the CLI writes to disk.
+  wo_html.render()    a printable sheet with a sign-off block (see wo_html.py).
 """
 
 from datetime import datetime
@@ -25,6 +27,13 @@ def render(route, order_id=None, circuit_id=None):
     L.append(f"Total length  : ~{route['total_length_m']} m")
     L.append(f"From          : {route['src_location']}")
     L.append(f"To            : {route['dst_location']}")
+    if route.get("option_index"):
+        L.append(f"Route option  : #{route['option_index']}")
+        if route.get("shared_segments"):
+            L.append(f"WARNING       : shares {len(route['shared_segments'])} trunk segment(s) "
+                     f"with an earlier option: {', '.join(route['shared_segments'])}")
+        else:
+            L.append("Diversity     : fully disjoint from every earlier option (no shared trunk segments)")
     L.append("")
     L.append("STEPS")
     L.append("-" * 68)
@@ -34,9 +43,12 @@ def render(route, order_id=None, circuit_id=None):
     L.append(f"     {route['src_location']}")
     n += 1
 
+    strand_word = "fiber strand" if route["cable_type"] == "fiber" else "copper pair"
     for i, seg in enumerate(route["segments"]):
-        L.append(f"{n}. Pull cable {seg['from_rack']} -> {seg['to_rack']}  "
-                 f"(~{seg['length_m']} m, trunk '{seg['edge_id']}', domain {seg['domain']}).")
+        L.append(f"{n}. Patch {strand_word} #{seg['strand_index']} of trunk '{seg['edge_id']}'  "
+                 f"({seg['from_rack']} -> {seg['to_rack']}, ~{seg['length_m']} m, domain {seg['domain']}).")
+        L.append(f"     near end : {seg['strand_port_from']}")
+        L.append(f"     far  end : {seg['strand_port_to']}")
         n += 1
         if i < len(route["transit_points"]):
             tp = route["transit_points"][i]
@@ -52,11 +64,12 @@ def render(route, order_id=None, circuit_id=None):
     L.append("-" * 68)
     L.append("  " + "  ->  ".join(route["hop_racks"]))
     L.append("")
-    L.append("TRUNK CAPACITY BEFORE THIS JOB (planner reference)")
+    L.append("STRANDS RESERVED BY THIS JOB")
     L.append("-" * 68)
     for seg in route["segments"]:
-        L.append(f"  {seg['edge_id']:<24} {seg['used_before']:>3}/{seg['capacity']:<3} used, "
-                 f"{seg['remaining_before']:>3} free")
+        L.append(f"  {seg['edge_id']:<24} strand #{seg['strand_index']:<4} "
+                 f"({seg['used_before']}/{seg['capacity']} strands used before this job, "
+                 f"{seg['remaining_before']} free)")
     L.append("")
     if circuit_id:
         L.append(f"STATUS: EXECUTED — committed as {circuit_id}, written to topology.json.")

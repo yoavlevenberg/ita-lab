@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Work Orders written by cli.py — generated output, not source
+output/

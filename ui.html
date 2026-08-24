@@ -248,8 +248,19 @@
     width:22px; height:22px; border-radius:50%; background:var(--free); color:#04220a;
     display:flex; align-items:center; justify-content:center; font-weight:900; font-size:13px; flex:none;
   }
+  .opt-card{border:1px solid var(--border); border-radius:8px; padding:12px; background:var(--panel2)}
+  .opt-head{display:flex; align-items:center; gap:8px; margin-bottom:2px}
+  .opt-head h3{flex:1}
+  .opt-actions{display:flex; gap:8px; margin-top:12px}
+  .check.warn{border-color:#7d2b28; background:#2a1414; color:#ff9d97}
   .seg{margin-bottom:9px; font-size:11.5px}
   .seg .st{display:flex; justify-content:space-between; gap:10px; margin-bottom:3px}
+  .strand{display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin:2px 0 4px;
+          font-size:10px; color:var(--muted); direction:ltr; justify-content:flex-end}
+  .strand .sid{border:1px solid var(--path); color:var(--path); border-radius:9px;
+               padding:1px 7px; font-weight:600; flex:none}
+  .strand .sp{font-size:9.5px; color:#7ee0ff}
+  .strand .ar{color:var(--path)}
   .kv{font-size:12px; line-height:1.9}
   .kv .k{color:var(--muted); display:inline-block; min-width:92px}
   pre.wo{
@@ -257,6 +268,65 @@
     font-family:Consolas,monospace; font-size:11px; line-height:1.5; overflow:auto;
     max-height:44vh; direction:ltr; margin:0; white-space:pre;
   }
+  /* ---------- bulk (excel) panel ---------- */
+  #bulkOverlay{
+    position:fixed; inset:0; background:rgba(2,5,10,.72); z-index:80;
+    display:none; align-items:center; justify-content:center; padding:26px;
+  }
+  #bulkOverlay.open{display:flex}
+  .bulkbox{
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    width:min(1180px,100%); max-height:100%; display:flex; flex-direction:column;
+    box-shadow:0 24px 60px -12px rgba(0,0,0,.8);
+  }
+  .bulkbox .bh{display:flex; align-items:center; gap:12px; padding:12px 18px;
+               border-bottom:1px solid var(--border); flex:none}
+  .bulkbox .bh h2{margin:0; font-size:15px}
+  .bulkbox .bb{padding:16px 18px; overflow:auto; flex:1}
+  .bulkbox .bf{display:flex; align-items:center; gap:10px; padding:11px 18px;
+               border-top:1px solid var(--border); flex:none}
+  .drop{
+    border:1.5px dashed var(--border); border-radius:10px; padding:22px 18px;
+    text-align:center; cursor:pointer; transition:.13s; display:flex;
+    flex-direction:column; gap:5px; align-items:center;
+  }
+  .drop:hover,.drop.hot{border-color:var(--src); background:#101b28}
+  .drop b{font-size:13.5px}
+  .drop span{font-size:12px; color:var(--muted)}
+  .drop small{font-size:10.5px; color:#586069; max-width:640px; line-height:1.75; margin-top:5px}
+  .prefs{margin-top:16px; border:1px solid var(--border); border-radius:9px; padding:12px 14px}
+  .prefs h3{margin:0 0 9px; font-size:12px; color:var(--muted); font-weight:600}
+  .prefs label{display:flex; gap:9px; align-items:flex-start; font-size:12px;
+               margin:8px 0; cursor:pointer; line-height:1.65}
+  .prefs input{margin-top:2px; accent-color:#1f6feb; flex:none}
+  .prefs label b{font-weight:600}
+  .sumrow{display:flex; gap:8px; flex-wrap:wrap; margin:16px 0 10px}
+  .sumchip{background:var(--panel2); border:1px solid var(--border); border-radius:20px;
+           padding:4px 12px; font-size:11.5px; color:var(--muted)}
+  .sumchip b{color:var(--text)}
+  .sumchip.good{border-color:#2c6b36; color:#7ee495}
+  .sumchip.bad{border-color:#7d2b28; color:#ff9d97}
+  table.bulk{width:100%; border-collapse:collapse; font-size:11.5px; margin-top:4px}
+  table.bulk th{text-align:right; color:var(--muted); font-weight:600; padding:6px 7px;
+                border-bottom:1px solid var(--border); font-size:10.5px; position:sticky;
+                top:0; background:var(--panel)}
+  table.bulk td{padding:5px 7px; border-bottom:1px solid #21262d; vertical-align:top}
+  table.bulk tr.bad td{background:#1e1213}
+  table.bulk tr.done td{background:#0f1f15}
+  .stat{font-size:10px; padding:1px 8px; border-radius:9px; border:1px solid; white-space:nowrap}
+  .stat.ok{border-color:#2c6b36; color:#7ee495}
+  .stat.failed{border-color:#7d2b28; color:#ff9d97}
+  .stat.committed{border-color:var(--free); color:var(--free); font-weight:700}
+  .gtag{font-family:Consolas,monospace; font-size:10px; color:var(--mda)}
+  .review{border:1px solid var(--border); border-radius:9px; margin-top:16px; overflow:hidden}
+  .review > h3{margin:0; padding:10px 14px; font-size:12.5px; display:flex;
+               align-items:center; gap:9px; border-bottom:1px solid var(--border)}
+  .review.clean > h3{background:#0f2417; color:#adf0bd; border-color:#2c6b36}
+  .review.dirty > h3{background:#241417; color:#ffb3ad; border-color:#7d2b28}
+  .review .rb{padding:4px 14px 12px}
+  .kindchip{display:inline-block; font-size:10.5px; padding:2px 9px; border-radius:10px;
+            border:1px solid var(--border); color:var(--muted); margin:6px 0 0 6px}
+  .fixhint{font-size:11px; color:var(--muted); margin-top:10px; line-height:1.7}
   .err{background:#2a1414; border:1px solid #7d2b28; color:#ff9d97;
        padding:10px 12px; border-radius:6px; font-size:12.5px}
   .pill{font-size:10.5px; padding:2px 8px; border-radius:10px; border:1px solid var(--border); color:var(--muted)}
@@ -284,8 +354,50 @@
     <option value="B">דומיין B (שדרה N)</option>
   </select>
   <button class="primary" id="btnRoute">SHOW ROUTE</button>
+  <button class="ghost" id="btnBulk">טעינת אקסל</button>
   <button class="ghost" id="btnClear">נקה</button>
 </header>
+
+<div id="bulkOverlay">
+  <div class="bulkbox">
+    <div class="bh">
+      <h2>תכנון מרוכז מקובץ אקסל</h2>
+      <span style="flex:1"></span>
+      <button class="ghost" id="btnBulkClose">סגור</button>
+    </div>
+    <div class="bb" id="bulkBody">
+      <div class="drop" id="bulkDrop">
+        <b>גרור לכאן קובץ .xlsx</b>
+        <span>או <u>לחץ לבחירת קובץ</u></span>
+        <small>עמודות נדרשות: פורט מקור ופורט יעד (SRC_PORT / DST_PORT, או Src Port,
+               From/To, A_PORT/B_PORT…). עמודת GROUP אופציונלית — אם אין, שורות בין
+               אותו זוג מסדים נחשבות אוטומטית לאותו צרור.</small>
+        <input type="file" id="bulkFile" accept=".xlsx" hidden>
+      </div>
+
+      <div class="prefs">
+        <h3>העדפות שיבוץ</h3>
+        <label><input type="checkbox" id="prefAdjacent" checked>
+          <span><b>פורטים צמודים פיזית</b> — כל צרור מקבל בלוק גידים רציף באותו פאנל,
+          במקום גידים מפוזרים</span></label>
+        <label><input type="checkbox" id="prefRedundancy">
+          <span><b>פיצול לרדונדנטיות</b> — שורות של אותו צרור מתחלקות בין שני מסלולים
+          נפרדים פיזית, כך שניתוק אחד לא מפיל את כולן</span></label>
+        <label><input type="checkbox" id="prefBalance">
+          <span><b>איזון עומס</b> — להעדיף את המסלול עם הכי הרבה מקום פנוי בטראנק
+          הצר שלו, במקום תמיד את הזול ביותר</span></label>
+      </div>
+
+      <div id="bulkResult"></div>
+    </div>
+    <div class="bf" id="bulkFooter" style="display:none">
+      <span id="bulkFootInfo" style="flex:1;font-size:12px;color:var(--muted)"></span>
+      <button id="btnBulkDownload">הורד סיכום</button>
+      <button class="primary" id="btnBulkPlan">תכנן מסלולים</button>
+      <button class="primary" id="btnBulkExecute">בצע את כל המסלולים</button>
+    </div>
+  </div>
+</div>
 
 <div id="app">
 
@@ -322,8 +434,7 @@
   <div class="dh">
     <h2 id="drawerTitle">מסלול</h2>
     <span class="spacer" style="flex:1"></span>
-    <button class="primary" id="btnExecute">בצע התקנה</button>
-    <button id="btnDownload">הורד Work Order</button>
+    <button class="ghost" id="btnMoreOptions" style="display:none">עוד אפשרות</button>
     <button class="ghost" id="btnCloseDrawer">סגור</button>
   </div>
   <div class="db" id="drawerBody"></div>
@@ -340,8 +451,6 @@ let portsByDevice = {};             // deviceId -> [port]
 let sel = { src:null, dst:null, rack:null, device:null, focusPort:null, view:"overview", pod:null };
 let currentPath = [];               // rack ids highlighted
 let currentSegIds = [];
-let lastWorkOrder = null;
-let lastRoute = null;               // the proposed route object, executable until committed
 
 const $ = id => document.getElementById(id);
 
@@ -387,6 +496,9 @@ function renderStats(){
 }
 
 const heat = pct => pct < 50 ? "var(--free)" : pct < 80 ? "var(--amber)" : "var(--used)";
+// a route that changes rows mid-path reports domain "mixed"; it must not be
+// coloured as if it were a clean B leg
+const domainCls = d => d === "A" ? "a" : d === "B" ? "b" : "";
 
 // ----------------------------------------------------------------- map ---
 function renderMap(){
@@ -438,7 +550,7 @@ function renderOverview(){
     const on = currentSegIds.includes(e.id);
     bb.innerHTML += `<div class="bb ${on ? "on-path" : ""}">
         <span class="mono" style="width:190px">${e.id}</span>
-        <span class="pill ${e.domain === "A" ? "a" : "b"}">domain ${e.domain}</span>
+        <span class="pill ${domainCls(e.domain)}">domain ${e.domain}</span>
         <span class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></span>
         <span style="width:64px;text-align:left">${f.used}/${f.capacity}</span>
       </div>`;
@@ -657,7 +769,7 @@ function refreshSlots(){
 $("btnClear").onclick = () => {
   sel = { src:null, dst:null, rack:sel.rack, device:sel.device, focusPort:null,
           view:sel.view, pod:sel.pod };
-  currentPath = []; currentSegIds = []; lastWorkOrder = null; lastRoute = null;
+  currentPath = []; currentSegIds = []; routeOptions = [];
   refreshSlots(); renderMap(); if (sel.device) renderDevice(); closeDrawer();
 };
 
@@ -699,81 +811,172 @@ function renderJumpChain(hopRacks, portIds){
 }
 
 // --------------------------------------------------------------- routing ---
+let routeOptions = [];       // options from the last /api/route call
+let routeSrc = null, routeDst = null;
+
 $("btnRoute").onclick = () => {
   const fp = sel.focusPort && T.ports[sel.focusPort];
   if (fp && fp.status === "used" && fp.circuit) return showExistingCircuit(fp.circuit);
   if (!sel.src || !sel.dst)
     return drawerError("בחר פורט מקור ופורט יעד (לחיצה על פורט ירוק פנוי), או לחץ על פורט תפוס כדי לראות את המסלול הקיים שלו.");
-
-  fetch("/api/route", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ src:sel.src, dst:sel.dst, domain:$("domainSel").value })
-  }).then(r => r.json()).then(showRoute).catch(e => drawerError(String(e)));
+  routeSrc = sel.src; routeDst = sel.dst;
+  fetchRouteOptions(2);
 };
 
-function showRoute(route){
-  if (route.status === "failed" || route.error){
-    currentPath = []; currentSegIds = []; renderMap();
-    return drawerError(route.reason || route.error);
-  }
+$("btnMoreOptions").onclick = () => fetchRouteOptions(routeOptions.length + 1);
+
+function fetchRouteOptions(count){
+  fetch("/api/route", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ src:routeSrc, dst:routeDst, domain:$("domainSel").value, count })
+  }).then(r => r.json()).then(res => {
+    if (res.status === "failed" || res.error){
+      currentPath = []; currentSegIds = []; renderMap();
+      return drawerError(res.reason || res.error);
+    }
+    showRouteOptions(res.options, count);
+  }).catch(e => drawerError(String(e)));
+}
+
+function focusOption(i){
+  const route = routeOptions[i];
+  if (!route) return;
   currentPath = route.hop_racks;
   currentSegIds = route.segments.map(s => s.edge_id);
-  lastWorkOrder = { name:`WO_${route.src_port}_${route.dst_port}`.replace(/[:|]/g,"-") + ".txt",
-                    text:route.work_order };
-  lastRoute = route;
   renderMap();
+}
 
-  $("drawerTitle").innerHTML = `מסלול מוצע <span class="pill ${route.domain === "A" ? "a" : "b"}">domain ${route.domain}</span>`;
+function showRouteOptions(options, requestedCount){
+  routeOptions = options;
+  focusOption(0);
+
+  const forced = !!$("domainSel").value;
+  $("drawerTitle").textContent = options.length > 1
+    ? `${options.length} מסלולים מוצעים — לחיצה על "הצג במפה" מדגישה כל אחד בנפרד`
+    : "מסלול מוצע" + (forced ? " (דומיין נכפה ידנית)" : "");
+  $("drawerBody").innerHTML = options.map((route, i) => renderOptionCard(route, i)).join("");
+  $("btnMoreOptions").style.display = (!forced && options.length >= requestedCount) ? "" : "none";
+  $("btnMoreOptions").disabled = false;
+  $("btnMoreOptions").textContent = "עוד אפשרות";
+  openDrawer();
+}
+
+function renderOptionCard(route, i){
   const jumpPorts = [route.src_port, ...route.transit_points.map(t => t.port), route.dst_port];
-  $("drawerBody").innerHTML = `
-    <div style="grid-column:1/-1">
-      <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
+  const pillCls = domainCls(route.domain);
+  const diversityBadge = route.shared_segments.length
+    ? `<span class="check warn">⚠ חופף ב-${route.shared_segments.length} מקטע/ים עם אפשרות קודמת</span>`
+    : `<span class="check">✓ 100% נפרד פיזית מכל אפשרות קודמת</span>`;
+  // a route that changes rows mid-path is physically valid but no longer sits
+  // in one redundancy leg — say so rather than letting "mixed" pass unnoticed
+  const mixedBadge = route.domain === "mixed"
+    ? `<span class="check warn">⚠ המסלול מחליף שדרה באמצע — לא נשאר ברגל רדונדנטיות אחת</span>`
+    : "";
+
+  return `
+    <div class="opt-card" data-idx="${i}">
+      <div class="opt-head">
+        <h3 style="font-size:13px;margin:0">אפשרות ${route.option_index}</h3>
+        <span class="pill ${pillCls}">domain ${route.domain}</span>
+        <button class="ghost" onclick="focusOption(${i})">הצג במפה</button>
+      </div>
+      <h4 style="font-size:11px;color:var(--muted);margin:8px 0 6px;font-weight:600">מסלול הכבל — קפיצות בין מסדים</h4>
       ${renderJumpChain(route.hop_racks, jumpPorts)}
       <div class="checks">
         <span class="check">✓ סוג כבל תואם קצה-לקצה (${route.cable_type === "fiber" ? "סיב↔סיב" : "נחושת↔נחושת"})</span>
         <span class="check">✓ קיבולת פנויה אומתה בכל אחד מ-${route.segments.length} המקטעים</span>
-        <span class="check">✓ המסלול כולו בדומיין ${route.domain} — אפס חפיפה עם הרגל השנייה</span>
+        ${diversityBadge}
+        ${mixedBadge}
       </div>
-    </div>
-    <div>
-      <div class="kv">
+      <div class="kv" style="margin-top:10px">
         <div><span class="k">סוג כבל</span> ${route.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
-        <div><span class="k">רגל רדונדנטיות</span> domain ${route.domain}</div>
         <div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>
         <div><span class="k">מקור</span> <span class="mono">${route.src_location}</span></div>
         <div><span class="k">יעד</span> <span class="mono">${route.dst_location}</span></div>
       </div>
-      <h3 style="font-size:12px;color:var(--muted);margin:14px 0 8px">מקטעים ותפוסה (לפני העבודה)</h3>
+      <h4 style="font-size:11px;color:var(--muted);margin:14px 0 8px;font-weight:600">מקטעים, גידים ותפוסה (לפני העבודה)</h4>
       ${route.segments.map(s => {
         const pct = Math.round(s.used_before / s.capacity * 100);
+        const shared = route.shared_segments.includes(s.edge_id);
+        const word = route.cable_type === "fiber" ? "סיב" : "זוג";
         return `<div class="seg">
-          <div class="st"><span class="mono">${s.edge_id}</span>
+          <div class="st"><span class="mono">${s.edge_id}${shared ? " ⚠" : ""}</span>
             <span style="color:var(--muted)">${s.length_m} מ' · ${s.used_before}/${s.capacity} · ${s.remaining_before} פנויים</span></div>
+          <div class="strand"><span class="sid">${word} #${s.strand_index}</span>
+            <span class="mono sp">${s.strand_port_from}</span>
+            <span class="ar">⇄</span>
+            <span class="mono sp">${s.strand_port_to}</span></div>
           <div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div></div>`;
       }).join("")}
-      ${route.transit_points.length ? `<h3 style="font-size:12px;color:var(--muted);margin:14px 0 6px">נקודות גישור (Cross-connect)</h3>
+      ${route.transit_points.length ? `<h4 style="font-size:11px;color:var(--muted);margin:14px 0 6px;font-weight:600">נקודות גישור (Cross-connect)</h4>
         ${route.transit_points.map(t => `<div class="mono" style="font-size:11.5px;margin:3px 0">${t.location}</div>`).join("")}` : ""}
-    </div>
-    <div>
-      <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">Work Order</h3>
-      <pre class="wo" id="woText">${escapeHtml(route.work_order)}</pre>
+      <h4 style="font-size:11px;color:var(--muted);margin:14px 0 8px;font-weight:600">Work Order</h4>
+      <pre class="wo">${escapeHtml(route.work_order)}</pre>
+      <div class="opt-actions">
+        <button class="primary" id="optExec-${i}" onclick="executeOption(${i})">בצע התקנה</button>
+        <button class="ghost" onclick="printOption(${i})">🖨 Work Order להדפסה</button>
+        <button class="ghost" onclick="downloadOption(${i})">הורד טקסט</button>
+      </div>
     </div>`;
-  openDrawer();
+}
+
+function printOption(i){
+  const r = routeOptions[i];
+  // once committed, print from the circuit — that is the record of what was
+  // actually installed, not what was merely proposed
+  const q = r.committed_circuit
+      ? "circuit=" + encodeURIComponent(r.committed_circuit)
+      : "route=" + encodeURIComponent(r.route_key);
+  window.open("/api/workorder?" + q, "_blank", "noopener");
+}
+
+function downloadOption(i){
+  const route = routeOptions[i];
+  const b = new Blob([route.work_order], {type:"text/plain;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(b);
+  a.download = `WO_${route.src_port}_${route.dst_port}_opt${route.option_index}`.replace(/[:|]/g,"-") + ".txt";
+  a.click();
+}
+
+function executeOption(i){
+  const route = routeOptions[i];
+  const btn = $(`optExec-${i}`);
+  btn.disabled = true; btn.textContent = "מבצע…";
+  fetch("/api/execute", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ route })
+  }).then(r => r.json()).then(res => {
+    if (res.error){
+      btn.disabled = false; btn.textContent = "בצע התקנה";
+      alert("ביצוע נכשל: " + res.error);
+      return;
+    }
+    applyExecutedOption(i, res.circuit, res.work_order);
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = "בצע התקנה";
+    alert("שגיאה: " + e);
+  });
 }
 
 function showExistingCircuit(cid){
   fetch("/api/circuit?id=" + encodeURIComponent(cid)).then(r => r.json()).then(c => {
     if (c.error) return drawerError(c.error);
     currentPath = c.hop_racks; currentSegIds = c.segment_ids;
-    lastWorkOrder = null; lastRoute = null;
+    routeOptions = [];
+    $("btnMoreOptions").style.display = "none";
     renderMap();
     $("drawerTitle").innerHTML = `חיבור קיים <span class="mono">${c.id}</span>
-        <span class="pill ${c.domain === "A" ? "a" : "b"}">domain ${c.domain}</span>`;
+        <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`;
     const jumpPorts = [c.a_port, ...c.transit_ports, c.b_port];
     $("drawerBody").innerHTML = `
       <div style="grid-column:1/-1">
         <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
         ${renderJumpChain(c.hop_racks, jumpPorts)}
+        <div class="opt-actions">
+          <button class="ghost" onclick="window.open('/api/workorder?circuit=${encodeURIComponent(c.id)}','_blank','noopener')">
+            🖨 Work Order להדפסה</button>
+        </div>
       </div>
       <div>
         <div class="kv">
@@ -784,8 +987,17 @@ function showExistingCircuit(cid){
         </div>
       </div>
       <div>
-        <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים פיזיים</h3>
-        ${c.segment_ids.map(s => `<div class="mono" style="font-size:11.5px;margin:4px 0">${s}</div>`).join("")}
+        <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">מקטעים פיזיים והגידים שנתפסו</h3>
+        ${(c.strands || []).map(s => {
+          const word = s.cable_type === "fiber" ? "סיב" : "זוג";
+          return `<div class="seg">
+            <div class="mono" style="font-size:11px">${s.edge_id}</div>
+            <div class="strand"><span class="sid">${word} #${s.strand_index}</span>
+              <span class="mono sp">${s.from_port}</span>
+              <span class="ar">⇄</span>
+              <span class="mono sp">${s.to_port}</span></div></div>`;
+        }).join("") || c.segment_ids.map(s =>
+            `<div class="mono" style="font-size:11.5px;margin:4px 0">${s}</div>`).join("")}
         ${c.transit_ports.length ? `<h3 style="font-size:12px;color:var(--muted);margin:14px 0 6px">פורטי גישור בדרך</h3>
           ${c.transit_ports.map(p => `<div class="mono" style="font-size:11.5px;margin:3px 0">${locate(p)}</div>`).join("")}` : ""}
       </div>`;
@@ -796,56 +1008,299 @@ function showExistingCircuit(cid){
 function drawerError(msg){
   $("drawerTitle").textContent = "לא נמצא מסלול";
   $("drawerBody").innerHTML = `<div class="err" style="grid-column:1/-1">${escapeHtml(msg)}</div>`;
-  lastWorkOrder = null; lastRoute = null; openDrawer();
+  routeOptions = [];
+  $("btnMoreOptions").style.display = "none";
+  openDrawer();
 }
 
-const openDrawer  = () => {
-  $("btnDownload").style.display = lastWorkOrder ? "" : "none";
-  $("btnExecute").style.display = lastRoute ? "" : "none";
-  $("btnExecute").disabled = false;
-  $("btnExecute").className = "primary";
-  $("btnExecute").textContent = "בצע התקנה";
-  $("drawer").classList.add("open");
-};
+const openDrawer  = () => $("drawer").classList.add("open");
 const closeDrawer = () => $("drawer").classList.remove("open");
 $("btnCloseDrawer").onclick = closeDrawer;
 
 // --------------------------------------------------------------- execute ---
-$("btnExecute").onclick = () => {
-  if (!lastRoute) return;
-  $("btnExecute").disabled = true;
-  $("btnExecute").textContent = "מבצע…";
-  fetch("/api/execute", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ route:lastRoute })
-  }).then(r => r.json()).then(res => {
-    if (res.error){
-      $("btnExecute").disabled = false;
-      $("btnExecute").textContent = "בצע התקנה";
-      alert("ביצוע נכשל: " + res.error);
-      return;
-    }
-    applyExecutedCircuit(res.circuit, res.work_order);
-  }).catch(e => {
-    $("btnExecute").disabled = false;
-    $("btnExecute").textContent = "בצע התקנה";
-    alert("שגיאה: " + e);
-  });
-};
-
 function bumpPortStats(portId){
   const p = T.ports[portId];
   const rs = rackStats[p.rack]; if (rs){ rs.free--; rs.used++; }
   const pod = T.racks[p.rack].pod, ps = podStats[pod]; if (ps){ ps.free--; ps.used++; }
 }
 
-function applyExecutedCircuit(circuit, workOrderText){
-  if (workOrderText){
-    lastWorkOrder = { name:`WO_${circuit.id}.txt`, text:workOrderText };
-    const wo = $("woText"); if (wo) wo.textContent = workOrderText;
+function applyExecutedOption(i, circuit, workOrderText){
+  if (workOrderText) routeOptions[i].work_order = workOrderText;
+  routeOptions[i].committed_circuit = circuit.id;
+  applyCircuitLocally(circuit);
+
+  sel.src = null; sel.dst = null; sel.focusPort = null;
+  refreshSlots(); renderStats(); renderMap();
+  if (sel.rack) renderRack();
+  if (sel.device) renderDevice();
+
+  // the port pair is now committed to this option — every other option for
+  // the same pair is moot, and there's nothing left to compute more of.
+  $("btnMoreOptions").style.display = "none";
+  routeOptions.forEach((_, j) => {
+    const b = $(`optExec-${j}`);
+    if (!b) return;
+    b.disabled = true;
+    if (j === i){ b.className = "executed"; b.textContent = `✓ בוצע — ${circuit.id}`; }
+    else b.textContent = "הפורטים כבר תפוסים";
+  });
+
+  const card = document.querySelector(`.opt-card[data-idx="${i}"]`);
+  if (card){
+    const banner = document.createElement("div");
+    banner.className = "exec-banner";
+    banner.innerHTML = `<span class="ck">✓</span><div><b>ההתקנה בוצעה ונכתבה בפועל ל-topology.json</b><br>
+        <span style="color:var(--muted)">מזהה חיבור <span class="mono">${circuit.id}</span> — אפשר ללחוץ על הפורטים במפה כדי לראות את החיבור</span></div>`;
+    card.prepend(banner);
   }
-  const endpoints = [circuit.a_port, circuit.b_port];
-  for (const pid of endpoints){
+  currentPath = circuit.hop_racks; currentSegIds = circuit.segment_ids; renderMap();
+}
+
+// ------------------------------------------------------- bulk from excel ---
+let bulkPlan = null;
+
+const bulkOpen  = () => $("bulkOverlay").classList.add("open");
+const bulkClose = () => $("bulkOverlay").classList.remove("open");
+$("btnBulk").onclick = bulkOpen;
+$("btnBulkClose").onclick = bulkClose;
+$("bulkOverlay").onclick = e => { if (e.target === $("bulkOverlay")) bulkClose(); };
+
+$("bulkDrop").onclick = () => $("bulkFile").click();
+$("bulkFile").onchange = e => { if (e.target.files[0]) uploadSheet(e.target.files[0]); };
+
+["dragenter","dragover"].forEach(ev => $("bulkDrop").addEventListener(ev, e => {
+  e.preventDefault(); $("bulkDrop").classList.add("hot");
+}));
+["dragleave","drop"].forEach(ev => $("bulkDrop").addEventListener(ev, e => {
+  e.preventDefault(); $("bulkDrop").classList.remove("hot");
+}));
+$("bulkDrop").addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0];
+  if (f) uploadSheet(f);
+});
+
+let bulkFile = null;          // kept so "plan anyway" can re-send it
+
+function prefQuery(extra){
+  return new URLSearchParams({
+    group_adjacent:   $("prefAdjacent").checked   ? "1" : "0",
+    redundancy_split: $("prefRedundancy").checked ? "1" : "0",
+    load_balance:     $("prefBalance").checked    ? "1" : "0",
+    ...(extra || {}),
+  });
+}
+
+// Stage 1: review the sheet without planning anything, so a file with typos
+// comes back as one list to fix rather than a half-planned run.
+function uploadSheet(file){
+  if (!/\.xlsx$/i.test(file.name))
+    return bulkError(`'${file.name}' אינו קובץ .xlsx. שמור אותו מחדש מאקסל כ-.xlsx.`);
+
+  bulkFile = file;
+  bulkPlan = null;
+  $("bulkResult").innerHTML = `<div class="empty">בודק את ${escapeHtml(file.name)}…</div>`;
+  $("bulkFooter").style.display = "none";
+
+  file.arrayBuffer().then(buf =>
+    fetch("/api/bulk/plan?" + prefQuery({validate_only:"1"}), {
+      method:"POST", headers:{"Content-Type":"application/octet-stream"}, body: buf
+    })
+  ).then(r => r.json()).then(res => {
+    if (res.status === "failed" || res.error) return bulkError(res.reason || res.error);
+    renderReview(res.review, file.name);
+  }).catch(e => bulkError(String(e)));
+}
+
+// Stage 2: actually plan. Rows the review flagged will simply fail again here,
+// which is why "plan anyway" is safe to offer.
+function planSheet(){
+  if (!bulkFile) return;
+  $("bulkResult").innerHTML = `<div class="empty">מתכנן את ${escapeHtml(bulkFile.name)}…</div>`;
+  bulkFile.arrayBuffer().then(buf =>
+    fetch("/api/bulk/plan?" + prefQuery(), {
+      method:"POST", headers:{"Content-Type":"application/octet-stream"}, body: buf
+    })
+  ).then(r => r.json()).then(res => {
+    if (res.status === "failed" || res.error) return bulkError(res.reason || res.error);
+    bulkPlan = res;
+    bulkPlan.fileName = bulkFile.name;
+    renderBulk();
+  }).catch(e => bulkError(String(e)));
+}
+
+const KIND_LABEL = {
+  incomplete:     "שורה חסרה",
+  unknown_port:   "פורט לא קיים",
+  port_in_use:    "פורט תפוס",
+  cable_mismatch: "אי-התאמת סוג כבל",
+  same_port:      "מקור = יעד",
+  same_rack:      "שני הקצוות באותו מסד",
+  duplicate_port: "פורט מופיע פעמיים בגיליון",
+  duplicate_row:  "שורה כפולה",
+};
+
+function renderReview(review, fileName){
+  const clean = review.problems === 0;
+  const kinds = Object.entries(review.by_kind || {})
+    .map(([k, n]) => `<span class="kindchip">${escapeHtml(KIND_LABEL[k] || k)} · ${n}</span>`)
+    .join("");
+
+  const rows = review.issues.map(i => `
+    <tr class="bad"><td>${i.row}</td>
+      <td><span class="stat failed">${escapeHtml(KIND_LABEL[i.kind] || i.kind)}</span></td>
+      <td class="mono">${escapeHtml(i.src || "—")}</td>
+      <td class="mono">${escapeHtml(i.dst || "—")}</td>
+      <td style="color:#ff9d97">${escapeHtml(i.message)}</td></tr>`).join("");
+
+  $("bulkResult").innerHTML = `
+    <div class="review ${clean ? "clean" : "dirty"}">
+      <h3>${clean ? "✓" : "⚠"}
+        <span>${escapeHtml(fileName)} — ${review.total} שורות נקראו</span>
+        <span style="flex:1"></span>
+        <span>${clean ? "לא נמצאו בעיות" :
+                `${review.problems} שורות דורשות תיקון · ${review.ok} תקינות`}</span>
+      </h3>
+      <div class="rb">
+        ${clean ? `<div class="fixhint">הגיליון תקין. אפשר להמשיך לתכנון המסלולים.</div>`
+                : `${kinds}
+        <table class="bulk" style="margin-top:10px">
+          <thead><tr><th>שורה</th><th>הבעיה</th><th>מקור</th><th>יעד</th><th>פירוט</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        <div class="fixhint">
+          מספרי השורות הם השורות האמיתיות בקובץ האקסל שלך.
+          תקן אותן וגרור את הקובץ שוב — או המשך לתכנון, והשורות האלה פשוט יסומנו כנכשלו.
+        </div>`}
+      </div>
+    </div>`;
+
+  $("bulkFooter").style.display = "";
+  $("btnBulkExecute").style.display = "none";
+  $("btnBulkDownload").style.display = "none";
+  $("btnBulkPlan").style.display = "";
+  $("btnBulkPlan").disabled = false;
+  $("btnBulkPlan").textContent = clean
+      ? `תכנן את ${review.ok} המסלולים`
+      : `המשך לתכנון (${review.ok} שורות תקינות)`;
+  $("bulkFootInfo").textContent = clean
+      ? "הבדיקה קריאה בלבד — עדיין לא שובץ ולא נכתב כלום."
+      : "אף שורה לא שובצה עדיין. הבדיקה קריאה בלבד.";
+}
+
+$("btnBulkPlan").onclick = () => {
+  $("btnBulkPlan").disabled = true;
+  $("btnBulkPlan").textContent = "מתכנן…";
+  planSheet();
+};
+
+function bulkError(msg){
+  bulkPlan = null;
+  $("bulkFooter").style.display = "none";
+  $("bulkResult").innerHTML = `<div class="err" style="margin-top:16px">${escapeHtml(msg)}</div>`;
+}
+
+function renderBulk(){
+  const s = bulkPlan.summary, rows = bulkPlan.results;
+  // count from the rows themselves — the plan-time summary goes stale the
+  // moment anything is committed
+  const pending   = rows.filter(r => r.status === "ok").length;
+  const committed = rows.filter(r => r.status === "committed").length;
+  const failed    = rows.filter(r => r.status === "failed").length;
+  const anyPending = pending > 0;
+
+  $("bulkResult").innerHTML = `
+    <div class="sumrow">
+      <span class="sumchip">קובץ <b>${escapeHtml(bulkPlan.fileName)}</b></span>
+      ${committed ? `<span class="sumchip good">בוצעו <b>${committed}</b> מתוך ${s.total}</span>`
+                  : `<span class="sumchip good">שובצו <b>${pending}</b> מתוך ${s.total}</span>`}
+      ${failed ? `<span class="sumchip bad">נכשלו <b>${failed}</b></span>` : ""}
+      <span class="sumchip">צרורות <b>${s.groups}</b></span>
+      <span class="sumchip">ממוצע קפיצות <b>${s.hops_avg}</b></span>
+      <span class="sumchip">סה"כ כבל <b>~${s.total_length_m}</b> מ'</span>
+    </div>
+    ${s.busiest_trunks.length ? `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+      הטראנקים העמוסים ביותר בתוכנית הזו:
+      ${s.busiest_trunks.map(([id,n]) => `<span class="mono" style="margin-left:10px">${id} ×${n}</span>`).join("")}
+    </div>` : ""}
+    <table class="bulk">
+      <thead><tr>
+        <th>שורה</th><th>סטטוס</th><th>צרור</th><th>מקור</th><th>יעד</th>
+        <th>קפיצות</th><th>דומיין</th><th>גידים</th><th>הערה</th><th></th>
+      </tr></thead>
+      <tbody>${rows.map(bulkRow).join("")}</tbody>
+    </table>`;
+
+  $("bulkFooter").style.display = "";
+  $("btnBulkPlan").style.display = "none";
+  $("btnBulkExecute").style.display = "";
+  $("btnBulkDownload").style.display = "";
+  $("btnBulkExecute").disabled = !anyPending;
+  $("btnBulkExecute").textContent = anyPending
+      ? `בצע את כל ${pending} המסלולים` : "אין מה לבצע";
+  $("bulkFootInfo").textContent = anyPending
+      ? "הביצוע כותב בפועל ל-topology.json ותופס את הפורטים והגידים."
+      : (committed ? `נכתבו ${committed} חיבורים ל-topology.json` : "");
+}
+
+function bulkRow(r){
+  const cls = r.status === "failed" ? "bad" : r.status === "committed" ? "done" : "";
+  if (r.status === "failed")
+    return `<tr class="bad"><td>${r.row}</td><td><span class="stat failed">נכשל</span></td>
+      <td class="gtag">${escapeHtml(r.group || "")}</td>
+      <td class="mono">${escapeHtml(r.src)}</td><td class="mono">${escapeHtml(r.dst)}</td>
+      <td colspan="5" style="color:#ff9d97">${escapeHtml(r.reason || "")}</td></tr>`;
+
+  const label = r.status === "committed"
+      ? `<span class="stat committed">✓ ${escapeHtml(r.circuit_id || "בוצע")}</span>`
+      : `<span class="stat ok">משובץ</span>`;
+  const strands = (r.strands || []).map(s => `#${s.index}`).join(" ");
+  const print = `<a href="/api/workorder?plan=${encodeURIComponent(bulkPlan.plan_id)}&row=${r.row}"
+       target="_blank" rel="noopener" title="Work Order להדפסה">🖨</a>`;
+  return `<tr class="${cls}"><td>${r.row}</td><td>${label}</td>
+    <td class="gtag">${escapeHtml(r.group || "")}</td>
+    <td class="mono">${escapeHtml(r.src)}</td><td class="mono">${escapeHtml(r.dst)}</td>
+    <td>${r.hops}</td>
+    <td><span class="pill ${domainCls(r.domain)}">${r.domain}</span></td>
+    <td class="mono" style="font-size:10px">${strands}</td>
+    <td style="color:var(--muted);font-size:10.5px">${escapeHtml(r.note || "")}</td>
+    <td style="text-align:center">${print}</td></tr>`;
+}
+
+$("btnBulkExecute").onclick = () => {
+  if (!bulkPlan) return;
+  const btn = $("btnBulkExecute");
+  btn.disabled = true; btn.textContent = "מבצע…";
+  fetch("/api/bulk/execute", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ plan_id: bulkPlan.plan_id })
+  }).then(r => r.json()).then(res => {
+    if (res.error){
+      btn.disabled = false; btn.textContent = "בצע את כל המסלולים";
+      return alert("הביצוע נכשל: " + res.error);
+    }
+    const byRow = new Map(res.committed.map(c => [c.row, c.circuit]));
+    for (const r of bulkPlan.results){
+      const c = byRow.get(r.row);
+      if (c){ r.status = "committed"; r.circuit_id = c.id; applyCircuitLocally(c); }
+    }
+    for (const f of res.failed){
+      const r = bulkPlan.results.find(x => x.row === f.row);
+      if (r){ r.status = "failed"; r.reason = f.reason; }
+    }
+    renderStats(); renderMap();
+    if (sel.rack) renderRack();
+    if (sel.device) renderDevice();
+    renderBulk();
+    $("bulkFootInfo").textContent =
+      `נכתבו ${res.committed.length} חיבורים ל-topology.json` +
+      (res.failed.length ? ` · ${res.failed.length} נכשלו` : "");
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = "בצע את כל המסלולים";
+    alert("שגיאה: " + e);
+  });
+};
+
+function applyCircuitLocally(circuit){
+  for (const pid of [circuit.a_port, circuit.b_port]){
     const p = T.ports[pid];
     p.status = "used"; p.circuit = circuit.id; p.role = "endpoint";
     p.peer = pid === circuit.a_port ? circuit.b_port : circuit.a_port;
@@ -856,36 +1311,33 @@ function applyExecutedCircuit(circuit, workOrderText){
     p.status = "used"; p.circuit = circuit.id; p.role = "transit"; p.peer = null;
     bumpPortStats(pid);
   }
-  for (const eid of circuit.segment_ids){
-    const e = T.edges.find(e => e.id === eid);
-    if (e) e.cable_types[circuit.cable_type].used++;
+  // mirror the strand reservations too, not just the counter, so the local
+  // copy of the map stays a faithful picture of what the server now holds
+  for (const s of (circuit.strands || [])){
+    const e = T.edges.find(e => e.id === s.edge_id);
+    if (!e) continue;
+    const ct = e.cable_types[s.cable_type];
+    if (!ct) continue;
+    (ct.strands ||= {})[String(s.strand_index)] = circuit.id;
+    ct.used = Object.keys(ct.strands).length;
   }
   (T.circuits ||= {})[circuit.id] = circuit;
-
-  sel.src = null; sel.dst = null; sel.focusPort = null;
-  lastRoute = null;
-  refreshSlots(); renderStats(); renderMap();
-  if (sel.rack) renderRack();
-  if (sel.device) renderDevice();
-
-  $("drawerTitle").innerHTML = `<span class="mono">${circuit.id}</span>
-      <span class="pill ${circuit.domain === "A" ? "a" : "b"}">domain ${circuit.domain}</span>`;
-  const banner = document.createElement("div");
-  banner.className = "exec-banner";
-  banner.style.gridColumn = "1/-1";
-  banner.innerHTML = `<span class="ck">✓</span><div><b>ההתקנה בוצעה ונכתבה בפועל ל-topology.json</b><br>
-      <span style="color:var(--muted)">מזהה חיבור <span class="mono">${circuit.id}</span> — אפשר ללחוץ על הפורטים במפה כדי לראות את החיבור</span></div>`;
-  $("drawerBody").prepend(banner);
-  $("btnExecute").disabled = true;
-  $("btnExecute").className = "executed";
-  $("btnExecute").textContent = `✓ בוצע — ${circuit.id}`;
 }
 
-$("btnDownload").onclick = () => {
-  if (!lastWorkOrder) return alert("אין Work Order להורדה — חשב מסלול חדש קודם.");
-  const b = new Blob([lastWorkOrder.text], {type:"text/plain;charset=utf-8"});
+$("btnBulkDownload").onclick = () => {
+  if (!bulkPlan) return;
+  const head = ["row","status","group","src","dst","hops","domain","strands","note_or_reason"];
+  const esc = v => `"${String(v ?? "").replace(/"/g,'""')}"`;
+  const lines = [head.join(",")].concat(bulkPlan.results.map(r => [
+    r.row, r.status, r.group, r.src, r.dst, r.hops ?? "", r.domain ?? "",
+    (r.strands || []).map(s => `${s.edge_id}#${s.index}`).join(" | "),
+    r.reason || r.note || "",
+  ].map(esc).join(",")));
+  const b = new Blob(["﻿" + lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(b); a.download = lastWorkOrder.name; a.click();
+  a.href = URL.createObjectURL(b);
+  a.download = bulkPlan.fileName.replace(/\.xlsx$/i, "") + "_plan.csv";
+  a.click();
 };
 
 function escapeHtml(s){

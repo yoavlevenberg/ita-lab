@@ -39,6 +39,13 @@ import networkx as nx
 
 TOPOLOGY_PATH = Path(__file__).parent / "data" / "topology.json"
 
+# Every hop costs a patch, a panel port and a hands-on cross-connect, so a
+# route with fewer hops beats a shorter one almost every time. Weighting each
+# segment as HOP_COST + length_m sorts by hop count first and uses the metre
+# figure only to break ties between paths of equal depth — the distances in
+# this synthetic map are assumptions anyway, while the hop count is real.
+HOP_COST = 10_000.0
+
 # When patching through an intermediate rack we prefer landing on a patch
 # panel rather than eating a switch port.
 _TRANSIT_DEVICE_PREFERENCE = ("fiber_patch_panel", "copper_patch_panel", "switch")
@@ -73,8 +80,55 @@ def _port(topology, port_id):
     return p
 
 
-def _edge_key(a, b):
-    return "|".join(sorted((a, b)))
+# --------------------------------------------------------------------------
+# trunk strands  (port-to-port model)
+# --------------------------------------------------------------------------
+# A trunk is not an abstract capacity counter — it is a bundle of individually
+# numbered strands, and strand #7 at one end is physically the same glass (or
+# copper pair) as strand #7 at the other end. So every strand is addressable
+# as a pair of real ports:
+#
+#     A1-S05->A1-S01#F007@A1-S05   <-->   A1-S05->A1-S01#F007@A1-S01
+#
+# Only OCCUPIED strands are stored (edge["cable_types"][ct]["strands"], a
+# {index: circuit_id} map); a strand with no entry is free. Free is the
+# default state and there are ~46k strands in this topology, so recording
+# only what's taken keeps the dataset small without losing any addressability
+# — every strand still has a stable number and two derivable port ids.
+
+_STRAND_PREFIX = {"fiber": "F", "copper": "C"}
+
+
+def strand_port_id(edge_id, cable_type, index, rack):
+    """The port id of one END of one strand. The other end is the same call
+    with the trunk's other rack."""
+    return f"{edge_id}#{_STRAND_PREFIX[cable_type]}{index:03d}@{rack}"
+
+
+def is_trunk_full(edge, cable_type):
+    ct = edge["cable_types"].get(cable_type)
+    if not ct:
+        return True
+    return len(ct.get("strands") or {}) >= ct["capacity"]
+
+
+def first_free_strand(edge, cable_type, claimed=()):
+    """Lowest-numbered free strand — technicians patch bottom-up, and a
+    deterministic choice keeps Work Orders reproducible.
+
+    `claimed` holds strand numbers already spoken for by routes that have been
+    proposed but not yet committed (the alternative options of the same
+    request). Without it, two options that overlap on a trunk would both be
+    written up as using the very same strand.
+    """
+    ct = edge["cable_types"].get(cable_type)
+    if not ct:
+        return None
+    taken = ct.get("strands") or {}
+    for i in range(1, ct["capacity"] + 1):
+        if str(i) not in taken and i not in claimed:
+            return i
+    return None
 
 
 def _build_graph(topology, cable_type, domain=None):
@@ -86,14 +140,16 @@ def _build_graph(topology, cable_type, domain=None):
         ct = edge["cable_types"].get(cable_type)
         if not ct:
             continue                                    # trunk doesn't carry this media at all
-        if ct["capacity"] - ct["used"] <= 0:
-            continue                                    # trunk is full
+        if is_trunk_full(edge, cable_type):
+            continue                                    # every strand already patched
         if domain is not None and edge["domain"] != domain:
             continue                                    # wrong redundancy leg
-        g.add_edge(edge["from"], edge["to"],
+        used = len(ct.get("strands") or {})
+        g.add_edge(edge["from"], edge["to"], obj=edge,
                    id=edge["id"], domain=edge["domain"], length_m=edge["length_m"],
-                   capacity=ct["capacity"], used=ct["used"],
-                   remaining=ct["capacity"] - ct["used"])
+                   weight=HOP_COST + edge["length_m"],
+                   capacity=ct["capacity"], used=used,
+                   remaining=ct["capacity"] - used)
     return g
 
 
@@ -114,6 +170,38 @@ def _pick_transit_port(topology, rack_id, cable_type, exclude):
         raise RouteError(f"No free {cable_type} port left on {rack_id} to cross-connect through.")
     candidates.sort()
     return candidates[0][3]
+
+
+def _segment(e, a, b, cable_type, reserved=None):
+    """One hop of a route: which trunk, and which numbered strand inside it
+    gets patched at each end.
+
+    `reserved` maps edge_id -> set of strand numbers already handed to a
+    sibling option of this same request, so alternatives never quote the same
+    physical strand."""
+    edge = e["obj"]
+    claimed = (reserved or {}).get(e["id"], ())
+    index = first_free_strand(edge, cable_type, claimed)
+    if index is None:
+        raise RouteError(f"Trunk '{e['id']}' has no free {cable_type} strand left.")
+    if reserved is not None:
+        reserved.setdefault(e["id"], set()).add(index)
+    # the strand is physically continuous, so its two port ids are just its
+    # two ends — reported in the direction the route actually travels
+    return {
+        "edge_id": e["id"], "from_rack": a, "to_rack": b, "domain": e["domain"],
+        "length_m": e["length_m"], "capacity": e["capacity"],
+        "used_before": e["used"], "remaining_before": e["remaining"],
+        "strand_index": index,
+        "strand_port_from": strand_port_id(e["id"], cable_type, index, a),
+        "strand_port_to": strand_port_id(e["id"], cable_type, index, b),
+    }
+
+
+def describe_strand(seg, cable_type):
+    """Human-readable strand label, e.g. 'fiber strand #7'."""
+    kind = "fiber strand" if cable_type == "fiber" else "copper pair"
+    return f"{kind} #{seg['strand_index']}"
 
 
 def describe_port(topology, port_id):
@@ -158,7 +246,7 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
             attempts.append(f"domain {d}: no {cable_type} uplink with spare capacity")
             continue
         try:
-            hops = nx.shortest_path(g, src_rack, dst_rack, weight="length_m")
+            hops = nx.shortest_path(g, src_rack, dst_rack, weight="weight")
         except nx.NetworkXNoPath:
             attempts.append(f"domain {d}: no path with available capacity")
             continue
@@ -167,11 +255,7 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
         for a, b in zip(hops, hops[1:]):
             e = g.get_edge_data(a, b)
             total += e["length_m"]
-            segments.append({
-                "edge_id": e["id"], "from_rack": a, "to_rack": b, "domain": e["domain"],
-                "length_m": e["length_m"], "capacity": e["capacity"],
-                "used_before": e["used"], "remaining_before": e["remaining"],
-            })
+            segments.append(_segment(e, a, b, cable_type))
         tightest = min(s["remaining_before"] for s in segments)
         # shortest run wins; on a tie, take the leg with more headroom left
         candidates.append(((round(total, 1), -tightest), d, hops, segments, total))
@@ -211,6 +295,145 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
 # committing  (this is the function that will one day call the ITA API)
 # --------------------------------------------------------------------------
 
+def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
+                     reserved=None, reserved_ports=None):
+    """Build a full route dict (segments, transit points, totals) from an
+    already-computed rack path. Shared by resolve_route_options() below.
+
+    `reserved` / `reserved_ports` carry what sibling options already claimed,
+    so two alternatives for the same request never quote the same strand or
+    the same cross-connect port."""
+    segments, total = [], 0.0
+    for a, b in zip(hops, hops[1:]):
+        e = g.get_edge_data(a, b)
+        total += e["length_m"]
+        segments.append(_segment(e, a, b, cable_type, reserved))
+
+    used = {src_port_id, dst_port_id} | set(reserved_ports or ())
+    transit = []
+    for rack_id in hops[1:-1]:
+        pid = _pick_transit_port(topology, rack_id, cable_type, used)
+        used.add(pid)
+        transit.append({"rack": rack_id, "port": pid,
+                        "location": describe_port(topology, pid)})
+
+    domains_seen = {s["domain"] for s in segments}
+    domain_label = next(iter(domains_seen)) if len(domains_seen) == 1 else "mixed"
+
+    return {
+        "status": "ok",
+        "cable_type": cable_type,
+        "domain": domain_label,
+        "src_port": src_port_id,
+        "dst_port": dst_port_id,
+        "src_location": describe_port(topology, src_port_id),
+        "dst_location": describe_port(topology, dst_port_id),
+        "hop_racks": hops,
+        "segments": segments,
+        "transit_points": transit,
+        "total_length_m": round(total, 1),
+    }
+
+
+def _next_best_fallback(g, src_rack, dst_rack, exclude_hop_lists):
+    """Used when the graph has run out of fully edge-disjoint paths: fall
+    back to the next-shortest path overall (may overlap), skipping anything
+    already returned as an option."""
+    try:
+        candidates = nx.shortest_simple_paths(g, src_rack, dst_rack, weight="weight")
+    except nx.NetworkXNoPath:
+        return None
+    exclude = {tuple(h) for h in exclude_hop_lists}
+    for hops in candidates:
+        if tuple(hops) not in exclude:
+            return hops
+    return None
+
+
+def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topology=None):
+    """Propose up to `count` alternative physical routes for the same port
+    pair, computed from the graph itself rather than from any naming
+    convention (rack/rows named A/B, 1/2, FIRST/SEC, ...). The first option
+    is the shortest path; each following option is the shortest path once
+    the previous options' own trunk segments are removed from the graph —
+    which guarantees zero shared segments whenever such a path physically
+    exists. When it doesn't, we fall back to the next-best path and report
+    exactly which segments it shares, so an engineer can judge (e.g. against
+    independent power feeds) whether that overlap is actually a problem.
+
+    If `domain` is given, this is a manual override: skip the automatic
+    diversity search and return a single path forced onto that labeled leg,
+    same as the old behavior — useful on sites where the domain tags are
+    known to be reliable.
+    """
+    topology = topology if topology is not None else load_topology()
+
+    src, dst = _port(topology, src_port_id), _port(topology, dst_port_id)
+    if src["status"] != "free":
+        raise RouteError(f"Source port {src_port_id} is already in use.")
+    if dst["status"] != "free":
+        raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    if src["type"] != dst["type"]:
+        raise RouteError(f"Cable type mismatch: source is {src['type']}, destination is "
+                         f"{dst['type']}. Both ends must be the same media.")
+
+    cable_type = src["type"]
+    src_rack, dst_rack = src["rack"], dst["rack"]
+    if src_rack == dst_rack:
+        raise RouteError("Both ports are in the same rack — this is an intra-rack patch, "
+                         "no trunk routing required.")
+
+    g = _build_graph(topology, cable_type, domain=domain)
+    if src_rack not in g or dst_rack not in g:
+        where = f" in domain {domain}" if domain else ""
+        raise RouteError(f"No {cable_type} uplink with spare capacity{where}.")
+
+    if domain is not None:
+        try:
+            hops = nx.shortest_path(g, src_rack, dst_rack, weight="weight")
+        except nx.NetworkXNoPath:
+            raise RouteError(f"No path with available capacity in domain {domain}.")
+        route = _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g)
+        route["shared_segments"] = []
+        route["fully_disjoint_from_previous"] = True
+        route["option_index"] = 1
+        return [route]
+
+    options, seen_edge_sets = [], []
+    working = g.copy()
+    # options are alternatives for ONE request, and only one of them will ever
+    # be committed — but they are shown (and printed into Work Orders) side by
+    # side, so each has to name resources the others have not already named
+    reserved, reserved_ports = {}, set()
+    for i in range(count):
+        try:
+            hops = nx.shortest_path(working, src_rack, dst_rack, weight="weight")
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            hops = _next_best_fallback(g, src_rack, dst_rack, [o["hop_racks"] for o in options])
+            if hops is None:
+                break
+
+        route = _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
+                                 reserved=reserved, reserved_ports=reserved_ports)
+        reserved_ports.update(t["port"] for t in route["transit_points"])
+        this_edges = {s["edge_id"] for s in route["segments"]}
+        prev_edges = set().union(*seen_edge_sets) if seen_edge_sets else set()
+        shared = sorted(this_edges & prev_edges)
+        route["shared_segments"] = shared
+        route["fully_disjoint_from_previous"] = not shared
+        route["option_index"] = i + 1
+        options.append(route)
+        seen_edge_sets.append(this_edges)
+
+        for a, b in zip(hops, hops[1:]):
+            if working.has_edge(a, b):
+                working.remove_edge(a, b)
+
+    if not options:
+        raise RouteError(f"No valid {cable_type} route between {src_rack} and {dst_rack}.")
+    return options
+
+
 def next_circuit_id(topology):
     """Next free CIR-#### id, continuing from whatever's already seeded."""
     nums = [int(cid.split("-", 1)[1]) for cid in topology.get("circuits", {})
@@ -232,18 +455,34 @@ def revalidate_route(topology, route):
     for seg in route["segments"]:
         edge = edges.get(seg["edge_id"])
         ct = edge["cable_types"].get(route["cable_type"]) if edge else None
-        if not ct or ct["used"] >= ct["capacity"]:
-            raise RouteError(f"Trunk '{seg['edge_id']}' no longer has spare capacity — recompute the route.")
+        if not ct:
+            raise RouteError(f"Trunk '{seg['edge_id']}' no longer carries {route['cable_type']} — recompute the route.")
+        # the reservation is for one SPECIFIC strand, so checking spare
+        # capacity is not enough — that exact strand has to still be free
+        taken = ct.get("strands") or {}
+        index = str(seg["strand_index"])
+        if index in taken:
+            raise RouteError(f"{describe_strand(seg, route['cable_type']).capitalize()} on trunk "
+                             f"'{seg['edge_id']}' was patched by {taken[index]} in the meantime — "
+                             "recompute the route.")
 
 
 def commit_route(topology, route, circuit_id):
     """Apply an approved route: consume the ports, charge the trunks, and
     record the circuit. In production this is where the ITA write-back goes."""
+    edges = {e["id"]: e for e in topology["edges"]}
+    strand_log = []
     for seg in route["segments"]:
-        for edge in topology["edges"]:
-            if edge["id"] == seg["edge_id"]:
-                edge["cable_types"][route["cable_type"]]["used"] += 1
-                break
+        edge = edges[seg["edge_id"]]
+        ct = edge["cable_types"][route["cable_type"]]
+        strands = ct.setdefault("strands", {})
+        strands[str(seg["strand_index"])] = circuit_id
+        ct["used"] = len(strands)          # kept in sync so capacity bars stay cheap
+        strand_log.append({
+            "edge_id": edge["id"], "cable_type": route["cable_type"],
+            "strand_index": seg["strand_index"],
+            "from_port": seg["strand_port_from"], "to_port": seg["strand_port_to"],
+        })
 
     endpoints = (route["src_port"], route["dst_port"])
     for port_id in endpoints:
@@ -268,6 +507,7 @@ def commit_route(topology, route, circuit_id):
         "b_port": route["dst_port"],
         "hop_racks": route["hop_racks"],
         "segment_ids": [s["edge_id"] for s in route["segments"]],
+        "strands": strand_log,
         "transit_ports": [t["port"] for t in route["transit_points"]],
         "total_length_m": route["total_length_m"],
     }
