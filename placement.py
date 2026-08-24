@@ -25,11 +25,11 @@ Three things, combined into one score:
 
 RACKS THAT ARE NOT CANDIDATES
 -----------------------------
-MDA filler positions are not wired into the routing graph at all, so a device
-there could not be cabled to anything — they are excluded outright rather
-than scored low. EOR and MDA hub cabinets are patch fields and aggregation
-switches; dropping compute into them is a penalty, not a ban, because a site
-may genuinely do it.
+Equipment is never installed in an EOR cabinet or anywhere inside an MDA pod.
+Those are cross-connect real estate — patch fields and aggregation switches,
+built once and thereafter only patched into. This is a hard exclusion rather
+than a low score: proposing such a position at all would be proposing
+something the site does not do.
 """
 
 from collections import defaultdict
@@ -51,17 +51,11 @@ SAME_MDA = 500
 SAME_ROOM = 700
 ELSEWHERE = 1200
 
-# A compute box in a hub cabinet is unusual but not forbidden.
-WRONG_ROLE_PENALTY = 260
-
 # Filling a cabinet from 20% to 50% is unremarkable; from 85% to 95% is a
 # problem, because the next device and any replacement have nowhere to go.
 # Cubing the ratio keeps the penalty near zero until a cabinet is genuinely
 # tight, then makes it bite hard.
 FULLNESS_WEIGHT = 400
-
-COMPUTE_TYPES = ("server",)
-
 
 class PlacementError(Exception):
     """No position exists for this device, and the message says why."""
@@ -153,17 +147,18 @@ def distance_rank(topology, rack_a, rack_b):
 
 
 def eligible_racks(topology):
-    """Cabinets a new device could physically live in.
+    """Cabinets a new device may be installed in.
 
-    MDA filler positions are excluded: they are deliberately not wired into
-    the routing graph, so a device there could never be cabled.
+    Equipment is not racked in EOR cabinets or anywhere in an MDA pod. Those
+    are cross-connect real estate: patch fields and aggregation switches that
+    the site builds once and then only patches into. So this is a hard
+    exclusion, not a low score — offering such a position at all would be
+    proposing something the site does not do.
+
+    That leaves the compute cabinets: 504 of the 640 racks here.
     """
-    out = []
-    for rid, meta in topology["racks"].items():
-        if meta.get("is_mda") and not meta.get("is_eor"):
-            continue                      # filler position inside an MDA pod
-        out.append(rid)
-    return out
+    return [rid for rid, meta in topology["racks"].items()
+            if not meta.get("is_eor") and not meta.get("is_mda")]
 
 
 # --------------------------------------------------------------------------
@@ -194,7 +189,6 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
     """
     extra_taken = extra_taken or {}
     u_size = device["u_size"]
-    is_compute = device["type"] in COMPUTE_TYPES
 
     scored = []
     for rack_id in eligible_racks(topology):
@@ -203,7 +197,6 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
         if not spots:
             continue
 
-        meta = topology["racks"][rack_id]
         if neighbours:
             # a device usually talks to more than one thing; the position has
             # to be good for ALL of them, so take the total, not the best hop
@@ -213,13 +206,12 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
             proximity = 0.0
 
         fullness = _rack_fullness(topology, rack_id)
-        role_penalty = WRONG_ROLE_PENALTY if (is_compute and meta.get("is_eor")) else 0
 
         best = min(spots, key=lambda s: s["slack"])
         # tightest fit first, so small kit does not eat the last big gap
         fit_penalty = best["slack"] * 0.5
 
-        score = proximity + (fullness ** 3) * FULLNESS_WEIGHT + role_penalty + fit_penalty
+        score = proximity + (fullness ** 3) * FULLNESS_WEIGHT + fit_penalty
         scored.append({
             "rack": rack_id,
             "u_start": best["u_start"],
@@ -228,9 +220,8 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
             "proximity": round(proximity, 1),
             "rack_fullness_pct": round(fullness * 100),
             "gap_height": best["gap_height"],
-            "is_eor": bool(meta.get("is_eor")),
-            "pod": meta["pod"],
-            "reason": _reason(topology, rack_id, neighbours, fullness, role_penalty),
+            "pod": topology["racks"][rack_id]["pod"],
+            "reason": _reason(topology, rack_id, neighbours, fullness),
             "alternatives_in_rack": len(spots),
         })
 
@@ -243,11 +234,10 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
     return scored[:limit]
 
 
-def _reason(topology, rack_id, neighbours, fullness, role_penalty):
+def _reason(topology, rack_id, neighbours, fullness):
     bits = []
     if neighbours:
-        same = [n for n in neighbours if n == rack_id]
-        if same:
+        if any(n == rack_id for n in neighbours):
             bits.append("same cabinet as what it connects to — a patch lead, no trunk")
         else:
             ring = min(distance_rank(topology, rack_id, n) for n in neighbours)
@@ -258,8 +248,6 @@ def _reason(topology, rack_id, neighbours, fullness, role_penalty):
                 SAME_ROOM: "same room as what it connects to",
             }.get(ring, "reachable, but not close to what it connects to"))
     bits.append(f"cabinet {round(fullness * 100)}% full")
-    if role_penalty:
-        bits.append("note: this is a hub cabinet, not a compute cabinet")
     return " · ".join(bits)
 
 

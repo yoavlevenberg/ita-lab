@@ -330,6 +330,30 @@ def main():
           from_gaps | occupied == set(range(1, 43)) and not (from_gaps & occupied),
           f"{len(from_gaps)} free + {len(occupied)} used")
 
+    # ---------- equipment is never racked in EOR or MDA cabinets ----------
+    # Those are cross-connect real estate, so they must not be offered at all
+    # — not merely ranked low, which would still put them in front of a user.
+    allowed = placement.eligible_racks(T)
+    check("no EOR cabinet is offered as a position",
+          not [r for r in allowed if T["racks"][r]["is_eor"]],
+          str([r for r in allowed if T["racks"][r]["is_eor"]][:3]))
+    check("no cabinet inside an MDA pod is offered",
+          not [r for r in allowed if T["racks"][r]["is_mda"]],
+          str([r for r in allowed if T["racks"][r]["is_mda"]][:3]))
+    check("the compute cabinets are all still available",
+          len(allowed) == sum(1 for m in T["racks"].values()
+                              if not m["is_eor"] and not m["is_mda"]),
+          f"{len(allowed)} offered")
+
+    # even when the thing it connects to lives in an EOR, the device goes to a
+    # compute cabinet rather than joining it
+    eor_target = {"serial": "SN-EORTEST", "type": "switch", "raw_type": "switch",
+                  "u_size": 1, "fiber_ports": 4, "copper_ports": 4, "label": "x"}
+    near_eor = placement.rank_positions(T, eor_target, ["A1-S01"], limit=3)
+    check("a device connecting into an EOR is still racked outside it",
+          all(not T["racks"][c["rack"]]["is_eor"] for c in near_eor),
+          str([c["rack"] for c in near_eor]))
+
     # ---------- placing new equipment ----------
     tor_serial = a_dev["serial"]
     specs = [
