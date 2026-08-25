@@ -43,18 +43,6 @@ def serial_for(device_id):
     return PREFIX + "".join(out)
 
 
-def assign_all(topology):
-    """Stamp a serial on every device and verify uniqueness."""
-    seen = {}
-    for dev_id, dev in topology["devices"].items():
-        s = serial_for(dev_id)
-        if s in seen:
-            raise SerialError(f"serial {s} generated for both {seen[s]} and {dev_id}")
-        seen[s] = dev_id
-        dev["serial"] = s
-    return len(seen)
-
-
 def index(topology):
     """serial -> device id, for resolving what a demand sheet refers to."""
     return {d["serial"]: d["id"] for d in topology["devices"].values() if d.get("serial")}

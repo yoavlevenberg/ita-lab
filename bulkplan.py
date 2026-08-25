@@ -211,23 +211,6 @@ def looks_like_serial(text):
     return str(text).strip().upper().startswith(serials.PREFIX)
 
 
-def endpoint_kind(topology, text, serial_index, new_serials):
-    """What a cell refers to: an existing port, an existing device, a device
-    the sheet is introducing, or nothing recognisable."""
-    if not text:
-        return "empty"
-    if text in topology["ports"]:
-        return "port"
-    if looks_like_serial(text):
-        s = serials.normalise(text)
-        if s in new_serials:
-            return "new_device"
-        if s in serial_index:
-            return "device"
-        return "unknown_serial"
-    return "unknown_port"
-
-
 def free_port_on_device(topology, device_id, cable_type, exclude=()):
     """Lowest-numbered free port of the right media on a device."""
     best = None
@@ -505,6 +488,16 @@ def plan_devices(topology, new_devices, demands, limit=4, constraints=None):
     serial_index = serials.index(topology)
     by_serial = {d["serial"]: d for d in new_devices}
 
+    # One source of truth for what a usable spec is. Re-checking here rather
+    # than trusting the caller to have validated first keeps the review and the
+    # plan in agreement BY CONSTRUCTION: a row the review rejects can never
+    # come out of the planner as sited.
+    #
+    # This matters most for a mistyped zone. Swallowing the ZoneError and
+    # carrying on with no zone turned the hardest boundary in the system into
+    # "anywhere" on a typo — silently, and in the direction that does damage.
+    rejected = {i["row"]: i for i in validate_devices(topology, new_devices, demands)["issues"]}
+
     links = []
     for d in demands:
         if looks_like_serial(d["src"]) and looks_like_serial(d["dst"]):
@@ -514,17 +507,19 @@ def plan_devices(topology, new_devices, demands, limit=4, constraints=None):
     placed, results, reserved = {}, [], defaultdict(set)
     for serial in order:
         spec = by_serial[serial]
-        # resolve here too rather than trusting validate_devices to have run
-        # first — the zone is a hard boundary, and it must not depend on the
-        # order two independent functions happen to be called in
-        if "zone" not in spec:
-            try:
-                spec["zone"] = zones.resolve(spec.get("raw_zone"))
-            except zones.ZoneError:
-                spec["zone"] = None
         base = {"row": spec["row"], "serial": serial, "type": spec["type"],
                 "u_size": spec["u_size"], "label": spec["label"],
                 "zone": spec.get("zone")}
+
+        fault = rejected.get(spec["row"])
+        if fault:
+            results.append({**base, "status": "failed", "reason": fault["message"]})
+            continue
+
+        # validate_devices resolved and stamped this on the way through; a
+        # device that got past it has a zone that is either valid or absent
+        spec.setdefault("zone", None)
+        base["zone"] = spec["zone"]
 
         neighbours = _neighbour_racks(topology, serial, demands, serial_index, placed)
         try:

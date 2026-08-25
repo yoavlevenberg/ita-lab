@@ -214,13 +214,6 @@ def _rack_fullness(topology, rack_id):
     return len(occupancy(topology, rack_id)) / RACK_U
 
 
-def _port_headroom(topology, rack_id, cable_type):
-    free = sum(1 for p in topology["ports"].values()
-               if p["rack"] == rack_id and p["status"] == "free"
-               and (not cable_type or p["type"] == cable_type))
-    return free
-
-
 def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
                    constraints=None):
     """Score every position a device could take and return the best few.

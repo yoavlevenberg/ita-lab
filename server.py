@@ -46,6 +46,7 @@ import copy
 import io
 import json
 import threading
+import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -146,7 +147,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Every handler runs behind this. Without it an unexpected exception —
+    # malformed JSON in a field, a shape the client should not have sent —
+    # escapes through BaseHTTPRequestHandler and simply drops the connection,
+    # which reaches the browser as "Failed to fetch" with nothing to act on.
+    # Two such crashes were found by probing rather than by use, which is
+    # exactly the kind that reaches a user first.
+    def _guard(self, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                self._send(500, {"error": f"{type(e).__name__}: {e}"})
+            except Exception:
+                pass          # client already gone; nothing useful left to do
+
     def do_GET(self):
+        return self._guard(self._get)
+
+    def do_POST(self):
+        return self._guard(self._post)
+
+    def _get(self):
         url = urlparse(self.path)
 
         if url.path in ("/", "/index.html"):
@@ -201,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._send(404, {"error": "not found"})
 
-    def do_POST(self):
+    def _post(self):
         url = urlparse(self.path)
 
         if url.path == "/api/route":
@@ -271,8 +294,10 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._send(400, {"error": "invalid JSON"})
 
+        # a plan id arrives from the browser and need not be a string, let
+        # alone a hashable one — coerce before it reaches a dict lookup
         plan_id = req.get("plan_id")
-        stored = PLANS.get(plan_id) or {}
+        stored = PLANS.get(str(plan_id) if plan_id is not None else None) or {}
         # the browser holds a trimmed copy; the assistant needs the full one,
         # including the ranked alternatives that were never sent down
         context = {

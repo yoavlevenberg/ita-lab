@@ -635,6 +635,74 @@ def main():
           landed["status"] == "ok" and zmap[landed["rack"].split("-")[0]] == "white",
           f"{landed.get('rack')} -> {zmap.get(str(landed.get('rack')).split('-')[0])}")
 
+    # ---------- the Devices review and the planner cannot disagree ----------
+    # A row the review rejects must never come out of the planner as sited.
+    # The zone case is the one that mattered: swallowing a ZoneError and
+    # carrying on with no zone turned the hardest boundary in the system into
+    # "anywhere" on a typo — silently, and in the damaging direction.
+    def dspec(row, serial, **kw):
+        return {"row": row, "serial": serial,
+                "raw_type": kw.get("t", "server"), "type": kw.get("t", "server"),
+                "u_size": kw.get("u", 2), "fiber_ports": kw.get("f", 1),
+                "copper_ports": kw.get("c", 1), "label": serial,
+                "raw_zone": kw.get("z", "")}
+
+    mixed = [dspec(2, "SN-AGOOD", z="ירוק"), dspec(3, "SN-ATYPO", z="purple"),
+             dspec(4, "SN-AHUGE", u=99), dspec(5, "SN-ANOPORTS", f=0, c=0),
+             dspec(6, "SN-AWEIRD", t="toaster")]
+    drev = bulkplan.validate_devices(T, [dict(s) for s in mixed], [])
+    dsit = bulkplan.plan_devices(T, [dict(s) for s in mixed], [])
+    passes = {s["row"] for s in mixed} - {i["row"] for i in drev["issues"]}
+    sited_rows = {p["row"] for p in dsit["placements"] if p["status"] == "ok"}
+    check("the Devices review predicts the planner exactly",
+          passes == sited_rows, f"review {sorted(passes)} vs planner {sorted(sited_rows)}")
+    typo = next(p for p in dsit["placements"] if p["serial"] == "SN-ATYPO")
+    check("a mistyped zone is refused, never downgraded to 'anywhere'",
+          typo["status"] == "failed" and "zone" in typo["reason"].lower(),
+          f"{typo['status']}: {typo.get('reason', '')[:60]}")
+
+    # ---------- the assistant admits what it does not understand ----------
+    # "?" used to be a help trigger, which swallowed every unrecognised
+    # question into the help text and left this path effectively unreachable —
+    # an earlier test only passed because it happened to omit the question mark.
+    for phrasing in ("מה מזג האוויר", "מה מזג האוויר?", "כמה עולה פיצה?"):
+        check(f"'{phrasing}' is admitted as not understood",
+              assistant.respond(phrasing, topology=T)["intent"] == "unknown",
+              assistant.respond(phrasing, topology=T)["intent"])
+    check("a bare question mark still asks for help",
+          assistant.respond("?", topology=T)["intent"] == "help")
+
+    # "clear" is a valid command even with nothing set; it used to come back
+    # as "I didn't understand"
+    empty_clear = assistant.respond("נקה דגשים", topology=T, constraints={})
+    check("clearing with nothing set is understood, not rejected",
+          empty_clear["intent"] == "clear_constraints", empty_clear["intent"])
+    check("and clearing nothing does not trigger a pointless re-plan",
+          not empty_clear.get("replan"))
+
+    # ---------- malformed input degrades, it does not crash ----------
+    # Everything the assistant sees arrives over HTTP from a browser, so none
+    # of its shape is guaranteed.
+    for junk in (123, None, ["a", "b"], {"x": 1}):
+        try:
+            assistant.respond(junk, topology=T)
+        except Exception as exc:
+            check("a malformed message is handled, not raised", False,
+                  f"{junk!r} raised {type(exc).__name__}")
+            break
+    else:
+        check("a malformed message is handled, not raised", True)
+
+    for junk in ("not-a-dict", 5, ["a"], {"avoid_pods": "A1"}, {"avoid_pods": [1, 2]}):
+        try:
+            assistant.respond("אל תשתמש ב-A1-S05", topology=T, constraints=junk)
+        except Exception as exc:
+            check("malformed constraints are coerced, not raised", False,
+                  f"{junk!r} raised {type(exc).__name__}")
+            break
+    else:
+        check("malformed constraints are coerced, not raised", True)
+
     print()
     passed = sum(results)
     print(f"{passed}/{len(results)} checks passed")

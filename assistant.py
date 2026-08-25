@@ -44,11 +44,19 @@ class Ask:
     """One question, plus whatever the UI was showing when it was asked."""
 
     def __init__(self, text, plan=None, topology=None, constraints=None):
-        self.raw = (text or "").strip()
+        self.raw = str(text if text is not None else "").strip()
         self.text = self.raw.lower()
-        self.plan = plan or {}
-        self.topology = topology or {}
-        self.constraints = {**placement.EMPTY_CONSTRAINTS, **(constraints or {})}
+        self.plan = plan if isinstance(plan, dict) else {}
+        self.topology = topology if isinstance(topology, dict) else {}
+        # Everything here arrives over HTTP from a browser, so nothing about
+        # its shape is guaranteed. Coerce rather than trust: a malformed field
+        # should narrow what can be answered, not kill the request.
+        self.constraints = dict(placement.EMPTY_CONSTRAINTS)
+        if isinstance(constraints, dict):
+            for key in placement.EMPTY_CONSTRAINTS:
+                value = constraints.get(key)
+                if isinstance(value, (list, tuple, set)):
+                    self.constraints[key] = [str(v) for v in value]
 
 
 # --------------------------------------------------------------------------
@@ -63,7 +71,7 @@ def find_racks(text):
     return [_norm_rack(m) for m in RACK_RE.finditer(text)]
 
 
-def find_pods(text, exclude_racks=()):
+def find_pods(text):
     """Pod ids, minus anything that was really part of a rack id — otherwise
     'A1-S05' would also read as a mention of pod A1 and of pod 05."""
     stripped = RACK_RE.sub(" ", text)
@@ -89,7 +97,10 @@ WORDS = {
     "list": ("list", "show", "רשימה", "הצג", "מה יש"),
     "failed": ("fail", "failed", "נכשל", "כשל", "error", "שגיאה", "בעיה"),
     "capacity": ("capacity", "running out", "נגמר", "יגמר", "עומס", "busiest"),
-    "help": ("help", "עזרה", "what can", "מה אפשר", "?"),
+    # NOT "?" — a question mark appears in almost every question, so treating
+    # it as a request for help swallowed every unrecognised one into the help
+    # text and left "I didn't understand" effectively unreachable.
+    "help": ("help", "עזרה", "what can", "מה אפשר", "מה אתה יודע"),
 }
 
 
@@ -102,9 +113,12 @@ def classify(ask):
     instruction like "don't use D5" also mentions a rack and would otherwise
     be read as "where is D5"."""
     t = ask.text
-    if not t:
+    if not t or t == "?":
         return "help"
-    if _has(t, "clear") and (ask.constraints_mentioned or _has(t, "avoid") or _has(t, "prefer")):
+    # "clear" is a valid command whether or not anything is currently set;
+    # requiring an active constraint meant a correctly-typed instruction came
+    # back as "I didn't understand" simply because there was nothing to undo.
+    if _has(t, "clear"):
         return "clear_constraints"
     if _has(t, "avoid"):
         return "avoid"
@@ -129,10 +143,6 @@ def classify(ask):
     if _has(t, "help"):
         return "help"
     return "unknown"
-
-
-Ask.constraints_mentioned = property(
-    lambda self: any(self.constraints[k] for k in self.constraints))
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +369,9 @@ def answer_list_constraints(ask):
 
 
 def answer_clear(ask):
+    if not any(ask.constraints.get(k) for k in placement.EMPTY_CONSTRAINTS):
+        # understood, just nothing to undo — do not trigger a pointless re-plan
+        return {"text": "אין דגשים פעילים, אז אין מה לנקות."}
     return {"text": "ניקיתי את כל הדגשים. מתכנן מחדש לפי הקריטריונים הרגילים בלבד.",
             "constraints": {k: [] for k in placement.EMPTY_CONSTRAINTS},
             "replan": True}
