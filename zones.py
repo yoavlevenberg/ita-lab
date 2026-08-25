@@ -21,6 +21,8 @@ colour would describe something that never happens. Every zone therefore
 contains only pods that can actually receive a device.
 """
 
+import fuzzy
+
 # Pod membership, as given by the site.
 NAMED_ZONES = {
     "green": ("A3", "A4", "A5", "B3", "C3", "D3", "D4", "D5"),
@@ -30,12 +32,18 @@ NAMED_ZONES = {
 DEFAULT_ZONE = "yellow"          # whatever is left over, MDA pods excepted
 NEUTRAL = None                   # what an MDA pod's zone is
 
-# What people actually type in the sheet.
+# What people actually type in the sheet. Beyond the obvious spellings this
+# carries two kinds of known variant, which are listed rather than left to the
+# typo matcher because they are not mistakes:
+#   * Hebrew defective spelling (כתיב חסר) — צהב for צהוב, כחל for כחול
+#   * feminine agreement — ירוקה, כחולה, depending on the noun in the sheet
+# Anything genuinely mistyped is handled separately, by fuzzy.match().
 ALIASES = {
-    "green": "green", "ירוק": "green", "ירוקה": "green", "grn": "green", "g": "green",
-    "blue": "blue", "כחול": "blue", "כחולה": "blue", "blu": "blue", "b": "blue",
-    "white": "white", "לבן": "white", "לבנה": "white", "wht": "white", "w": "white",
-    "yellow": "yellow", "צהוב": "yellow", "צהובה": "yellow", "ylw": "yellow", "y": "yellow",
+    "green": "green", "ירוק": "green", "ירוקה": "green", "grn": "green",
+    "blue": "blue", "כחול": "blue", "כחולה": "blue", "כחל": "blue", "blu": "blue",
+    "white": "white", "לבן": "white", "לבנה": "white", "wht": "white",
+    "yellow": "yellow", "צהוב": "yellow", "צהובה": "yellow", "צהב": "yellow",
+    "ylw": "yellow",
 }
 
 # Rendered in the UI so a pod's colour is visible on the map itself.
@@ -53,23 +61,40 @@ class ZoneError(Exception):
     """An unrecognised zone name, or one with nowhere to put anything."""
 
 
+_NAMES = "green (ירוק), blue (כחול), white (לבן), yellow (צהוב)"
+
+
 def resolve(text):
     """Turn whatever the sheet says into a zone name, or None if it is blank.
 
-    Raises ZoneError on something that looks like a zone but is not one, so a
-    typo becomes a message about that row rather than a silently ignored
-    boundary.
+    Case, spacing and Hebrew final forms are ignored, and an obvious typo is
+    corrected — but only when the correction is unambiguous. A zone is the
+    hardest boundary in the system, so a guess that is merely plausible
+    ('grey') is refused with the near misses named, rather than silently
+    putting equipment in the wrong place.
     """
-    if not text:
+    if not text or not str(text).strip():
         return None
-    key = str(text).strip().lower()
-    if key in ALIASES:
-        return ALIASES[key]
+    hit = fuzzy.match(text, ALIASES)
+    if hit:
+        return hit[0]
+    near = fuzzy.suggestions(text, ALIASES)
     raise ZoneError(
-        f"'{text}' is not a zone. Use one of: "
-        + ", ".join(f"{z} ({heb})" for z, heb in
-                    (("green", "ירוק"), ("blue", "כחול"),
-                     ("white", "לבן"), ("yellow", "צהוב"))))
+        f"'{text}' is not a zone."
+        + (f" Did you mean {' or '.join(near)}?" if near else "")
+        + f" Use one of: {_NAMES}")
+
+
+def correction(text):
+    """If `text` was understood only by correcting a typo, the note to show the
+    user. Empty when it was written correctly, so nothing is ever changed
+    behind their back without being said."""
+    if not text or not str(text).strip():
+        return ""
+    hit = fuzzy.match(text, ALIASES)
+    if hit and not hit[1]:
+        return f"read '{str(text).strip()}' as {hit[0]}"
+    return ""
 
 
 def is_neutral(topology, pod):

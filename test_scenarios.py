@@ -15,6 +15,7 @@ from collections import Counter
 
 import assistant
 import bulkplan
+import fuzzy
 import placement
 import xlsxreader
 import serials
@@ -29,6 +30,14 @@ results = []
 def check(name, ok, detail=""):
     results.append(ok)
     print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
+
+
+def _zone_error(text):
+    try:
+        zones.resolve(text)
+        return ""
+    except zones.ZoneError as e:
+        return str(e)
 
 
 def free_port(topology, rack, cable_type):
@@ -702,6 +711,76 @@ def main():
             break
     else:
         check("malformed constraints are coerced, not raised", True)
+
+    # ---------- typos are forgiven, guesses are not ----------
+    # One character's slip is corrected; two is refused with the near misses
+    # named. The line matters: "gren" is obviously green, "grey" is not.
+    for typed, expected in (("green", "green"), ("GrEeN", "green"), ("ירוק", "green"),
+                            ("  BLUE  ", "blue"), ("gren", "green"), ("Wihte", "white"),
+                            ("yelow", "yellow"), ("bleu", "blue"), ("ירוקק", "green"),
+                            ("צהב", "yellow"), ("כחל", "blue"), ("", None)):
+        check(f"zone '{typed}' reads as {expected}",
+              zones.resolve(typed) == expected, str(zones.resolve(typed)))
+
+    for typed in ("grey", "purple", "bl", "xyz"):
+        try:
+            zones.resolve(typed)
+            check(f"zone '{typed}' is refused rather than guessed", False, "accepted")
+        except zones.ZoneError:
+            check(f"zone '{typed}' is refused rather than guessed", True)
+
+    check("a corrected zone is reported, never applied silently",
+          zones.correction("gren") and not zones.correction("green"),
+          f"{zones.correction('gren')!r} / {zones.correction('green')!r}")
+
+    check("a near miss names what it nearly matched",
+          "green" in str(_zone_error("grey")), _zone_error("grey"))
+
+    # the edit budget itself
+    check("one slip is within budget, two is not",
+          fuzzy.distance("gren", "green") == 1 and fuzzy.distance("grey", "green") == 2)
+    check("a transposition counts as one slip, not two",
+          fuzzy.distance("zoen", "zone") == 1 and fuzzy.distance("bleu", "blue") == 1)
+    check("an ambiguous correction is refused",
+          fuzzy.match("xy", {"ax": 1, "xz": 2}) is None)
+    check("a tie between spellings of the SAME answer is not ambiguous",
+          fuzzy.match("srcport", dict.fromkeys(("SRC_PORT", "SOURCE_PORT"), "hit"))
+          is not None)
+
+    # mistyped headers, tab names and device types
+    check("a mistyped column header still reads",
+          bulkplan._pick({"SRC_PROT": "v", xlsxreader.ROW_KEY: 2},
+                         bulkplan.SRC_ALIASES) == "v")
+    check("an unrelated column is not mistaken for one",
+          bulkplan._pick({"QTY": "v", xlsxreader.ROW_KEY: 2},
+                         bulkplan.SRC_ALIASES) == "")
+    check("a correctly spelled header beats a mistyped one in the same row",
+          bulkplan._pick({"SRC_PORT": "right", "SRC_PROT": "wrong",
+                          xlsxreader.ROW_KEY: 2}, bulkplan.SRC_ALIASES) == "right")
+    typed_dev = bulkplan.devices_from_rows(
+        [{"SERAIL": "SN-TYPO", "TYP": "swich", "U SIZE": "1", "FIBRE": "4",
+          xlsxreader.ROW_KEY: 2}])[0]
+    check("a Devices row with several mistyped headers still reads",
+          typed_dev["serial"] == "SN-TYPO" and typed_dev["type"] == "switch"
+          and typed_dev["u_size"] == 1 and typed_dev["fiber_ports"] == 4,
+          str(typed_dev))
+
+    # ---------- the chat tolerates typos without hijacking ordinary words ----
+    # "כמה" and "מה" are each one edit from "למה"; left unguarded they routed
+    # every such question to the why-handler and hid the intents behind it.
+    for phrase, expect in (("נקה דגשים", "clear_constraints"),
+                           ("נקא דגשים", "clear_constraints"),
+                           ("למא הרכיב הוצב שם?", "why_placed"),
+                           ("תעדיפ פוד A3", "prefer"),
+                           ("prefre pod A3", "prefer"),
+                           ("אל תשתמשש ב-D5", "avoid"),
+                           ("hlep", "help"),
+                           ("מה עומד להיגמר?", "capacity"),
+                           ("כמה מקום יש ב-A1-S05", "rack_status"),
+                           ("מה מזג האוויר?", "unknown"),
+                           ("כמה עולה פיצה?", "unknown")):
+        got = assistant.respond(phrase, topology=T)["intent"]
+        check(f"'{phrase}' -> {expect}", got == expect, got)
 
     print()
     passed = sum(results)

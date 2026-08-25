@@ -1282,6 +1282,11 @@ function renderReview(res, fileName){
           <span>${dev.problems ? `${dev.problems} דורשים תיקון · ${dev.ok} תקינים`
                                 : "כל הרכיבים תקינים"}</span>
         </h3>
+        ${(dev.corrections || []).length ? `<div class="rb">
+          <div class="fixhint">קראתי כמה ערכים למרות שגיאת כתיב — אם אחד מהם לא
+          מה שהתכוונת, תקן בגיליון:<br>
+          ${dev.corrections.map(c => `• שורה ${c.row}: ${escapeHtml(c.message)}`).join("<br>")}
+        </div></div>` : ""}
         ${dev.problems ? `<div class="rb">
           ${Object.entries(dev.by_kind || {}).map(([k,n]) =>
             `<span class="kindchip">${escapeHtml(DEV_KIND_LABEL[k] || k)} · ${n}</span>`).join("")}

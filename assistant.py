@@ -31,6 +31,7 @@ people around them are written.
 import re
 from collections import Counter
 
+import fuzzy
 import placement
 import serials
 
@@ -104,8 +105,43 @@ WORDS = {
 }
 
 
+# Ordinary words that must never be treated as a mistyped command. Distance
+# cannot separate these from the triggers they sit beside — "כמה" ("how many")
+# and "מה" ("what") are each one edit from "למה" ("why"), and all three are
+# real words. Left unguarded, every "כמה …" and "מה …" question was routed to
+# the why-handler, which also hid the capacity and occupancy intents behind it.
+STOPWORDS = frozenset("""
+מה כמה מי איך אם של את זה זו הוא היא הם אני אתה אנחנו
+יש אין לא כן על עם גם רק כל או אבל כי אז וגם
+is are the and or for with what how why who
+""".split())
+
+
+def _tokens(text):
+    return [t for t in re.split(r"[\s,.;:!?\"'()\[\]־-]+", text) if t]
+
+
 def _has(text, key):
-    return any(w in text for w in WORDS[key])
+    """Does this message use one of the trigger words for `key`?
+
+    Exact substrings first — that also covers the multi-word triggers. Then a
+    token-by-token typo check, so 'נקא דגשים' and 'wher is' still land on the
+    right intent. Lenient because the cost of a wrong guess here is that the
+    user rephrases, unlike a zone where it would misplace equipment.
+    """
+    if any(w in text for w in WORDS[key]):
+        return True
+    # Only words of three characters or more. Below that a single edit turns
+    # one ordinary word into another: "מה" ("what") is one edit from "למה"
+    # ("why"), which quietly routed every "מה …" question to the why-handler
+    # and hid the capacity intent behind it.
+    single = [w for w in WORDS[key] if " " not in w and len(w) >= 3]
+    if not single:
+        return False
+    same = dict.fromkeys(single, "hit")
+    return any(fuzzy.match(tok, same, lenient=True)
+               for tok in _tokens(text)
+               if len(tok) >= 3 and tok not in STOPWORDS)
 
 
 def classify(ask):

@@ -33,6 +33,7 @@ import copy
 import re
 from collections import Counter, OrderedDict, defaultdict
 
+import fuzzy
 import pathengine
 import placement
 import serials
@@ -85,10 +86,33 @@ TYPE_SYNONYMS = {
 
 
 def _pick(row, aliases):
+    """Read a column by any of its accepted names, tolerating a typo in the
+    header.
+
+    Exact spellings win outright. Only if none matched do we look for a
+    mistyped header — `SRC_PROT`, `COPER` — and then only when the match is
+    unambiguous, so a sheet with both `TYPE` and a mistyped `TYP` cannot have
+    one silently read as the other.
+    """
     for a in aliases:
         v = row.get(a)
         if v:
             return v.strip()
+
+    # Every alias in the group names the SAME column, so map them all to one
+    # value: being torn between SOURCE_PORT and SRC_PORT is not an ambiguity
+    # to refuse, it is the same answer twice.
+    same = dict.fromkeys(aliases, "hit")
+    for key, value in row.items():
+        if key == xlsxreader.ROW_KEY or not value:
+            continue
+        # Accept an exact-after-normalisation hit as well as a corrected one.
+        # Filtering to corrections only looked like an optimisation — the
+        # direct loop above already tried the literal spellings — but it threw
+        # away headers that differ only in spacing or case, like "U SIZE" for
+        # "USIZE", which the loop above never sees.
+        if fuzzy.match(key, same):
+            return str(value).strip()
     return ""
 
 
@@ -97,11 +121,17 @@ DEVICES_SHEET_NAMES = ("DEVICES", "NEW_DEVICES", "EQUIPMENT", "HARDWARE")
 
 
 def _find_sheet(path_or_file, candidates):
-    """Locate a tab by any of its accepted names, case- and spacing-insensitive."""
-    have = {xlsxreader._norm(n): n for n in xlsxreader.sheet_names(path_or_file)}
+    """Locate a tab by any of its accepted names — case, spacing and an
+    obvious typo in the tab name all forgiven ('Devicez', 'P2p ')."""
+    actual = xlsxreader.sheet_names(path_or_file)
+    have = {xlsxreader._norm(n): n for n in actual}
     for want in candidates:
         if want in have:
             return have[want]
+    same = dict.fromkeys(candidates, "hit")     # all name the same tab
+    for name in actual:
+        if fuzzy.match(name, same):
+            return name
     return None
 
 
@@ -148,12 +178,14 @@ def devices_from_rows(rows):
         if not serial:
             continue
         raw_type = _pick(row, DEV_TYPE_ALIASES)
-        key = re.sub(r"[\s\-]+", "_", raw_type.strip().lower())
+        # 'swich', 'serrver' — corrected when unambiguous, left alone otherwise
+        # so validate_devices can report it against this row
+        hit = fuzzy.match(raw_type, TYPE_SYNONYMS) if raw_type else None
         out.append({
             "row": row.get(xlsxreader.ROW_KEY, i),
             "serial": serials.normalise(serial),
             "raw_type": raw_type,
-            "type": TYPE_SYNONYMS.get(key, key or "server"),
+            "type": hit[0] if hit else (raw_type.strip().lower() or "server"),
             "u_size": _int(_pick(row, DEV_USIZE_ALIASES), 0),
             "fiber_ports": _int(_pick(row, DEV_FIBER_ALIASES), 0),
             "copper_ports": _int(_pick(row, DEV_COPPER_ALIASES), 0),
@@ -238,7 +270,7 @@ def validate_devices(topology, new_devices, demands=()):
     Placement is the expensive step and it mutates a working copy, so every
     problem that can be seen from the spec alone is reported first.
     """
-    issues = []
+    issues, notes = [], []
     known = serials.index(topology)
     seen = {}
 
@@ -285,6 +317,11 @@ def validate_devices(topology, new_devices, demands=()):
             fault(d, "unknown_zone", str(e))
             continue
         d["zone"] = zone
+        # a typo that was corrected is reported, never applied behind the
+        # user's back — this is the hardest boundary in the system
+        note = zones.correction(d.get("raw_zone"))
+        if note:
+            notes.append({"row": d["row"], "message": note})
 
         # is there anywhere at all it could go? inside its zone, if it has one
         if not any(placement.positions_for(topology, r, d["u_size"])
@@ -332,6 +369,9 @@ def validate_devices(topology, new_devices, demands=()):
         "ok": len(new_devices) - len(bad),
         "problems": len(bad),
         "issues": sorted(issues, key=lambda i: i["row"]),
+        # spellings that were understood only by correcting them; shown so a
+        # correction is never something the user finds out about later
+        "corrections": sorted(notes, key=lambda n: n["row"]),
         "by_kind": dict(Counter(i["kind"] for i in issues)),
     }
 

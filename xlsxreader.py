@@ -18,6 +18,8 @@ demand list needs. No formatting, no formulas re-evaluation, no dates.
 
 import re
 import zipfile
+
+import fuzzy
 from xml.etree import ElementTree as ET
 
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -212,10 +214,19 @@ def read_sheet(path_or_file, required=(), required_any=(), sheet=None):
     want = [_norm(c) for c in required]
     want_any = [[_norm(c) for c in group] for group in required_any]
 
+    def present(needle, headers):
+        """Is this column here — spelled right, or close enough to be a typo?"""
+        if needle in headers:
+            return True
+        return bool(fuzzy.match(needle, dict.fromkeys(headers, "hit")))
+
     def qualifies(cells):
-        norm = {_norm(h) for h in cells if h}
-        return (all(c in norm for c in want)
-                and all(any(c in norm for c in group) for group in want_any))
+        norm = [_norm(h) for h in cells if h]
+        # A mistyped header must not stop the header ROW being recognised —
+        # otherwise one slip in one column reads as "this file has no header
+        # at all", which is a far more confusing thing to be told.
+        return (all(present(c, norm) for c in want)
+                and all(any(present(c, norm) for c in group) for group in want_any))
 
     header_at = None
     for i, (_, cells) in enumerate(rows):
