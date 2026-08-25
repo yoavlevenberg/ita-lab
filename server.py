@@ -51,8 +51,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import assistant
 import bulkplan
 import pathengine
+import placement
 import wo_html
 import workorder
 import xlsxreader
@@ -247,7 +249,35 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/bulk/execute":
             return self._bulk_execute()
 
+        if url.path == "/api/assist":
+            return self._assist()
+
         return self._send(404, {"error": "not found"})
+
+    def _assist(self):
+        """One turn of the offline assistant. Nothing leaves this machine: the
+        answers are read out of the plan that is already in memory."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        plan_id = req.get("plan_id")
+        stored = PLANS.get(plan_id) or {}
+        # the browser holds a trimmed copy; the assistant needs the full one,
+        # including the ranked alternatives that were never sent down
+        context = {
+            "results": stored.get("results", []),
+            "summary": stored.get("summary", {}),
+            "siting": (stored.get("siting") or {}).get("placements", []),
+            "review": req.get("review"),
+            "device_review": req.get("device_review"),
+        }
+        out = assistant.respond(req.get("message", ""), plan=context,
+                                topology=TOPOLOGY,
+                                constraints=req.get("constraints"))
+        return self._send(200, out)
 
     # ------------------------------------------------------------- bulk ---
 
@@ -264,6 +294,14 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(url.query)
         prefs = {k: q.get(k, ["0"])[0] in ("1", "true", "on")
                  for k in ("group_adjacent", "redundancy_split", "load_balance")}
+
+        # Instructions the planner was given in the chat ("not in D5"), carried
+        # as a query param so a plan is reproducible from its URL alone.
+        constraints = {}
+        for key in placement.EMPTY_CONSTRAINTS:
+            raw = q.get(key, [""])[0]
+            if raw:
+                constraints[key] = {v for v in raw.split(",") if v}
 
         # Adding hardware is a bigger step than patching, so the Devices tab is
         # only read when the user has said the file contains new equipment.
@@ -296,7 +334,8 @@ class Handler(BaseHTTPRequestHandler):
         with WRITE_LOCK:
             snapshot = copy.deepcopy(TOPOLOGY)
         result = bulkplan.plan(snapshot, demands, prefs, already_isolated=True,
-                               new_devices=new_devices)
+                               new_devices=new_devices,
+                               constraints=constraints)
         result["new_devices"] = new_devices
 
         plan_id = f"PLAN-{len(PLANS) + 1:04d}"

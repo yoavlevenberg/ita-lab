@@ -318,6 +318,35 @@
   .stat.failed{border-color:#7d2b28; color:#ff9d97}
   .stat.committed{border-color:var(--free); color:var(--free); font-weight:700}
   .gtag{font-family:Consolas,monospace; font-size:10px; color:var(--mda)}
+  /* ---------- planning assistant ---------- */
+  .chat{border:1px solid var(--border); border-radius:9px; margin-top:16px; overflow:hidden;
+        display:flex; flex-direction:column; background:var(--panel2)}
+  .chat .ch{display:flex; align-items:center; gap:8px; padding:9px 13px;
+            border-bottom:1px solid var(--border); font-size:12.5px}
+  .chat .ch .sub{font-size:10.5px; color:var(--muted); font-weight:400}
+  .chat .cb{padding:11px 13px; max-height:270px; overflow:auto;
+            display:flex; flex-direction:column; gap:9px; font-size:12px}
+  .chat .cb:empty{display:none}
+  .msg{max-width:86%; padding:8px 11px; border-radius:9px; line-height:1.75; white-space:pre-wrap}
+  .msg.me{align-self:flex-start; background:#16324d; border:1px solid #24557f}
+  .msg.bot{align-self:flex-end; background:var(--panel); border:1px solid var(--border)}
+  .msg code{background:#0b0f14; border:1px solid var(--border); border-radius:3px;
+            padding:0 5px; font-size:11px}
+  .msg b{color:var(--mda)}
+  .msg .tip{display:block; margin-top:6px; font-size:10.5px; color:var(--muted)}
+  .chat .cf{display:flex; gap:8px; padding:10px 13px; border-top:1px solid var(--border)}
+  .chat .cf input{flex:1; font-family:inherit; font-size:12.5px; background:var(--panel);
+                  color:var(--text); border:1px solid var(--border); border-radius:6px;
+                  padding:7px 11px}
+  .chat .cf input:focus{outline:none; border-color:var(--src)}
+  .chat .cs{display:flex; gap:6px; flex-wrap:wrap; padding:0 13px 11px}
+  .chat .cs button{font-size:10.5px; padding:3px 10px; border-radius:11px;
+                   background:transparent; color:var(--muted)}
+  .chat .cs button:hover{color:var(--text); border-color:var(--muted)}
+  .cchips{display:flex; gap:5px; flex-wrap:wrap}
+  .cchip{font-size:10px; padding:1px 8px; border-radius:9px; border:1px solid #7d2b28;
+         color:#ff9d97; font-family:Consolas,monospace}
+  .cchip.pref{border-color:var(--mda); color:var(--mda)}
   .review{border:1px solid var(--border); border-radius:9px; margin-top:16px; overflow:hidden}
   .review > h3{margin:0; padding:10px 14px; font-size:12.5px; display:flex;
                align-items:center; gap:9px; border-bottom:1px solid var(--border)}
@@ -399,6 +428,22 @@
       </div>
 
       <div id="bulkResult"></div>
+
+      <div class="chat" id="chatBox">
+        <div class="ch">
+          <span class="dot" style="background:var(--mda)"></span>
+          <b>עוזר תכנון</b>
+          <span class="sub">מקומי · כל תשובה נקראת מהתוכנית עצמה</span>
+          <span style="flex:1"></span>
+          <span id="chatConstraints" class="cchips"></span>
+        </div>
+        <div class="cb" id="chatLog"></div>
+        <div class="cf">
+          <input id="chatInput" placeholder="שאל למה, או תן דגש — למשל 'אל תשתמש ב-D5-N06'" autocomplete="off">
+          <button class="primary" id="chatSend">שלח</button>
+        </div>
+        <div class="cs" id="chatSuggest"></div>
+      </div>
     </div>
     <div class="bf" id="bulkFooter" style="display:none">
       <span id="bulkFootInfo" style="flex:1;font-size:12px;color:var(--muted)"></span>
@@ -1093,13 +1138,18 @@ $("bulkDrop").addEventListener("drop", e => {
 let bulkFile = null;          // kept so "plan anyway" can re-send it
 
 function prefQuery(extra){
-  return new URLSearchParams({
+  const q = new URLSearchParams({
     group_adjacent:   $("prefAdjacent").checked   ? "1" : "0",
     redundancy_split: $("prefRedundancy").checked ? "1" : "0",
     load_balance:     $("prefBalance").checked    ? "1" : "0",
     with_devices:     $("prefDevices").checked    ? "1" : "0",
     ...(extra || {}),
   });
+  // instructions given in the chat travel with the request, so a plan is
+  // reproducible from its URL alone
+  for (const [k, v] of Object.entries(constraints))
+    if (v && v.length) q.set(k, v.join(","));
+  return q;
 }
 
 // Stage 1: review the sheet without planning anything, so a file with typos
@@ -1119,6 +1169,7 @@ function uploadSheet(file){
     })
   ).then(r => r.json()).then(res => {
     if (res.status === "failed" || res.error) return bulkError(res.reason || res.error);
+    lastReview = res;
     renderReview(res, file.name);
   }).catch(e => bulkError(String(e)));
 }
@@ -1259,6 +1310,80 @@ function bulkClear(){
   $("bulkFile").value = "";
 }
 $("btnBulkClear").onclick = bulkClear;
+
+// ------------------------------------------------- planning assistant ---
+// Nothing here reasons about the topology. It asks the server, and the server
+// answers from the plan it already holds — the UI only renders.
+let constraints = { avoid_racks:[], avoid_pods:[], avoid_rooms:[],
+                    prefer_racks:[], prefer_pods:[] };
+let lastReview = null;
+
+const SUGGESTIONS = [
+  "למה הרכיב הוצב שם?",
+  "למה המסלול הזה?",
+  "למה שורה 4 נכשלה?",
+  "מה עומד להיגמר?",
+  "עזרה",
+];
+
+function chatSay(who, text, hint){
+  const el = document.createElement("div");
+  el.className = "msg " + who;
+  // the assistant writes a deliberately tiny subset of markdown
+  el.innerHTML = escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/`(.+?)`/g, "<code>$1</code>")
+    + (hint ? `<span class="tip">${escapeHtml(hint)}</span>` : "");
+  $("chatLog").appendChild(el);
+  $("chatLog").scrollTop = $("chatLog").scrollHeight;
+}
+
+function renderConstraints(){
+  const chips = [];
+  for (const [key, cls] of [["avoid_racks",""],["avoid_pods",""],["avoid_rooms",""],
+                            ["prefer_racks","pref"],["prefer_pods","pref"]]){
+    for (const v of (constraints[key] || []))
+      chips.push(`<span class="cchip ${cls}">${cls ? "★" : "✕"} ${escapeHtml(v)}</span>`);
+  }
+  $("chatConstraints").innerHTML = chips.join("");
+}
+
+function chatAsk(text){
+  if (!text.trim()) return;
+  chatSay("me", text);
+  $("chatInput").value = "";
+  fetch("/api/assist", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      message: text,
+      plan_id: bulkPlan ? bulkPlan.plan_id : null,
+      review: lastReview ? lastReview.review : null,
+      device_review: lastReview ? lastReview.device_review : null,
+      constraints,
+    })
+  }).then(r => r.json()).then(res => {
+    chatSay("bot", res.text, res.hint);
+    if (res.constraints){ constraints = res.constraints; renderConstraints(); }
+    // Re-plan here rather than telling the user to press a button: once a plan
+    // exists that button is hidden and disabled, so the instruction pointed at
+    // something that was no longer on screen.
+    if (res.replan && bulkFile){
+      chatSay("bot", "מתכנן מחדש…");
+      planSheet();
+    }
+  }).catch(e => chatSay("bot", "שגיאה: " + e));
+}
+
+$("chatSend").onclick = () => chatAsk($("chatInput").value);
+$("chatInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") chatAsk($("chatInput").value);
+});
+$("chatSuggest").innerHTML = SUGGESTIONS
+  .map(s => `<button class="ghost" data-q="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join("");
+$("chatSuggest").addEventListener("click", e => {
+  const q = e.target.getAttribute("data-q");
+  if (q) chatAsk(q);
+});
 
 function bulkError(msg){
   bulkPlan = null;

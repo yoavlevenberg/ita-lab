@@ -146,7 +146,29 @@ def distance_rank(topology, rack_a, rack_b):
     return ELSEWHERE
 
 
-def eligible_racks(topology):
+# A planner's instructions, e.g. "not in D5", "keep it in room AB". Held apart
+# from the scoring weights because they come from a person and change per run.
+EMPTY_CONSTRAINTS = {
+    "avoid_racks": (), "avoid_pods": (), "avoid_rooms": (),
+    "prefer_racks": (), "prefer_pods": (),
+}
+# "prefer pod A3" is an explicit instruction from someone who knows something
+# the score does not, so it outranks every automatic criterion — larger than
+# the widest gap between distance rings. Preferred cabinets still compete with
+# each other on the normal criteria, and a preference for somewhere with no
+# room simply never appears, so this cannot strand a device.
+PREFER_BONUS = -10_000.0
+
+
+def _pod_of(topology, rack_id):
+    return topology["racks"][rack_id]["pod"]
+
+
+def _room_of(topology, rack_id):
+    return topology["pods"].get(_pod_of(topology, rack_id), {}).get("room")
+
+
+def eligible_racks(topology, constraints=None):
     """Cabinets a new device may be installed in.
 
     Equipment is not racked in EOR cabinets or anywhere in an MDA pod. Those
@@ -155,10 +177,21 @@ def eligible_racks(topology):
     exclusion, not a low score — offering such a position at all would be
     proposing something the site does not do.
 
-    That leaves the compute cabinets: 504 of the 640 racks here.
+    That leaves the compute cabinets: 504 of the 640 racks here. A planner's
+    "avoid" instructions narrow it further, and are equally hard: something
+    they told us not to touch must not appear in the ranking at all.
     """
-    return [rid for rid, meta in topology["racks"].items()
-            if not meta.get("is_eor") and not meta.get("is_mda")]
+    c = {**EMPTY_CONSTRAINTS, **(constraints or {})}
+    out = []
+    for rid, meta in topology["racks"].items():
+        if meta.get("is_eor") or meta.get("is_mda"):
+            continue
+        if rid in c["avoid_racks"] or meta["pod"] in c["avoid_pods"]:
+            continue
+        if _room_of(topology, rid) in c["avoid_rooms"]:
+            continue
+        out.append(rid)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -177,7 +210,8 @@ def _port_headroom(topology, rack_id, cable_type):
     return free
 
 
-def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
+def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
+                   constraints=None):
     """Score every position a device could take and return the best few.
 
     `device`     the declared spec: type, u_size, ports
@@ -188,10 +222,11 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
                  in this same run.
     """
     extra_taken = extra_taken or {}
+    c = {**EMPTY_CONSTRAINTS, **(constraints or {})}
     u_size = device["u_size"]
 
     scored = []
-    for rack_id in eligible_racks(topology):
+    for rack_id in eligible_racks(topology, c):
         spots = positions_for(topology, rack_id, u_size,
                               extra_taken.get(rack_id, ()))
         if not spots:
@@ -211,8 +246,12 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
         # tightest fit first, so small kit does not eat the last big gap
         fit_penalty = best["slack"] * 0.5
 
-        score = proximity + (fullness ** 3) * FULLNESS_WEIGHT + fit_penalty
+        preferred = (rack_id in c["prefer_racks"]
+                     or _pod_of(topology, rack_id) in c["prefer_pods"])
+        score = (proximity + (fullness ** 3) * FULLNESS_WEIGHT + fit_penalty
+                 + (PREFER_BONUS if preferred else 0))
         scored.append({
+            "preferred": preferred,
             "rack": rack_id,
             "u_start": best["u_start"],
             "u_end": best["u_start"] - u_size + 1,
@@ -221,21 +260,26 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5):
             "rack_fullness_pct": round(fullness * 100),
             "gap_height": best["gap_height"],
             "pod": topology["racks"][rack_id]["pod"],
-            "reason": _reason(topology, rack_id, neighbours, fullness),
+            "reason": _reason(topology, rack_id, neighbours, fullness, preferred),
             "alternatives_in_rack": len(spots),
         })
 
     if not scored:
+        narrowed = any(c[k] for k in ("avoid_racks", "avoid_pods", "avoid_rooms"))
+        extra = (" once your 'avoid' instructions are applied — try relaxing them"
+                 if narrowed else "")
         raise PlacementError(
             f"no cabinet has {u_size}U of contiguous free space for "
-            f"{device.get('serial', 'this device')}")
+            f"{device.get('serial', 'this device')}{extra}")
 
     scored.sort(key=lambda s: (s["score"], s["rack"]))
     return scored[:limit]
 
 
-def _reason(topology, rack_id, neighbours, fullness):
+def _reason(topology, rack_id, neighbours, fullness, preferred=False):
     bits = []
+    if preferred:
+        bits.append("you asked to prefer this")
     if neighbours:
         if any(n == rack_id for n in neighbours):
             bits.append("same cabinet as what it connects to — a patch lead, no trunk")

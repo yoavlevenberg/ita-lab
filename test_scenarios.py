@@ -13,6 +13,7 @@ import re
 import sys
 from collections import Counter
 
+import assistant
 import bulkplan
 import placement
 import xlsxreader
@@ -471,6 +472,83 @@ def main():
     check("a row naming a device by serial must say which media",
           [i["kind"] for i in mv["issues"]] == ["no_cable_type"],
           str([i["kind"] for i in mv["issues"]]))
+
+    # ---------- planner instructions are real constraints ----------
+    # "not in D5" has to remove D5 from the ranking, not just be acknowledged.
+    plain = placement.rank_positions(T, eor_target, ["A1-S05"], limit=1)[0]
+    check("without instructions the device lands beside its target",
+          plain["rack"] == "A1-S05", plain["rack"])
+
+    avoided = placement.rank_positions(T, eor_target, ["A1-S05"], limit=3,
+                                       constraints={"avoid_racks": {"A1-S05"}})
+    check("an avoided cabinet disappears from the ranking",
+          all(c["rack"] != "A1-S05" for c in avoided), str([c["rack"] for c in avoided]))
+
+    pod_avoided = placement.rank_positions(T, eor_target, ["A1-S05"], limit=3,
+                                           constraints={"avoid_pods": {"A1"}})
+    check("avoiding a pod removes every cabinet in it",
+          all(not c["rack"].startswith("A1-") for c in pod_avoided),
+          str([c["rack"] for c in pod_avoided]))
+
+    preferred = placement.rank_positions(T, eor_target, ["A1-S05"], limit=1,
+                                         constraints={"prefer_pods": {"A5"}})[0]
+    check("an explicit preference outranks the automatic criteria",
+          preferred["pod"] == "A5", f"chose {preferred['rack']}")
+
+    # a preference for somewhere ineligible must not strand the device
+    safe = placement.rank_positions(T, eor_target, ["A1-S05"], limit=1,
+                                    constraints={"prefer_racks": {"A2-S01"}})[0]
+    check("preferring an ineligible cabinet is ignored, not fatal",
+          safe["rack"] == "A1-S05", safe["rack"])
+
+    try:
+        placement.rank_positions(T, eor_target, ["A1-S05"],
+                                 constraints={"avoid_rooms": {"AB", "CD"}})
+        check("instructions that exclude everything say so", False, "no error raised")
+    except placement.PlacementError as e:
+        check("instructions that exclude everything say so", "relax" in str(e), str(e))
+
+    # ---------- the assistant answers from the plan, never from guesswork ----------
+    ctx = {"siting": built["siting"]["placements"], "results": built["results"],
+           "summary": built["summary"]}
+
+    said = assistant.respond("למה הרכיב הוצב שם?", plan=ctx, topology=T)
+    check("the assistant explains a placement with its real rack",
+          sited["SN-TESTSW"]["rack"] in said["text"], said["text"][:80])
+    check("and names the runner-up it beat", "המועמד הבא" in said["text"])
+
+    where = assistant.respond(f"איפה {a_dev['serial']}", plan=ctx, topology=T)
+    check("the assistant locates a device by serial",
+          a_dev["rack"] in where["text"] and f"U{a_dev['u_start']}" in where["text"],
+          where["text"][:90])
+
+    unknown = assistant.respond("איפה SN-DOESNOTEXIST", plan=ctx, topology=T)
+    check("an unknown serial is reported, not invented",
+          "לא קיים" in unknown["text"], unknown["text"][:80])
+
+    told = assistant.respond("אל תשתמש ב-A1-S05", plan=ctx, topology=T)
+    check("an instruction becomes a real constraint",
+          told.get("replan") and "A1-S05" in told["constraints"]["avoid_racks"],
+          str(told.get("constraints")))
+
+    kept = assistant.respond("בלי פוד D5", plan=ctx, topology=T,
+                             constraints=told["constraints"])
+    check("instructions accumulate rather than replace each other",
+          "A1-S05" in kept["constraints"]["avoid_racks"]
+          and "D5" in kept["constraints"]["avoid_pods"],
+          str(kept["constraints"]))
+
+    wiped = assistant.respond("נקה דגשים", plan=ctx, topology=T,
+                              constraints=kept["constraints"])
+    check("clearing removes every instruction",
+          not any(wiped["constraints"].values()), str(wiped["constraints"]))
+
+    vague = assistant.respond("אל תשתמש", plan=ctx, topology=T)
+    check("an instruction naming nothing asks for a target, and changes nothing",
+          "constraints" not in vague, str(vague.get("constraints")))
+
+    check("an unrecognised question is admitted, not answered anyway",
+          assistant.respond("מה מזג האוויר", plan=ctx, topology=T)["intent"] == "unknown")
 
     print()
     passed = sum(results)

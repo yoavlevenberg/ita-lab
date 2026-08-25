@@ -478,7 +478,7 @@ def _neighbour_racks(topology, serial, demands, serial_index, placed):
     return racks
 
 
-def plan_devices(topology, new_devices, demands, limit=4):
+def plan_devices(topology, new_devices, demands, limit=4, constraints=None):
     """Choose a cabinet and U position for every new device.
 
     Devices are sited in dependency order so that a box hanging off another new
@@ -504,7 +504,8 @@ def plan_devices(topology, new_devices, demands, limit=4):
         neighbours = _neighbour_racks(topology, serial, demands, serial_index, placed)
         try:
             options = placement.rank_positions(topology, spec, neighbours,
-                                               extra_taken=reserved, limit=limit)
+                                               extra_taken=reserved, limit=limit,
+                                               constraints=constraints)
         except placement.PlacementError as e:
             results.append({**base, "status": "failed", "reason": str(e)})
             continue
@@ -681,7 +682,8 @@ def _resolve_endpoints(topology, demands):
         out.append(d)
     return out
 
-def plan(topology, demands, prefs=None, already_isolated=False, new_devices=()):
+def plan(topology, demands, prefs=None, already_isolated=False, new_devices=(),
+         constraints=None):
     """Route every demand against a working copy, in an order chosen by the
     preferences. Returns one result per demand plus a summary. Never mutates
     the topology it is given.
@@ -700,7 +702,8 @@ def plan(topology, demands, prefs=None, already_isolated=False, new_devices=()):
 
     siting = None
     if new_devices:
-        siting = plan_devices(work, list(new_devices), demands)
+        siting = plan_devices(work, list(new_devices), demands,
+                              constraints=constraints)
         specs = {d["serial"]: d for d in new_devices}
         for site in siting["placements"]:
             if site["status"] == "ok":
