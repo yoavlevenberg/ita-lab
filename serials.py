@@ -30,7 +30,6 @@ SPAN = 9 * FIRST                    # a round-trip through a spreadsheet cell
 
 # A port is addressed as <serial>:<port>, e.g. 4827193056:12. Bare digits mean
 # "this device, any suitable port"; with the suffix, that exact port.
-PORT_SEP = ":"
 _SERIAL_RE = re.compile(r"^\s*(\d{4,})\s*(?::\s*(\d+)\s*)?$")
 
 

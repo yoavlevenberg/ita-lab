@@ -715,7 +715,7 @@ def _resolve_endpoints(topology, demands):
     point of a switch is that it has many.
     """
     index = serials.index(topology)
-    taken, out = set(), []
+    taken, out = {}, []          # port -> the row that claimed it
 
     for d in demands:
         d = dict(d)
@@ -744,8 +744,15 @@ def _resolve_endpoints(topology, demands):
                                       f"{wanted_port} — it has "
                                       f"{dev['fiber_ports'] + dev['copper_ports']}")
                     break
-                if p["status"] != "free" or port in taken:
-                    d["malformed"] = (f"port {serial}:{wanted_port} is already in use"
+                if port in taken:
+                    # taken by an earlier row of THIS sheet, which is a
+                    # different problem from one already patched on the map —
+                    # and the row number is what the user needs to go and fix
+                    d["malformed"] = (f"port {serial}:{wanted_port} is already claimed "
+                                      f"by row {taken[port]} of this sheet")
+                    break
+                if p["status"] != "free":
+                    d["malformed"] = (f"port {serial}:{wanted_port} is already patched"
                                       + (f" by {p['circuit']}" if p.get("circuit") else ""))
                     break
                 if cable in ("fiber", "copper") and p["type"] != cable:
@@ -768,7 +775,7 @@ def _resolve_endpoints(topology, demands):
                     d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
                                       f"{cable} port left")
                     break
-            taken.add(port)
+            taken[port] = d["row"]
             d[side] = port
             d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
                                                  "device": dev_id}

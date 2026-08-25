@@ -390,7 +390,16 @@ def main():
           str([c["rack"] for c in near_eor]))
 
     # ---------- placing new equipment ----------
-    tor_serial = a_dev["serial"]
+    # Chain onto a switch that still has a free fibre port. Hard-coding one
+    # made the suite pass only on a pristine map: after a real execution the
+    # obvious candidate can be full, and the failure then looks like a bug in
+    # the planner rather than a used-up fixture.
+    uplink = next((d for d in T["devices"].values()
+                   if d["type"] == "switch" and not d["rack"].endswith(("S01", "N10"))
+                   and any(T["ports"][f"{d['id']}:{i}"]["status"] == "free"
+                           for i in range(1, d["fiber_ports"] + 1))),
+                  a_dev)
+    tor_serial = uplink["serial"]
     specs = [
         {"row": 2, "serial": "9900000001", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 4, "copper_ports": 48, "label": "Leaf"},
@@ -413,8 +422,8 @@ def main():
           all(s["status"] == "ok" for s in sited.values()),
           str([s.get("reason") for s in sited.values() if s["status"] != "ok"]))
     check("a new device is racked beside what it connects to",
-          sited["9900000001"]["rack"] == a_dev["rack"],
-          f"went to {sited['9900000001']['rack']} instead of {a_dev['rack']}")
+          sited["9900000001"]["rack"] == uplink["rack"],
+          f"went to {sited['9900000001']['rack']} instead of {uplink['rack']}")
 
     # two new devices must never be handed the same U
     spans = []
@@ -797,10 +806,29 @@ def main():
     check("a stray SN prefix is tolerated",
           serials.parse("S/N " + a_dev["serial"])[0] == a_dev["serial"])
 
-    tor_id = "A1-S05:TOR-SW-01"
-    tor_dev = T["devices"][tor_id]
-    free_idx = next(i for i in range(1, tor_dev["fiber_ports"] + 1)
-                    if T["ports"][f"{tor_id}:{i}"]["status"] == "free")
+    # Find a switch that genuinely has both a free and a taken fibre port
+    # rather than assuming a particular one does: after a real execution the
+    # obvious candidate may be full, and a test that assumes otherwise dies
+    # mid-run and takes every later check with it.
+    def _idx_by_status(dev_id, dev, want_free):
+        return [i for i in range(1, dev["fiber_ports"] + 1)
+                if (T["ports"][f"{dev_id}:{i}"]["status"] == "free") == want_free]
+
+    tor_id, tor_dev, free_idx, used_idx = None, None, None, None
+    for dev_id, dev in T["devices"].items():
+        if dev["type"] != "switch" or dev["fiber_ports"] < 2 or dev["copper_ports"] < 1:
+            continue
+        free_here = _idx_by_status(dev_id, dev, True)
+        used_here = _idx_by_status(dev_id, dev, False)
+        if free_here and used_here:
+            tor_id, tor_dev = dev_id, dev
+            free_idx, used_idx = free_here[0], used_here[0]
+            break
+    if tor_id is None:                       # fall back to any switch with room
+        tor_id, tor_dev = next((i, d) for i, d in T["devices"].items()
+                               if d["type"] == "switch" and _idx_by_status(i, d, True))
+        free_idx = _idx_by_status(tor_id, tor_dev, True)[0]
+
     far = free_port(T, "D5-N06", "fiber")
 
     def one(src, cable=""):
@@ -827,7 +855,21 @@ def main():
     if used_idx:
         busy = bulkplan._resolve_endpoints(T, one(f"{tor_dev['serial']}:{used_idx}"))[0]
         check("a named port that is already patched is refused",
-              "already in use" in (busy.get("malformed") or ""), busy.get("malformed"))
+              "already patched" in (busy.get("malformed") or ""), busy.get("malformed"))
+
+    # Two rows of the same sheet claiming one port is a different problem from
+    # a port already patched on the map, and the row number is what the user
+    # needs in order to go and fix it.
+    clash = bulkplan._resolve_endpoints(T, [
+        {"row": 2, "src": f"{tor_dev['serial']}:{free_idx}", "dst": far,
+         "group": "", "cable": "", "label": "", "malformed": ""},
+        {"row": 7, "src": f"{tor_dev['serial']}:{free_idx}",
+         "dst": free_port(T, "D5-N07", "fiber"),
+         "group": "", "cable": "", "label": "", "malformed": ""}])
+    check("the first row to claim a named port keeps it", not clash[0].get("malformed"),
+          clash[0].get("malformed"))
+    check("a later row claiming the same port is told which row took it",
+          "row 2" in (clash[1].get("malformed") or ""), clash[1].get("malformed"))
 
     # ---------- LABEL is optional on both tabs ----------
     labelled = bulkplan.demands_from_rows([
