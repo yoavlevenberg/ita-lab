@@ -34,6 +34,8 @@ something the site does not do.
 
 from collections import defaultdict
 
+import zones
+
 RACK_U = 42
 
 # Distance rings, cheapest first. The numbers are relative weights, not metres
@@ -168,7 +170,7 @@ def _room_of(topology, rack_id):
     return topology["pods"].get(_pod_of(topology, rack_id), {}).get("room")
 
 
-def eligible_racks(topology, constraints=None):
+def eligible_racks(topology, constraints=None, zone=None):
     """Cabinets a new device may be installed in.
 
     Equipment is not racked in EOR cabinets or anywhere in an MDA pod. Those
@@ -180,11 +182,20 @@ def eligible_racks(topology, constraints=None):
     That leaves the compute cabinets: 504 of the 640 racks here. A planner's
     "avoid" instructions narrow it further, and are equally hard: something
     they told us not to touch must not appear in the ranking at all.
+
+    `zone` is the hardest boundary of the three. Equipment belonging to a
+    colour zone is installed inside that zone or not at all — the zone is an
+    operational decision, and the planner does not get to trade it away for a
+    shorter cable.
     """
     c = {**EMPTY_CONSTRAINTS, **(constraints or {})}
+    in_zone = set(zones.racks_in(topology, zone)) if zone else None
+
     out = []
     for rid, meta in topology["racks"].items():
         if meta.get("is_eor") or meta.get("is_mda"):
+            continue
+        if in_zone is not None and rid not in in_zone:
             continue
         if rid in c["avoid_racks"] or meta["pod"] in c["avoid_pods"]:
             continue
@@ -226,7 +237,7 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
     u_size = device["u_size"]
 
     scored = []
-    for rack_id in eligible_racks(topology, c):
+    for rack_id in eligible_racks(topology, c, zone=device.get('zone')):
         spots = positions_for(topology, rack_id, u_size,
                               extra_taken.get(rack_id, ()))
         if not spots:
@@ -260,14 +271,22 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
             "rack_fullness_pct": round(fullness * 100),
             "gap_height": best["gap_height"],
             "pod": topology["racks"][rack_id]["pod"],
-            "reason": _reason(topology, rack_id, neighbours, fullness, preferred),
+            "zone": zones.zone_of_pod(topology, topology["racks"][rack_id]["pod"]),
+            "reason": _reason(topology, rack_id, neighbours, fullness, preferred,
+                              device.get("zone")),
             "alternatives_in_rack": len(spots),
         })
 
     if not scored:
+        zone = device.get("zone")
         narrowed = any(c[k] for k in ("avoid_racks", "avoid_pods", "avoid_rooms"))
-        extra = (" once your 'avoid' instructions are applied — try relaxing them"
-                 if narrowed else "")
+        if zone:
+            usable = zones.installable_pods(topology, zone)
+            extra = (f" anywhere in the {zone} zone (pods {', '.join(usable)})"
+                     + (" once your 'avoid' instructions are applied" if narrowed else ""))
+        else:
+            extra = (" once your 'avoid' instructions are applied — try relaxing them"
+                     if narrowed else "")
         raise PlacementError(
             f"no cabinet has {u_size}U of contiguous free space for "
             f"{device.get('serial', 'this device')}{extra}")
@@ -276,8 +295,10 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
     return scored[:limit]
 
 
-def _reason(topology, rack_id, neighbours, fullness, preferred=False):
+def _reason(topology, rack_id, neighbours, fullness, preferred=False, zone=None):
     bits = []
+    if zone:
+        bits.append(f"inside the {zone} zone, as required")
     if preferred:
         bits.append("you asked to prefer this")
     if neighbours:

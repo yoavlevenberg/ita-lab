@@ -365,15 +365,21 @@ def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
 def _next_best_fallback(g, src_rack, dst_rack, exclude_hop_lists):
     """Used when the graph has run out of fully edge-disjoint paths: fall
     back to the next-shortest path overall (may overlap), skipping anything
-    already returned as an option."""
-    try:
-        candidates = nx.shortest_simple_paths(g, src_rack, dst_rack, weight="weight")
-    except nx.NetworkXNoPath:
-        return None
+    already returned as an option. Returns None when there is no path at all.
+
+    shortest_simple_paths is a GENERATOR: it does no work — and raises
+    nothing — until it is iterated. Guarding only the call left
+    NetworkXNoPath to escape from the first `for`, which surfaced as a
+    traceback out of the planner whenever a pair genuinely had no route
+    (copper between pods on different MDAs, say).
+    """
     exclude = {tuple(h) for h in exclude_hop_lists}
-    for hops in candidates:
-        if tuple(hops) not in exclude:
-            return hops
+    try:
+        for hops in nx.shortest_simple_paths(g, src_rack, dst_rack, weight="weight"):
+            if tuple(hops) not in exclude:
+                return hops
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return None
     return None
 
 

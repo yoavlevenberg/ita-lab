@@ -186,12 +186,15 @@ def build_new_devices(topology):
     up by serial, exactly as if it were already racked."""
     tor = topology["devices"]["A1-S05:TOR-SW-01"]["serial"]
 
+    # ZONE is a hard boundary: a device of a colour is installed inside that
+    # colour's pods or not at all. Leave it blank for no restriction.
     devices = [
-        ["SERIAL", "TYPE", "U_SIZE", "FIBER", "COPPER", "LABEL"],
-        ["SN-NEWLEAF01", "switch", "1", "4", "48", "Leaf switch 48x RJ45 + 4x SFP+"],
-        ["SN-NEWSRV0001", "server", "2", "2", "2", "App server 2U"],
-        ["SN-NEWSRV0002", "server", "2", "2", "2", "App server 2U"],
-        ["SN-NEWSRV0003", "server", "2", "2", "2", "App server 2U"],
+        ["SERIAL", "TYPE", "U_SIZE", "FIBER", "COPPER", "ZONE", "LABEL"],
+        ["SN-NEWLEAF01", "switch", "1", "4", "48", "ירוק",
+         "Leaf switch 48x RJ45 + 4x SFP+"],
+        ["SN-NEWSRV0001", "server", "2", "2", "2", "ירוק", "App server 2U"],
+        ["SN-NEWSRV0002", "server", "2", "2", "2", "ירוק", "App server 2U"],
+        ["SN-NEWSRV0003", "server", "2", "2", "2", "blue", "App server 2U (blue zone)"],
     ]
     # note the chaining: the servers hang off the NEW switch, which itself
     # uplinks to an existing ToR
@@ -236,7 +239,7 @@ def main():
         print(f"\nWrote {newkit}  (tabs: {', '.join(tabs)})")
         print("   tick 'הקובץ כולל רכיבים חדשים' before uploading this one")
         for r in tabs["Devices"][1:]:
-            print(f"   {r[0]:<15} {r[1]:<8} {r[2]}U  {r[4]}x copper  {r[5]}")
+            print(f"   {r[0]:<15} {r[1]:<8} {r[2]}U  zone={r[5]:<8} {r[6]}")
 
 
 if __name__ == "__main__":

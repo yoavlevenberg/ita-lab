@@ -101,6 +101,9 @@
   .podtile{
     width:96px; padding:6px 6px 5px; border:1px solid var(--border); border-radius:6px;
     background:var(--panel2); cursor:pointer; text-align:center; transition:.12s;
+    /* the zone colour is painted onto this edge — a rail, so it never
+       competes with the occupancy bar for attention */
+    border-inline-start-width:4px;
   }
   .podtile:hover{border-color:var(--muted); transform:translateY(-1px)}
   .podtile .pid{font-family:Consolas,monospace; font-size:12.5px; font-weight:700}
@@ -318,6 +321,8 @@
   .stat.failed{border-color:#7d2b28; color:#ff9d97}
   .stat.committed{border-color:var(--free); color:var(--free); font-weight:700}
   .gtag{font-family:Consolas,monospace; font-size:10px; color:var(--mda)}
+  .zchip{display:inline-block; font-size:10px; padding:1px 8px; border-radius:9px;
+         border:1px solid; font-weight:600}
   /* ---------- planning assistant ---------- */
   .chat{border:1px solid var(--border); border-radius:9px; margin-top:16px; overflow:hidden;
         display:flex; flex-direction:column; background:var(--panel2)}
@@ -466,6 +471,9 @@
       <span><i style="background:var(--eor)"></i>מסד EOR</span>
       <span><i style="background:var(--mda)"></i>פוד MDA</span>
       <span><i style="background:var(--path)"></i>על המסלול</span>
+      <span style="width:100%;height:0"></span>
+      <span style="color:#586069">אזורים:</span>
+      <span id="zoneLegend" style="display:contents"></span>
     </div>
     <div class="body map" id="map"></div>
   </section>
@@ -510,13 +518,36 @@ let currentSegIds = [];
 
 const $ = id => document.getElementById(id);
 
+// Colour zones: which pods a device of each colour may be installed in.
+// Fetched alongside the map because every pod tile is painted by it.
+let ZONES = { pods:{}, colours:{}, audit:[] };
+const ZONE_HE = { green:"ירוק", blue:"כחול", white:"לבן", yellow:"צהוב" };
+
 // ---------------------------------------------------------------- boot ---
-fetch("/api/topology").then(r => r.json()).then(t => {
+Promise.all([
+  fetch("/api/topology").then(r => r.json()),
+  fetch("/api/zones").then(r => r.json()),
+]).then(([t, z]) => {
   T = t;
+  ZONES = z;
   index();
+  renderZoneLegend();
   renderMap();
   renderStats();
 });
+
+function renderZoneLegend(){
+  const el = $("zoneLegend");
+  if (!el) return;
+  const counts = {};
+  for (const zone of Object.values(ZONES.pods || {}))
+    counts[zone || "neutral"] = (counts[zone || "neutral"] || 0) + 1;
+  el.innerHTML = Object.entries(ZONES.colours || {}).map(([z, c]) =>
+      `<span title="${counts[z] || 0} פודים"><i style="background:${c}"></i>${ZONE_HE[z] || z}</span>`
+    ).join("")
+    + `<span title="פודי MDA — לא שייכים לאף אזור ולא מרכיבים בהם ציוד">`
+    + `<i style="background:var(--mda)"></i>MDA · ללא אזור</span>`;
+}
 
 function index(){
   for (const d of Object.values(T.devices)){
@@ -582,10 +613,15 @@ function renderOverview(){
         const pid = col + num, pod = T.pods[pid];
         const st = podStats[pid] || {used:0, total:1};
         const pct = Math.round(st.used / st.total * 100);
+        const zone = ZONES.pods ? ZONES.pods[pid] : null;
         const tile = document.createElement("div");
         tile.className = "podtile" + (pod.is_mda ? " mda" : "")
                         + (onPathPods.has(pid) ? " on-path" : "");
-        tile.title = `${pid} — ${st.used}/${st.total} פורטים תפוסים`;
+        // a thin colour rail down the edge of the tile: legible at a glance
+        // without fighting the occupancy bar for the eye
+        if (zone) tile.style.borderInlineStartColor = ZONES.colours[zone];
+        tile.title = `${pid} — ${st.used}/${st.total} פורטים תפוסים`
+                   + (zone ? ` · אזור ${ZONE_HE[zone] || zone}` : " · MDA, ללא אזור");
         tile.innerHTML =
           `<div class="pid">${pid}</div>` +
           `<div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div>` +
@@ -1412,17 +1448,18 @@ function renderBulk(){
       <div class="rb">
         <table class="bulk">
           <thead><tr><th>שורה</th><th>סיריאל</th><th>רכיב</th><th>גובה</th>
-            <th>מסד מומלץ</th><th>מיקום U</th><th>למה שם</th></tr></thead>
+            <th>אזור</th><th>מסד מומלץ</th><th>מיקום U</th><th>למה שם</th></tr></thead>
           <tbody>${bulkPlan.siting.map(s => s.status === "ok" ? `
             <tr><td>${s.row}</td><td class="mono">${escapeHtml(s.serial)}</td>
               <td>${escapeHtml(s.label)} <span style="color:var(--muted)">(${escapeHtml(s.type)})</span></td>
               <td>${s.u_size}U</td>
+              <td>${s.zone ? `<span class="zchip" style="border-color:${ZONES.colours[s.zone]};color:${ZONES.colours[s.zone]}">${ZONE_HE[s.zone] || s.zone}</span>` : "—"}</td>
               <td class="mono" style="color:var(--mda)">${escapeHtml(s.rack)}</td>
               <td class="mono">U${s.u_end}${s.u_size > 1 ? "–U" + s.u_start : ""}</td>
               <td style="color:var(--muted);font-size:10.5px">${escapeHtml(s.reason)}</td></tr>` : `
             <tr class="bad"><td>${s.row}</td><td class="mono">${escapeHtml(s.serial)}</td>
               <td>${escapeHtml(s.label)}</td><td>${s.u_size}U</td>
-              <td colspan="3" style="color:#ff9d97">${escapeHtml(s.reason)}</td></tr>`).join("")}
+              <td colspan="4" style="color:#ff9d97">${escapeHtml(s.reason)}</td></tr>`).join("")}
           </tbody></table>
       </div>
     </div>`;

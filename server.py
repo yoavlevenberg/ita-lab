@@ -58,6 +58,7 @@ import placement
 import wo_html
 import workorder
 import xlsxreader
+import zones
 
 HERE = Path(__file__).parent
 PORT = 8800
@@ -154,6 +155,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if url.path == "/api/topology":
             return self._send(200, TOPOLOGY)
+
+        if url.path == "/api/zones":
+            return self._send(200, {
+                "pods": zones.summary(TOPOLOGY),
+                "colours": zones.COLOURS,
+                "audit": zones.audit(TOPOLOGY),
+            })
 
         if url.path == "/api/workorder":
             # Printable sheet for a route the browser is already showing, or

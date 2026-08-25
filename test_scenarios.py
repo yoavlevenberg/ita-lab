@@ -19,6 +19,7 @@ import placement
 import xlsxreader
 import serials
 import wo_html
+import zones
 from pathengine import (load_topology, resolve_path,
                         resolve_route_options, RouteError)
 
@@ -549,6 +550,90 @@ def main():
 
     check("an unrecognised question is admitted, not answered anyway",
           assistant.respond("מה מזג האוויר", plan=ctx, topology=T)["intent"] == "unknown")
+
+    # ---------- colour zones ----------
+    # Every pod is in exactly one zone, except MDA pods which are in none.
+    zmap = zones.summary(T)
+    check("every pod has a zone decided for it", set(zmap) == set(T["pods"]),
+          f"{len(zmap)} of {len(T['pods'])}")
+    check("MDA pods are neutral — no colour at all",
+          all(zmap[p] is None for p in T["pods"] if T["pods"][p]["is_mda"]),
+          str({p: zmap[p] for p in T["pods"] if T["pods"][p]["is_mda"]}))
+    check("every other pod has exactly one colour",
+          all(zmap[p] in zones.NAMED_ZONES or zmap[p] == zones.DEFAULT_ZONE
+              for p in T["pods"] if not T["pods"][p]["is_mda"]))
+    twice = [p for p in T["pods"]
+             if sum(p in pods for pods in zones.NAMED_ZONES.values()) > 1]
+    check("no pod is claimed by two colours", not twice, str(twice))
+    ghosts = sorted({p for pods in zones.NAMED_ZONES.values() for p in pods}
+                    - set(T["pods"]))
+    check("no colour names a pod that does not exist", not ghosts, str(ghosts))
+    check("no colour contains an MDA pod",
+          not [p for pods in zones.NAMED_ZONES.values() for p in pods
+               if T["pods"].get(p, {}).get("is_mda")])
+
+    check("a zone name is accepted in Hebrew and English",
+          zones.resolve("ירוק") == "green" and zones.resolve(" BLUE ") == "blue")
+    check("a blank zone means no restriction", zones.resolve("") is None)
+    try:
+        zones.resolve("סגול")
+        check("an unknown colour is refused", False, "accepted it")
+    except zones.ZoneError:
+        check("an unknown colour is refused", True)
+
+    # the boundary is hard: a device of one colour never lands in another,
+    # even when the thing it connects to lives there
+    blue_rack = next(r for r, m in T["racks"].items()
+                     if zmap.get(m["pod"]) == "blue" and not m["is_eor"])
+    for colour in ("green", "white", "yellow"):
+        spec = {"serial": f"SN-Z{colour}", "type": "server", "u_size": 2,
+                "fiber_ports": 2, "copper_ports": 2, "zone": colour}
+        ranked = placement.rank_positions(T, spec, [blue_rack], limit=5)
+        check(f"a {colour} device stays inside the {colour} zone",
+              all(zmap[c["pod"]] == colour for c in ranked),
+              str([(c["rack"], zmap[c["pod"]]) for c in ranked[:3]]))
+
+    unzoned = {"serial": "SN-ZFREE", "type": "server", "u_size": 2,
+               "fiber_ports": 2, "copper_ports": 2}
+    check("a device with no zone is free to sit beside its target",
+          placement.rank_positions(T, unzoned, [blue_rack], limit=1)[0]["rack"] == blue_rack)
+
+    # a zone that cannot fit the device says which zone, not just "no space"
+    try:
+        placement.rank_positions(T, {"serial": "SN-ZBIG", "type": "server",
+                                     "u_size": 42, "fiber_ports": 1,
+                                     "copper_ports": 1, "zone": "white"},
+                                 [blue_rack])
+        check("a zone with no room names itself in the error", False, "no error")
+    except placement.PlacementError as e:
+        check("a zone with no room names itself in the error", "white" in str(e), str(e))
+
+    # ---------- a bad zone in the sheet is caught before planning ----------
+    zone_specs = [
+        {"row": 2, "serial": "SN-ZOK", "type": "server", "raw_type": "server",
+         "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "a",
+         "raw_zone": "ירוק"},
+        {"row": 3, "serial": "SN-ZBADCOLOUR", "type": "server", "raw_type": "server",
+         "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "b",
+         "raw_zone": "purple"},
+    ]
+    zv = bulkplan.validate_devices(T, zone_specs, [])
+    check("an unrecognised zone is reported against its row",
+          [(i["row"], i["kind"]) for i in zv["issues"]] == [(3, "unknown_zone")],
+          str([(i["row"], i["kind"]) for i in zv["issues"]]))
+
+    # and the sheet's zone actually reaches the planner, even if validation
+    # never ran first
+    fresh = [{"row": 2, "serial": "SN-ZFRESH", "type": "server", "raw_type": "server",
+              "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "c",
+              "raw_zone": "לבן"}]
+    fresh_wiring = [{"row": 2, "src": "SN-ZFRESH", "dst": free_port(T, blue_rack, "fiber"),
+                     "group": "", "cable": "fiber", "malformed": ""}]
+    fp = bulkplan.plan(T, fresh_wiring, new_devices=fresh)
+    landed = fp["siting"]["placements"][0]
+    check("a zone written in the sheet is honoured without validation running first",
+          landed["status"] == "ok" and zmap[landed["rack"].split("-")[0]] == "white",
+          f"{landed.get('rack')} -> {zmap.get(str(landed.get('rack')).split('-')[0])}")
 
     print()
     passed = sum(results)

@@ -37,6 +37,7 @@ import pathengine
 import placement
 import serials
 import xlsxreader
+import zones
 
 DEFAULT_PREFS = {
     "group_adjacent": True,
@@ -67,6 +68,8 @@ DEV_USIZE_ALIASES = ("U_SIZE", "U", "USIZE", "HEIGHT", "RU", "SIZE_U", "UNITS")
 DEV_FIBER_ALIASES = ("FIBER", "FIBER_PORTS", "FIBRE", "FIBRE_PORTS", "SFP", "OPTICAL_PORTS")
 DEV_COPPER_ALIASES = ("COPPER", "COPPER_PORTS", "RJ45", "ETHERNET_PORTS", "UTP")
 DEV_LABEL_ALIASES = ("LABEL", "MODEL", "DESCRIPTION", "NAME", "PRODUCT")
+# the colour zone a device belongs to — a hard boundary on where it may go
+DEV_ZONE_ALIASES = ("ZONE", "GROUP", "COLOR", "COLOUR", "AREA", "קבוצה", "צבע")
 
 # what TYPE strings people actually write, mapped to the model's vocabulary
 TYPE_SYNONYMS = {
@@ -155,6 +158,9 @@ def devices_from_rows(rows):
             "fiber_ports": _int(_pick(row, DEV_FIBER_ALIASES), 0),
             "copper_ports": _int(_pick(row, DEV_COPPER_ALIASES), 0),
             "label": _pick(row, DEV_LABEL_ALIASES) or raw_type or "New device",
+            # kept raw here; resolving it can fail, and that belongs in the
+            # review where it can be reported against its row
+            "raw_zone": _pick(row, DEV_ZONE_ALIASES),
         })
     return out
 
@@ -290,11 +296,21 @@ def validate_devices(topology, new_devices, demands=()):
                   + ", ".join(VALID_TYPES))
             continue
 
-        # is there anywhere at all it could go?
+        try:
+            zone = zones.resolve(d.get("raw_zone"))
+        except zones.ZoneError as e:
+            fault(d, "unknown_zone", str(e))
+            continue
+        d["zone"] = zone
+
+        # is there anywhere at all it could go? inside its zone, if it has one
         if not any(placement.positions_for(topology, r, d["u_size"])
-                   for r in placement.eligible_racks(topology)):
+                   for r in placement.eligible_racks(topology, zone=zone)):
+            where = (f"in the {zone} zone (pods "
+                     f"{', '.join(zones.installable_pods(topology, zone))})"
+                     if zone else "anywhere")
             fault(d, "no_space",
-                  f"no cabinet anywhere has {d['u_size']}U of contiguous free space")
+                  f"no cabinet {where} has {d['u_size']}U of contiguous free space")
             continue
 
         # how many links does the sheet ask of it, and can its ports carry them?
@@ -498,8 +514,17 @@ def plan_devices(topology, new_devices, demands, limit=4, constraints=None):
     placed, results, reserved = {}, [], defaultdict(set)
     for serial in order:
         spec = by_serial[serial]
+        # resolve here too rather than trusting validate_devices to have run
+        # first — the zone is a hard boundary, and it must not depend on the
+        # order two independent functions happen to be called in
+        if "zone" not in spec:
+            try:
+                spec["zone"] = zones.resolve(spec.get("raw_zone"))
+            except zones.ZoneError:
+                spec["zone"] = None
         base = {"row": spec["row"], "serial": serial, "type": spec["type"],
-                "u_size": spec["u_size"], "label": spec["label"]}
+                "u_size": spec["u_size"], "label": spec["label"],
+                "zone": spec.get("zone")}
 
         neighbours = _neighbour_racks(topology, serial, demands, serial_index, placed)
         try:
@@ -555,6 +580,7 @@ def materialise(topology, spec, site):
         "u_start": site["u_start"], "u_size": spec["u_size"],
         "label": spec["label"], "serial": spec["serial"],
         "fiber_ports": spec["fiber_ports"], "copper_ports": spec["copper_ports"],
+        "zone": spec.get("zone"),
         "installed_by_plan": True,
     }
     for i in range(1, spec["fiber_ports"] + 1):
