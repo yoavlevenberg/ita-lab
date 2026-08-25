@@ -143,7 +143,7 @@ BUNDLES = [
 
 
 def build_clean(topology):
-    rows = [["SRC_PORT", "DST_PORT", "GROUP"]]
+    rows = [["SRC_PORT", "DST_PORT", "GROUP", "LABEL"]]
     for group, a_rack, b_rack, cable, count in BUNDLES:
         a = free_ports(topology, a_rack, cable, count)
         b = free_ports(topology, b_rack, cable, count)
@@ -152,7 +152,7 @@ def build_clean(topology):
                   f"on {a_rack}/{b_rack}")
             continue
         for src, dst in zip(a, b):
-            rows.append([src, dst, group])
+            rows.append([src, dst, group, ""])
     return rows
 
 
@@ -188,22 +188,25 @@ def build_new_devices(topology):
 
     # ZONE is a hard boundary: a device of a colour is installed inside that
     # colour's pods or not at all. Leave it blank for no restriction.
+    # Serials are plain numbers. LABEL is optional everywhere it appears.
     devices = [
         ["SERIAL", "TYPE", "U_SIZE", "FIBER", "COPPER", "ZONE", "LABEL"],
-        ["SN-NEWLEAF01", "switch", "1", "4", "48", "ירוק",
+        ["7700100001", "switch", "1", "4", "48", "ירוק",
          "Leaf switch 48x RJ45 + 4x SFP+"],
-        ["SN-NEWSRV0001", "server", "2", "2", "2", "ירוק", "App server 2U"],
-        ["SN-NEWSRV0002", "server", "2", "2", "2", "ירוק", "App server 2U"],
-        ["SN-NEWSRV0003", "server", "2", "2", "2", "blue", "App server 2U (blue zone)"],
+        ["7700100002", "server", "2", "2", "2", "ירוק", "App server 2U"],
+        ["7700100003", "server", "2", "2", "2", "ירוק", ""],
+        ["7700100004", "server", "2", "2", "2", "blue", "App server (blue zone)"],
     ]
     # note the chaining: the servers hang off the NEW switch, which itself
     # uplinks to an existing ToR
+    # An endpoint is either a port id, a bare serial (any suitable port), or
+    # <serial>:<port> to name the socket exactly. LABEL is optional.
     p2p = [
-        ["SRC_PORT", "DST_PORT", "GROUP", "CABLE"],
-        ["SN-NEWLEAF01", tor, "UPLINK", "fiber"],
-        ["SN-NEWSRV0001", "SN-NEWLEAF01", "ACCESS", "copper"],
-        ["SN-NEWSRV0002", "SN-NEWLEAF01", "ACCESS", "copper"],
-        ["SN-NEWSRV0003", "SN-NEWLEAF01", "ACCESS", "copper"],
+        ["SRC_PORT", "DST_PORT", "GROUP", "CABLE", "LABEL"],
+        ["7700100001", tor, "UPLINK", "fiber", "Leaf uplink to ToR"],
+        ["7700100002:3", "7700100001:5", "ACCESS", "copper", "App server 1"],
+        ["7700100003", "7700100001", "ACCESS", "copper", ""],
+        ["7700100004", "7700100001", "ACCESS", "copper", "Blue-zone server"],
     ]
     return {"P2P": p2p, "Devices": devices}
 
@@ -239,7 +242,7 @@ def main():
         print(f"\nWrote {newkit}  (tabs: {', '.join(tabs)})")
         print("   tick 'הקובץ כולל רכיבים חדשים' before uploading this one")
         for r in tabs["Devices"][1:]:
-            print(f"   {r[0]:<15} {r[1]:<8} {r[2]}U  zone={r[5]:<8} {r[6]}")
+            print(f"   {r[0]:<12} {r[1]:<8} {r[2]}U  zone={r[5]:<8} {r[6] or '(no label)'}")
 
 
 if __name__ == "__main__":

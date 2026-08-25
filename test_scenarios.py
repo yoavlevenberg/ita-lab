@@ -332,7 +332,9 @@ def main():
     check("serials are stable across a rebuild",
           serials.serial_for("A1-S05:TOR-SW-01") == a_dev["serial"])
     check("a serial typed loosely still resolves",
-          serials.normalise(" sn_" + a_dev["serial"][3:].lower() + " ") == a_dev["serial"])
+          serials.normalise("  S/N " + a_dev["serial"] + "  ") == a_dev["serial"]
+          and serials.parse(a_dev["serial"] + ":7") == (a_dev["serial"], 7),
+          serials.normalise("  S/N " + a_dev["serial"] + "  "))
 
     # ---------- intra-rack patching ----------
     # Two ports in one cabinet used to be refused. It is now the cheapest
@@ -380,7 +382,7 @@ def main():
 
     # even when the thing it connects to lives in an EOR, the device goes to a
     # compute cabinet rather than joining it
-    eor_target = {"serial": "SN-EORTEST", "type": "switch", "raw_type": "switch",
+    eor_target = {"serial": "9900000000", "type": "switch", "raw_type": "switch",
                   "u_size": 1, "fiber_ports": 4, "copper_ports": 4, "label": "x"}
     near_eor = placement.rank_positions(T, eor_target, ["A1-S01"], limit=3)
     check("a device connecting into an EOR is still racked outside it",
@@ -390,19 +392,19 @@ def main():
     # ---------- placing new equipment ----------
     tor_serial = a_dev["serial"]
     specs = [
-        {"row": 2, "serial": "SN-TESTSW", "type": "switch", "raw_type": "switch",
+        {"row": 2, "serial": "9900000001", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 4, "copper_ports": 48, "label": "Leaf"},
-        {"row": 3, "serial": "SN-TESTSRV1", "type": "server", "raw_type": "server",
+        {"row": 3, "serial": "9900000002", "type": "server", "raw_type": "server",
          "u_size": 2, "fiber_ports": 2, "copper_ports": 2, "label": "Server"},
-        {"row": 4, "serial": "SN-TESTSRV2", "type": "server", "raw_type": "server",
+        {"row": 4, "serial": "9900000003", "type": "server", "raw_type": "server",
          "u_size": 2, "fiber_ports": 2, "copper_ports": 2, "label": "Server"},
     ]
     wiring = [
-        {"row": 2, "src": "SN-TESTSW", "dst": tor_serial, "group": "", "cable": "fiber",
+        {"row": 2, "src": "9900000001", "dst": tor_serial, "group": "", "cable": "fiber",
          "malformed": ""},
-        {"row": 3, "src": "SN-TESTSRV1", "dst": "SN-TESTSW", "group": "", "cable": "copper",
+        {"row": 3, "src": "9900000002", "dst": "9900000001", "group": "", "cable": "copper",
          "malformed": ""},
-        {"row": 4, "src": "SN-TESTSRV2", "dst": "SN-TESTSW", "group": "", "cable": "copper",
+        {"row": 4, "src": "9900000003", "dst": "9900000001", "group": "", "cable": "copper",
          "malformed": ""},
     ]
     built = bulkplan.plan(T, wiring, new_devices=specs)
@@ -411,8 +413,8 @@ def main():
           all(s["status"] == "ok" for s in sited.values()),
           str([s.get("reason") for s in sited.values() if s["status"] != "ok"]))
     check("a new device is racked beside what it connects to",
-          sited["SN-TESTSW"]["rack"] == a_dev["rack"],
-          f"went to {sited['SN-TESTSW']['rack']} instead of {a_dev['rack']}")
+          sited["9900000001"]["rack"] == a_dev["rack"],
+          f"went to {sited['9900000001']['rack']} instead of {a_dev['rack']}")
 
     # two new devices must never be handed the same U
     spans = []
@@ -441,17 +443,17 @@ def main():
 
     # ---------- the Devices tab is checked before anything is sited ----------
     bad_specs = [
-        {"row": 2, "serial": "SN-DUP", "type": "switch", "raw_type": "switch",
+        {"row": 2, "serial": "9900000004", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 2, "copper_ports": 0, "label": "a"},
-        {"row": 3, "serial": "SN-DUP", "type": "switch", "raw_type": "switch",
+        {"row": 3, "serial": "9900000004", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 2, "copper_ports": 0, "label": "b"},
         {"row": 4, "serial": tor_serial, "type": "server", "raw_type": "server",
          "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "c"},
-        {"row": 5, "serial": "SN-HUGE", "type": "server", "raw_type": "server",
+        {"row": 5, "serial": "9900000005", "type": "server", "raw_type": "server",
          "u_size": 99, "fiber_ports": 1, "copper_ports": 1, "label": "d"},
-        {"row": 6, "serial": "SN-NOPORT", "type": "server", "raw_type": "server",
+        {"row": 6, "serial": "9900000006", "type": "server", "raw_type": "server",
          "u_size": 1, "fiber_ports": 0, "copper_ports": 0, "label": "e"},
-        {"row": 7, "serial": "SN-ODD", "type": "toaster", "raw_type": "toaster",
+        {"row": 7, "serial": "9900000007", "type": "toaster", "raw_type": "toaster",
          "u_size": 1, "fiber_ports": 1, "copper_ports": 0, "label": "f"},
     ]
     dv = bulkplan.validate_devices(T, bad_specs, [])
@@ -461,14 +463,14 @@ def main():
                   6: "no_ports", 7: "unknown_type"}, str(got))
 
     cyc_specs = [
-        {"row": 2, "serial": "SN-CA", "type": "switch", "raw_type": "switch",
+        {"row": 2, "serial": "9900000008", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "a"},
-        {"row": 3, "serial": "SN-CB", "type": "switch", "raw_type": "switch",
+        {"row": 3, "serial": "9900000009", "type": "switch", "raw_type": "switch",
          "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "b"},
     ]
     cyc_wiring = [
-        {"row": 2, "src": "SN-CA", "dst": "SN-CB", "group": "", "cable": "fiber", "malformed": ""},
-        {"row": 3, "src": "SN-CB", "dst": "SN-CA", "group": "", "cable": "fiber", "malformed": ""},
+        {"row": 2, "src": "9900000008", "dst": "9900000009", "group": "", "cable": "fiber", "malformed": ""},
+        {"row": 3, "src": "9900000009", "dst": "9900000008", "group": "", "cable": "fiber", "malformed": ""},
     ]
     cv = bulkplan.validate_devices(T, cyc_specs, cyc_wiring)
     check("two new devices that only reference each other are refused",
@@ -476,7 +478,7 @@ def main():
           str([i["kind"] for i in cv["issues"]]))
 
     # ---------- a serial in a port column needs a cable type ----------
-    no_media = [{"row": 2, "src": "SN-TESTSW", "dst": tor_serial, "group": "",
+    no_media = [{"row": 2, "src": "9900000001", "dst": tor_serial, "group": "",
                  "cable": "", "malformed": ""}]
     mv = bulkplan.validate(T, no_media, specs)
     check("a row naming a device by serial must say which media",
@@ -524,7 +526,7 @@ def main():
 
     said = assistant.respond("למה הרכיב הוצב שם?", plan=ctx, topology=T)
     check("the assistant explains a placement with its real rack",
-          sited["SN-TESTSW"]["rack"] in said["text"], said["text"][:80])
+          sited["9900000001"]["rack"] in said["text"], said["text"][:80])
     check("and names the runner-up it beat", "המועמד הבא" in said["text"])
 
     where = assistant.respond(f"איפה {a_dev['serial']}", plan=ctx, topology=T)
@@ -532,7 +534,7 @@ def main():
           a_dev["rack"] in where["text"] and f"U{a_dev['u_start']}" in where["text"],
           where["text"][:90])
 
-    unknown = assistant.respond("איפה SN-DOESNOTEXIST", plan=ctx, topology=T)
+    unknown = assistant.respond("איפה 9900000021", plan=ctx, topology=T)
     check("an unknown serial is reported, not invented",
           "לא קיים" in unknown["text"], unknown["text"][:80])
 
@@ -595,21 +597,21 @@ def main():
     blue_rack = next(r for r, m in T["racks"].items()
                      if zmap.get(m["pod"]) == "blue" and not m["is_eor"])
     for colour in ("green", "white", "yellow"):
-        spec = {"serial": f"SN-Z{colour}", "type": "server", "u_size": 2,
+        spec = {"serial": f"9910000{len(colour):03d}", "type": "server", "u_size": 2,
                 "fiber_ports": 2, "copper_ports": 2, "zone": colour}
         ranked = placement.rank_positions(T, spec, [blue_rack], limit=5)
         check(f"a {colour} device stays inside the {colour} zone",
               all(zmap[c["pod"]] == colour for c in ranked),
               str([(c["rack"], zmap[c["pod"]]) for c in ranked[:3]]))
 
-    unzoned = {"serial": "SN-ZFREE", "type": "server", "u_size": 2,
+    unzoned = {"serial": "9900000010", "type": "server", "u_size": 2,
                "fiber_ports": 2, "copper_ports": 2}
     check("a device with no zone is free to sit beside its target",
           placement.rank_positions(T, unzoned, [blue_rack], limit=1)[0]["rack"] == blue_rack)
 
     # a zone that cannot fit the device says which zone, not just "no space"
     try:
-        placement.rank_positions(T, {"serial": "SN-ZBIG", "type": "server",
+        placement.rank_positions(T, {"serial": "9900000011", "type": "server",
                                      "u_size": 42, "fiber_ports": 1,
                                      "copper_ports": 1, "zone": "white"},
                                  [blue_rack])
@@ -619,10 +621,10 @@ def main():
 
     # ---------- a bad zone in the sheet is caught before planning ----------
     zone_specs = [
-        {"row": 2, "serial": "SN-ZOK", "type": "server", "raw_type": "server",
+        {"row": 2, "serial": "9900000012", "type": "server", "raw_type": "server",
          "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "a",
          "raw_zone": "ירוק"},
-        {"row": 3, "serial": "SN-ZBADCOLOUR", "type": "server", "raw_type": "server",
+        {"row": 3, "serial": "9900000013", "type": "server", "raw_type": "server",
          "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "b",
          "raw_zone": "purple"},
     ]
@@ -633,10 +635,10 @@ def main():
 
     # and the sheet's zone actually reaches the planner, even if validation
     # never ran first
-    fresh = [{"row": 2, "serial": "SN-ZFRESH", "type": "server", "raw_type": "server",
+    fresh = [{"row": 2, "serial": "9900000014", "type": "server", "raw_type": "server",
               "u_size": 2, "fiber_ports": 1, "copper_ports": 1, "label": "c",
               "raw_zone": "לבן"}]
-    fresh_wiring = [{"row": 2, "src": "SN-ZFRESH", "dst": free_port(T, blue_rack, "fiber"),
+    fresh_wiring = [{"row": 2, "src": "9900000014", "dst": free_port(T, blue_rack, "fiber"),
                      "group": "", "cable": "fiber", "malformed": ""}]
     fp = bulkplan.plan(T, fresh_wiring, new_devices=fresh)
     landed = fp["siting"]["placements"][0]
@@ -656,16 +658,16 @@ def main():
                 "copper_ports": kw.get("c", 1), "label": serial,
                 "raw_zone": kw.get("z", "")}
 
-    mixed = [dspec(2, "SN-AGOOD", z="ירוק"), dspec(3, "SN-ATYPO", z="purple"),
-             dspec(4, "SN-AHUGE", u=99), dspec(5, "SN-ANOPORTS", f=0, c=0),
-             dspec(6, "SN-AWEIRD", t="toaster")]
+    mixed = [dspec(2, "9900000015", z="ירוק"), dspec(3, "9900000016", z="purple"),
+             dspec(4, "9900000017", u=99), dspec(5, "9900000018", f=0, c=0),
+             dspec(6, "9900000019", t="toaster")]
     drev = bulkplan.validate_devices(T, [dict(s) for s in mixed], [])
     dsit = bulkplan.plan_devices(T, [dict(s) for s in mixed], [])
     passes = {s["row"] for s in mixed} - {i["row"] for i in drev["issues"]}
     sited_rows = {p["row"] for p in dsit["placements"] if p["status"] == "ok"}
     check("the Devices review predicts the planner exactly",
           passes == sited_rows, f"review {sorted(passes)} vs planner {sorted(sited_rows)}")
-    typo = next(p for p in dsit["placements"] if p["serial"] == "SN-ATYPO")
+    typo = next(p for p in dsit["placements"] if p["serial"] == "9900000016")
     check("a mistyped zone is refused, never downgraded to 'anywhere'",
           typo["status"] == "failed" and "zone" in typo["reason"].lower(),
           f"{typo['status']}: {typo.get('reason', '')[:60]}")
@@ -758,10 +760,10 @@ def main():
           bulkplan._pick({"SRC_PORT": "right", "SRC_PROT": "wrong",
                           xlsxreader.ROW_KEY: 2}, bulkplan.SRC_ALIASES) == "right")
     typed_dev = bulkplan.devices_from_rows(
-        [{"SERAIL": "SN-TYPO", "TYP": "swich", "U SIZE": "1", "FIBRE": "4",
+        [{"SERAIL": "9900000020", "TYP": "swich", "U SIZE": "1", "FIBRE": "4",
           xlsxreader.ROW_KEY: 2}])[0]
     check("a Devices row with several mistyped headers still reads",
-          typed_dev["serial"] == "SN-TYPO" and typed_dev["type"] == "switch"
+          typed_dev["serial"] == "9900000020" and typed_dev["type"] == "switch"
           and typed_dev["u_size"] == 1 and typed_dev["fiber_ports"] == 4,
           str(typed_dev))
 
@@ -781,6 +783,88 @@ def main():
                            ("כמה עולה פיצה?", "unknown")):
         got = assistant.respond(phrase, topology=T)["intent"]
         check(f"'{phrase}' -> {expect}", got == expect, got)
+
+    # ---------- serials are numbers, and a port can be named outright -------
+    check("every serial is a plain 10-digit number",
+          all(str(d["serial"]).isdigit() and len(d["serial"]) == 10
+              for d in T["devices"].values()))
+    check("a bare serial names the device and leaves the port open",
+          serials.parse(a_dev["serial"]) == (a_dev["serial"], None))
+    check("<serial>:<port> names the socket exactly",
+          serials.parse(a_dev["serial"] + ":12") == (a_dev["serial"], 12))
+    check("a port id is not mistaken for a serial",
+          not serials.looks_like("A1-S05:FIB-PP-01:2"))
+    check("a stray SN prefix is tolerated",
+          serials.parse("S/N " + a_dev["serial"])[0] == a_dev["serial"])
+
+    tor_id = "A1-S05:TOR-SW-01"
+    tor_dev = T["devices"][tor_id]
+    free_idx = next(i for i in range(1, tor_dev["fiber_ports"] + 1)
+                    if T["ports"][f"{tor_id}:{i}"]["status"] == "free")
+    far = free_port(T, "D5-N06", "fiber")
+
+    def one(src, cable=""):
+        return [{"row": 2, "src": src, "dst": far, "group": "", "cable": cable,
+                 "label": "", "malformed": ""}]
+
+    got = bulkplan._resolve_endpoints(T, one(f"{tor_dev['serial']}:{free_idx}"))[0]
+    check("an explicitly named free port is used as written",
+          got["src"] == f"{tor_id}:{free_idx}" and not got.get("malformed"),
+          f"{got['src']} {got.get('malformed', '')}")
+    check("naming a port needs no CABLE column", not got.get("malformed"))
+
+    bad_port = bulkplan._resolve_endpoints(T, one(f"{tor_dev['serial']}:999"))[0]
+    check("a port the device does not have is refused",
+          "no port 999" in (bad_port.get("malformed") or ""), bad_port.get("malformed"))
+
+    wrong_media = bulkplan._resolve_endpoints(
+        T, one(f"{tor_dev['serial']}:{tor_dev['fiber_ports'] + 1}", "fiber"))[0]
+    check("a named port of the wrong media is refused",
+          "copper" in (wrong_media.get("malformed") or ""), wrong_media.get("malformed"))
+
+    used_idx = next((i for i in range(1, tor_dev["fiber_ports"] + 1)
+                     if T["ports"][f"{tor_id}:{i}"]["status"] != "free"), None)
+    if used_idx:
+        busy = bulkplan._resolve_endpoints(T, one(f"{tor_dev['serial']}:{used_idx}"))[0]
+        check("a named port that is already patched is refused",
+              "already in use" in (busy.get("malformed") or ""), busy.get("malformed"))
+
+    # ---------- LABEL is optional on both tabs ----------
+    labelled = bulkplan.demands_from_rows([
+        {"SRC_PORT": "a", "DST_PORT": "b", "LABEL": "Core uplink",
+         xlsxreader.ROW_KEY: 2},
+        {"SRC_PORT": "c", "DST_PORT": "d", xlsxreader.ROW_KEY: 3}])
+    check("a P2P row can carry an optional name",
+          labelled[0]["label"] == "Core uplink" and labelled[1]["label"] == "",
+          str([d["label"] for d in labelled]))
+    check("a Devices row without a label still reads",
+          bulkplan.devices_from_rows([{"SERIAL": "9906000001", "TYPE": "server",
+                                       "U_SIZE": "1", "FIBER": "1",
+                                       xlsxreader.ROW_KEY: 2}])[0]["label"] == "server")
+
+    # ---------- every planned row carries its diagram ----------
+    # The browser cannot look these ports up itself: a plan's route may pass
+    # through a device the plan has not installed yet, which is simply absent
+    # from the map the browser downloaded.
+    drawn = bulkplan.plan(T, one(free_port(T, "A1-S05", "fiber")))["results"][0]
+    check("a planned row carries a drawable jump chain",
+          len(drawn["jump"]) == drawn["hops"] + 1,
+          f"{len(drawn['jump'])} stops for {drawn['hops']} hops")
+    check("every stop knows its cabinet, U and port",
+          all(s["rack"] and s["u"] and s["port"] for s in drawn["jump"]),
+          str(drawn["jump"][:2]))
+
+    local_ports, by_dev = [], {}
+    for pid, p in T["ports"].items():
+        if p["rack"] == "A1-S05" and p["type"] == "copper" and p["status"] == "free":
+            by_dev.setdefault(p["device"], pid)
+    local_ports = list(by_dev.values())[:2]
+    patch = bulkplan.plan(T, [{"row": 2, "src": local_ports[0], "dst": local_ports[1],
+                               "group": "", "cable": "", "label": "",
+                               "malformed": ""}])["results"][0]
+    check("an intra-rack patch still shows BOTH of its ends",
+          len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
+          str(patch["jump"]))
 
     print()
     passed = sum(results)

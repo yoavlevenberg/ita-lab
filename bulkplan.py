@@ -61,6 +61,11 @@ DST_ALIASES = ("DST_PORT", "DEST_PORT", "DESTINATION_PORT", "DST", "DEST",
                "B_PORT", "TO_PORT", "TO", "DST_SERIAL", "B_SERIAL")
 GROUP_ALIASES = ("GROUP", "GROUP_ID", "BUNDLE", "SERVICE", "NETWORK", "VLAN")
 CABLE_ALIASES = ("CABLE", "CABLE_TYPE", "MEDIA", "TYPE", "CONNECTION_TYPE", "LINK_TYPE")
+# an optional free-text name for the connection itself, carried through to the
+# results table and the Work Order so a link can be recognised by what it is
+# for rather than only by its port ids
+LABEL_ALIASES = ("LABEL", "NAME", "DESCRIPTION", "DESC", "COMMENT", "NOTE",
+                 "תיאור", "שם", "הערה")
 
 # ---- the Devices tab: what is arriving, not what it connects to -----------
 DEV_SERIAL_ALIASES = ("SERIAL", "SERIAL_NUMBER", "SN", "S_N", "ASSET", "ASSET_TAG")
@@ -214,6 +219,7 @@ def demands_from_rows(rows):
             "src": src,
             "dst": dst,
             "group": _pick(row, GROUP_ALIASES),
+            "label": _pick(row, LABEL_ALIASES),
             # only needed when an endpoint is given as a serial: the device has
             # both fibre and copper ports, so the sheet has to say which
             "cable": _pick(row, CABLE_ALIASES).strip().lower(),
@@ -240,7 +246,9 @@ def demands_from_rows(rows):
 # picks cross-connect ports along a route.
 
 def looks_like_serial(text):
-    return str(text).strip().upper().startswith(serials.PREFIX)
+    """Serials are plain numbers, so this is what tells '4827193056:12' apart
+    from a port id like 'A1-S05:FIB-PP-01:2'."""
+    return serials.looks_like(text)
 
 
 def free_port_on_device(topology, device_id, cable_type, exclude=()):
@@ -281,7 +289,7 @@ def validate_devices(topology, new_devices, demands=()):
     for d in sorted(new_devices, key=lambda x: x["row"]):
         serial = d["serial"]
 
-        if not serial or serial == serials.PREFIX:
+        if not serial:
             fault(d, "no_serial", "this row has no serial number")
             continue
         if serial in seen:
@@ -604,7 +612,7 @@ def materialise(topology, spec, site):
     # and SN-NEWSRV02 share their first characters, and the second box would
     # silently overwrite the first. Use the whole serial, and still guard
     # against a clash with something already in the rack.
-    name = f"NEW-{spec['serial'].removeprefix(serials.PREFIX)}"
+    name = f"NEW-{spec['serial']}"
     dev_id = f"{rack}:{name}"
     suffix = 2
     while dev_id in topology["devices"]:
@@ -719,29 +727,85 @@ def _resolve_endpoints(topology, demands):
             value = d[side]
             if not value or not looks_like_serial(value):
                 continue
-            serial = serials.normalise(value)
+            serial, wanted_port = serials.parse(value)
             dev_id = index.get(serial)
             if not dev_id:
                 d["malformed"] = f"serial {serial} is not a device on the map"
                 break
-            if cable not in ("fiber", "copper"):
-                # a device has both kinds of port, so the row must say which
-                d["malformed"] = (f"row refers to device {serial} by serial but does "
-                                  "not say which cable type to use "
-                                  "(add a CABLE column: fiber or copper)")
-                break
-            port = free_port_on_device(topology, dev_id, cable, taken)
-            if not port:
-                dev = topology["devices"][dev_id]
-                d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
-                                  f"{cable} port left")
-                break
+
+            if wanted_port is not None:
+                # <serial>:<port> names the exact socket, so honour it rather
+                # than choosing — and say plainly when it cannot be honoured
+                port = f"{dev_id}:{wanted_port}"
+                p = topology["ports"].get(port)
+                if p is None:
+                    dev = topology["devices"][dev_id]
+                    d["malformed"] = (f"device {serial} ({dev['label']}) has no port "
+                                      f"{wanted_port} — it has "
+                                      f"{dev['fiber_ports'] + dev['copper_ports']}")
+                    break
+                if p["status"] != "free" or port in taken:
+                    d["malformed"] = (f"port {serial}:{wanted_port} is already in use"
+                                      + (f" by {p['circuit']}" if p.get("circuit") else ""))
+                    break
+                if cable in ("fiber", "copper") and p["type"] != cable:
+                    d["malformed"] = (f"port {serial}:{wanted_port} is {p['type']}, "
+                                      f"but the row asks for {cable}")
+                    break
+                cable = cable or p["type"]
+            else:
+                if cable not in ("fiber", "copper"):
+                    # naming only the device leaves the port open, and a device
+                    # has both kinds — so the row has to say which
+                    d["malformed"] = (f"row refers to device {serial} by serial but does "
+                                      "not say which cable type to use "
+                                      "(add a CABLE column, or write "
+                                      f"{serial}:<port> to name the port itself)")
+                    break
+                port = free_port_on_device(topology, dev_id, cable, taken)
+                if not port:
+                    dev = topology["devices"][dev_id]
+                    d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
+                                      f"{cable} port left")
+                    break
             taken.add(port)
             d[side] = port
             d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
                                                  "device": dev_id}
         out.append(d)
     return out
+
+def _jump_chain(topology, route):
+    """The route as a list of stops the browser can draw directly.
+
+    One entry per cabinet the cable passes through, carrying the U position and
+    port it lands on. Sent ready-made because the browser's copy of the map is
+    the one it downloaded at load time, which does not contain the devices this
+    very plan is proposing to install.
+    """
+    ports = [route["src_port"]] + [t["port"] for t in route["transit_points"]] \
+            + [route["dst_port"]]
+    racks = list(route["hop_racks"])
+    # An intra-rack patch has ONE cabinet but TWO ends. Zipping them would
+    # drop the far end and draw a diagram with a single stop, which is exactly
+    # the case where seeing both ends matters most.
+    if len(racks) == 1 and len(ports) == 2:
+        racks = racks * 2
+
+    stops = []
+    for rack, port_id in zip(racks, ports):
+        p = topology["ports"].get(port_id)
+        dev = topology["devices"].get(p["device"]) if p else None
+        stops.append({
+            "rack": rack,
+            "u": dev["u_start"] if dev else None,
+            "u_size": dev["u_size"] if dev else 1,
+            "port": p["index"] if p else None,
+            "device": dev["name"] if dev else "",
+            "is_new": bool(dev and dev.get("installed_by_plan")),
+        })
+    return stops
+
 
 def plan(topology, demands, prefs=None, already_isolated=False, new_devices=(),
          constraints=None):
@@ -783,7 +847,8 @@ def plan(topology, demands, prefs=None, already_isolated=False, new_devices=(),
         seats[d["group_key"]] += 1
 
         base = {"row": d["row"], "src": d["src"], "dst": d["dst"],
-                "group": d["group_key"], "seat": seat + 1}
+                "group": d["group_key"], "label": d.get("label", ""),
+                "seat": seat + 1}
         if d.get("malformed"):
             results.append({**base, "status": "failed", "reason": d["malformed"]})
             continue
@@ -804,6 +869,11 @@ def plan(topology, demands, prefs=None, already_isolated=False, new_devices=(),
 
         planned += 1
         results.append({**base, "status": "ok", "note": note, "route": route,
+                        # enough to draw the cable-jump diagram in the browser
+                        # WITHOUT it having to look ports up in its own copy of
+                        # the map — which it cannot do for a device this plan
+                        # is about to create
+                        "jump": _jump_chain(work, route),
                         "hops": len(route["segments"]),
                         "cable_type": route["cable_type"],
                         "domain": route["domain"],

@@ -384,6 +384,8 @@ class Handler(BaseHTTPRequestHandler):
             # shown, so they stay server-side with the plan
             "siting": [{k: v for k, v in p.items() if k != "options"}
                        for p in siting["placements"]] if siting else None,
+            # the full route object stays server-side; "jump" is the small
+            # ready-to-draw form the diagram needs
             "results": [{k: v for k, v in r.items() if k != "route"}
                         for r in result["results"]],
         })

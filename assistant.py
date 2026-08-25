@@ -82,8 +82,9 @@ def find_pods(text):
 def find_serials(text):
     out = []
     for word in re.split(r"[\s,;]+", text):
-        if word.upper().startswith(serials.PREFIX):
-            out.append(serials.normalise(word.strip(".,:;")))
+        w = word.strip(".,;")
+        if serials.looks_like(w):
+            out.append(serials.normalise(w))
     return out
 
 

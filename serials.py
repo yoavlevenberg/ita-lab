@@ -19,13 +19,19 @@ same as "did not".
 """
 
 import hashlib
+import re
 
-PREFIX = "SN-"
+# Serials are plain numbers, the way an asset tag or an inventory export gives
+# them. Ten digits: wide enough that 6,312 devices collide with probability
+# around one in a million, and uniqueness is asserted at build time anyway.
 LENGTH = 10
+FIRST = 10 ** (LENGTH - 1)          # no leading zero, so the number survives
+SPAN = 9 * FIRST                    # a round-trip through a spreadsheet cell
 
-# Crockford-style alphabet: no I, L, O or U, so a serial read off a label or
-# dictated over the phone cannot be transcribed ambiguously.
-ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+# A port is addressed as <serial>:<port>, e.g. 4827193056:12. Bare digits mean
+# "this device, any suitable port"; with the suffix, that exact port.
+PORT_SEP = ":"
+_SERIAL_RE = re.compile(r"^\s*(\d{4,})\s*(?::\s*(\d+)\s*)?$")
 
 
 class SerialError(Exception):
@@ -35,12 +41,7 @@ class SerialError(Exception):
 def serial_for(device_id):
     """Deterministic, opaque, stable across rebuilds."""
     digest = hashlib.sha256(device_id.encode("utf-8")).digest()
-    n = int.from_bytes(digest[:8], "big")
-    out = []
-    for _ in range(LENGTH):
-        n, r = divmod(n, len(ALPHABET))
-        out.append(ALPHABET[r])
-    return PREFIX + "".join(out)
+    return str(FIRST + int.from_bytes(digest[:8], "big") % SPAN)
 
 
 def index(topology):
@@ -48,11 +49,29 @@ def index(topology):
     return {d["serial"]: d["id"] for d in topology["devices"].values() if d.get("serial")}
 
 
+def parse(text):
+    """Read an endpoint written as a serial.
+
+    Returns (serial, port_index) — port_index is None when the cell named only
+    the device and left the choice of port to the planner. Returns None when
+    the text is not a serial at all, which is how a port id like
+    'A1-S05:FIB-PP-01:2' is told apart from '4827193056:12'.
+    """
+    # a stray "SN" / "S/N" prefix is tolerated here rather than only in
+    # normalise(), so every caller agrees on what counts as a serial
+    raw = re.sub(r"^\s*(?:s[/\-]?n)\s*[:\-]?\s*", "", str(text or ""), flags=re.I)
+    m = _SERIAL_RE.match(raw)
+    if not m:
+        return None
+    return (m.group(1), int(m.group(2)) if m.group(2) else None)
+
+
 def normalise(text):
-    """Accept a serial typed loosely — lower case, spaces, a missing prefix —
-    because these get copied off labels and out of inventory exports."""
-    t = "".join(str(text).split()).upper().replace("_", "-")
-    if t and not t.startswith(PREFIX):
-        bare = t[3:] if t[:3].rstrip("-") in ("SN", "S/N") else t
-        t = PREFIX + bare.lstrip("-")
-    return t
+    """The serial alone, without any port suffix."""
+    hit = parse(text)
+    return hit[0] if hit else str(text or "").strip()
+
+
+def looks_like(text):
+    """Is this cell naming a device by serial, rather than a port id?"""
+    return parse(text) is not None
