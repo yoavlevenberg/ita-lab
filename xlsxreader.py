@@ -84,10 +84,25 @@ def _sheet_paths(z):
     return out
 
 
+def _open_zip(path_or_file):
+    """Open the archive, turning "this isn't a zip" into the explanation a
+    user can act on.
+
+    Every entry point goes through here. When it did not, the friendly message
+    was reachable from one path and an unhandled BadZipFile escaped from the
+    other — which killed the request instead of reporting the problem.
+    """
+    try:
+        return zipfile.ZipFile(path_or_file)
+    except zipfile.BadZipFile:
+        raise XlsxError("not a .xlsx file (it is not a zip archive) — if this "
+                        "is an old .xls, re-save it as .xlsx")
+
+
 def sheet_names(path_or_file):
     """Tab names, in workbook order — so a caller can ask 'is there a Devices
     tab?' without reading the whole file."""
-    with zipfile.ZipFile(path_or_file) as z:
+    with _open_zip(path_or_file) as z:
         return list(_sheet_paths(z))
 
 
@@ -131,12 +146,7 @@ def read_rows(path_or_file, sheet=None):
     positions would report the wrong line for every row after the first gap —
     and these numbers are how a user finds the offending line in their file.
     """
-    try:
-        z = zipfile.ZipFile(path_or_file)
-    except zipfile.BadZipFile:
-        raise XlsxError("not a .xlsx file (it is not a zip archive) — if this "
-                        "is an old .xls, re-save it as .xlsx")
-    with z:
+    with _open_zip(path_or_file) as z:
         shared = _shared_strings(z)
         if sheet is None:
             part = _first_sheet_path(z)

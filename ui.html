@@ -402,6 +402,7 @@
     </div>
     <div class="bf" id="bulkFooter" style="display:none">
       <span id="bulkFootInfo" style="flex:1;font-size:12px;color:var(--muted)"></span>
+      <button class="ghost" id="btnBulkClear">נקה</button>
       <button id="btnBulkDownload">הורד סיכום</button>
       <button class="primary" id="btnBulkPlan">תכנן מסלולים</button>
       <button class="primary" id="btnBulkExecute">בצע את כל המסלולים</button>
@@ -1246,10 +1247,28 @@ $("btnBulkPlan").onclick = () => {
   planSheet();
 };
 
+// Back to an empty panel, ready for the next file. Preferences are left as
+// they are — they are settings, not part of the file being looked at.
+function bulkClear(){
+  bulkPlan = null;
+  bulkFile = null;
+  $("bulkResult").innerHTML = "";
+  $("bulkFooter").style.display = "none";
+  // a file input will not fire `change` for the same file twice unless its
+  // value is reset, so re-dropping a corrected sheet of the same name works
+  $("bulkFile").value = "";
+}
+$("btnBulkClear").onclick = bulkClear;
+
 function bulkError(msg){
   bulkPlan = null;
-  $("bulkFooter").style.display = "none";
   $("bulkResult").innerHTML = `<div class="err" style="margin-top:16px">${escapeHtml(msg)}</div>`;
+  // keep the footer, but with nothing to act on except dismissing the error
+  $("bulkFooter").style.display = "";
+  $("btnBulkPlan").style.display = "none";
+  $("btnBulkExecute").style.display = "none";
+  $("btnBulkDownload").style.display = "none";
+  $("bulkFootInfo").textContent = "";
 }
 
 function renderBulk(){

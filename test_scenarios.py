@@ -15,6 +15,7 @@ from collections import Counter
 
 import bulkplan
 import placement
+import xlsxreader
 import serials
 import wo_html
 from pathengine import (load_topology, resolve_path,
@@ -288,6 +289,27 @@ def main():
               for s in planned["results"][0]["route"]["segments"]))
     check("an unapproved Work Order is marked PROPOSED",
           "PROPOSED" in wo and "EXECUTED" not in wo)
+
+    # ---------- a file that is not a spreadsheet is explained, not fatal ----------
+    # Every entry point must go through the same guard: when only one did, the
+    # other let a raw BadZipFile escape and killed the request instead of
+    # reporting the problem.
+    import io as _io
+    for probe in (b"\x01\x02\x03", b"hello, not a spreadsheet"):
+        for call in (lambda b: xlsxreader.sheet_names(_io.BytesIO(b)),
+                     lambda b: xlsxreader.read_sheet(_io.BytesIO(b)),
+                     lambda b: bulkplan.read_demand_sheet(_io.BytesIO(b))):
+            try:
+                call(probe)
+                check("a non-spreadsheet upload is reported, not raised", False,
+                      "no error at all")
+            except xlsxreader.XlsxError:
+                pass
+            except Exception as exc:
+                check("a non-spreadsheet upload is reported, not raised", False,
+                      f"leaked {type(exc).__name__}")
+                break
+    check("a non-spreadsheet upload is reported, not raised", True)
 
     # ---------- serials ----------
     all_serials = [d.get("serial") for d in T["devices"].values()]
