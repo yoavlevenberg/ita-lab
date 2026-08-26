@@ -59,6 +59,22 @@ SRC_ALIASES = ("SRC_PORT", "SOURCE_PORT", "SRC", "SOURCE", "A_PORT", "FROM_PORT"
                "SRC_SERIAL", "A_SERIAL")
 DST_ALIASES = ("DST_PORT", "DEST_PORT", "DESTINATION_PORT", "DST", "DEST",
                "B_PORT", "TO_PORT", "TO", "DST_SERIAL", "B_SERIAL")
+
+# ---- the four-column form: device and port in separate cells --------------
+# A sheet may name each end as one cell (`4827193056:12`) or as two — the box
+# in its own column and the port number beside it, left blank to mean "any
+# suitable port on that box". The two columns are easier to fill in from an
+# inventory export, where the serial and the port never lived in one field.
+#
+# The device column decides how the port column is read: with it present,
+# SRC_PORT holds a bare port NUMBER; without it, SRC_PORT holds a whole
+# endpoint. That keeps a sheet written in either form unambiguous.
+SRC_DEV_ALIASES = ("SRC_DEVICE", "SOURCE_DEVICE", "SRC_SN", "SOURCE_SN",
+                   "A_DEVICE", "FROM_DEVICE", "A_SN", "FROM_SN",
+                   "SRC_ASSET", "רכיב_מקור", "מקור", "סיריאל_מקור")
+DST_DEV_ALIASES = ("DST_DEVICE", "DEST_DEVICE", "DESTINATION_DEVICE",
+                   "DST_SN", "DEST_SN", "B_DEVICE", "TO_DEVICE", "B_SN", "TO_SN",
+                   "DST_ASSET", "רכיב_יעד", "יעד", "סיריאל_יעד")
 GROUP_ALIASES = ("GROUP", "GROUP_ID", "BUNDLE", "SERVICE", "NETWORK", "VLAN")
 CABLE_ALIASES = ("CABLE", "CABLE_TYPE", "MEDIA", "TYPE", "CONNECTION_TYPE", "LINK_TYPE")
 # an optional free-text name for the connection itself, carried through to the
@@ -119,6 +135,19 @@ def _pick(row, aliases):
         if fuzzy.match(key, same):
             return str(value).strip()
     return ""
+
+
+def _has_column(row, aliases):
+    """Does the sheet HAVE this column, whatever this row happens to hold?
+
+    Asked of the header, not the value: a device column changes how the port
+    column beside it is read, and a blank cell in row 2 must not flip that
+    meaning for the whole file.
+    """
+    if any(a in row for a in aliases):
+        return True
+    same = dict.fromkeys(aliases, "hit")
+    return any(key != xlsxreader.ROW_KEY and fuzzy.match(key, same) for key in row)
 
 
 P2P_SHEET_NAMES = ("P2P", "DEMANDS", "PORT_TO_PORT", "CONNECTIONS", "LINKS")
@@ -202,14 +231,43 @@ def devices_from_rows(rows):
     return out
 
 
+def _endpoint(row, dev_aliases, port_aliases, split):
+    """One end of a connection, however the sheet chose to write it.
+
+    `split` is decided once per sheet, not per row: a file either has device
+    columns or it does not. Deciding per row would make a blank device cell
+    silently change what the port cell means.
+    """
+    if not split:
+        return _pick(row, port_aliases)
+    device = _pick(row, dev_aliases).strip()
+    port = _pick(row, port_aliases).strip()
+    if not device:
+        # a port with no box beside it names nothing; let the caller report the
+        # row as half-filled rather than inventing an endpoint from the number
+        return ""
+    # A serial already carrying its own port suffix wins — someone filled the
+    # device column the old way, and honouring it beats gluing on a second
+    # colon and failing to parse.
+    if not port or ":" in device:
+        return device
+    return f"{device}:{port}"
+
+
 def demands_from_rows(rows):
     """Turn spreadsheet dicts into demand records. Column naming varies wildly
     between the sheets people actually send, so several spellings are accepted
     (see *_ALIASES). Each row keeps its real Excel line number so every message
     can point back at the exact line in the user's file."""
+    # Which form is this sheet written in? Ask the header once, so the answer
+    # is the same for every row.
+    probe = rows[0] if rows else {}
+    split = _has_column(probe, SRC_DEV_ALIASES) or _has_column(probe, DST_DEV_ALIASES)
+
     demands = []
     for i, row in enumerate(rows, start=2):
-        src, dst = _pick(row, SRC_ALIASES), _pick(row, DST_ALIASES)
+        src = _endpoint(row, SRC_DEV_ALIASES, SRC_ALIASES, split)
+        dst = _endpoint(row, DST_DEV_ALIASES, DST_ALIASES, split)
         if not src and not dst:
             continue
         demands.append({
@@ -231,9 +289,11 @@ def demands_from_rows(rows):
         })
     if not demands:
         raise BulkError(
-            "No demand rows found. Expected a source column (one of: "
-            f"{', '.join(SRC_ALIASES[:4])}...) and a destination column "
-            f"(one of: {', '.join(DST_ALIASES[:4])}...).")
+            "No demand rows found. Expected either a device column per end "
+            f"({SRC_DEV_ALIASES[0]} / {DST_DEV_ALIASES[0]}) with an optional "
+            f"{SRC_ALIASES[0]} / {DST_ALIASES[0]} beside it, or a single "
+            f"column per end holding the whole endpoint ({SRC_ALIASES[0]} / "
+            f"{DST_ALIASES[0]}).")
     return demands
 
 
@@ -397,8 +457,57 @@ def validate(topology, demands, new_devices=()):
     """
     ports = topology["ports"]
     known_serials = serials.index(topology)
-    new_serials = {d["serial"] for d in new_devices}
+    specs_by_serial = {d["serial"]: d for d in new_devices}
+    new_serials = set(specs_by_serial)
     issues, seen_pairs = [], {}
+
+    def as_port(end):
+        """`<serial>:<port>` names one socket exactly. Return the port id it
+        stands for, so every check below applies to it the same way it applies
+        to a port written out in full. None when the end names no single
+        socket: a bare serial, or a box the Devices tab has not racked yet."""
+        hit = serials.parse(end)
+        if not hit or hit[1] is None:
+            return None
+        dev_id = known_serials.get(hit[0])
+        return f"{dev_id}:{hit[1]}" if dev_id else None
+
+    # How many free ports of each medium a box still has. Kept as a running
+    # pool rather than read fresh per row, so several rows asking the same box
+    # for "any port" are counted against one supply — which is what the planner
+    # does, and the only way this review can predict it.
+    pool = {}
+
+    def free_left(serial, media):
+        key = (serial, media)
+        if key not in pool:
+            spec = specs_by_serial.get(serial)
+            if spec:                       # declared but not racked: all free
+                pool[key] = spec["fiber_ports"] if media == "fiber" else spec["copper_ports"]
+            else:
+                dev_id = known_serials.get(serial)
+                dev = topology["devices"][dev_id]
+                pool[key] = sum(
+                    1 for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1)
+                    if ports[f"{dev_id}:{i}"]["type"] == media
+                    and ports[f"{dev_id}:{i}"]["status"] == "free")
+        return pool[key]
+
+    def take(serial, media):
+        pool[(serial, media)] = free_left(serial, media) - 1
+
+    def declared_media(end):
+        """The medium of a port on a box that is declared but not yet racked.
+        materialise() lays fibre ports out first and copper after, so a
+        declared port number already implies its medium — which is why such a
+        row does not need a CABLE column either."""
+        hit = serials.parse(end)
+        if not hit or hit[1] is None:
+            return None
+        spec = specs_by_serial.get(hit[0])
+        if not spec or not 1 <= hit[1] <= spec["fiber_ports"] + spec["copper_ports"]:
+            return None
+        return "fiber" if hit[1] <= spec["fiber_ports"] else "copper"
 
     # A physical port can host exactly one connection, so the same port must
     # not appear twice anywhere in the sheet. Only a whole-sheet check finds
@@ -421,15 +530,18 @@ def validate(topology, demands, new_devices=()):
             continue
 
         src, dst = d["src"], d["dst"]
+        # Resolve named sockets before comparing, so the same port written two
+        # ways — as a port id and as <serial>:<port> — is still caught as one.
+        src, dst = as_port(src) or src, as_port(dst) or dst
 
         if src == dst:
             fault(d, "same_port", "source and destination are the same port")
             continue
 
-        # An endpoint given as a serial names a BOX, not a port. Which port it
-        # lands on is decided during planning, so the checks below — port
-        # exists, port free, media matches — cannot apply to it. What can be
-        # checked is that the serial resolves and that the row says which media.
+        # Whatever is still a serial names a BOX rather than one socket: either
+        # a bare serial, or a port on kit the Devices tab has not racked yet.
+        # Which port a bare serial lands on is decided during planning, so the
+        # checks below — port free, port exists on the map — cannot apply.
         serial_ends = [e for e in (src, dst) if looks_like_serial(e)]
         if serial_ends:
             unresolved = [e for e in serial_ends
@@ -441,13 +553,85 @@ def validate(topology, demands, new_devices=()):
                                                           for e in unresolved)
                       + " — it is neither installed nor declared on the Devices tab")
                 continue
-            cable = (d.get("cable") or "").strip().lower()
-            if cable.replace("fibre", "fiber") not in ("fiber", "copper"):
-                fault(d, "no_cable_type",
-                      "this row names a device by serial, so it must also say which "
-                      "media to use — add a CABLE column with 'fiber' or 'copper'")
+
+            # A declared port number still has to exist on the box the Devices
+            # tab describes, the same way the planner insists it does.
+            over = []
+            for e in serial_ends:
+                sn, idx = serials.parse(e)
+                spec = specs_by_serial.get(sn)
+                if idx is not None and spec:
+                    total = spec["fiber_ports"] + spec["copper_ports"]
+                    if not 1 <= idx <= total:
+                        over.append(f"{sn} has no port {idx} — it declares {total}")
+            if over:
+                fault(d, "unknown_port", "; ".join(over))
                 continue
-            # anything further depends on placement, which has not happened yet
+
+            # Only a BARE serial leaves the medium open. `<serial>:<port>`
+            # names a socket, and a socket already has a medium — demanding a
+            # CABLE column for it would reject rows the planner accepts.
+            bare = [e for e in serial_ends if serials.parse(e)[1] is None]
+            cable = (d.get("cable") or "").strip().lower().replace("fibre", "fiber")
+            if bare and cable not in ("fiber", "copper"):
+                fault(d, "no_cable_type",
+                      "this row names a device by serial without a port, so it must "
+                      "also say which media to use — add a CABLE column with "
+                      "'fiber' or 'copper', or name the port as <serial>:<port>")
+                continue
+
+            # Both media knowable? Then a mismatch is knowable too, and saying
+            # so now beats letting the router discover it after placement.
+            media = [declared_media(e) or (ports[e]["type"] if e in ports else None)
+                     for e in (src, dst)]
+            if all(media) and media[0] != media[1]:
+                fault(d, "cable_mismatch",
+                      f"cable type mismatch: source is {media[0]}, destination is {media[1]}")
+                continue
+            if cable in ("fiber", "copper") and any(m and m != cable for m in media):
+                fault(d, "cable_mismatch",
+                      f"the row asks for {cable}, but a named port is "
+                      f"{next(m for m in media if m and m != cable)}")
+                continue
+
+            # Whatever on this row DID name one socket still deserves the port
+            # checks. A bare serial at the other end is no reason to stop
+            # noticing that this end is already patched, or that an earlier row
+            # asked for it too.
+            busy = [f"{p} (held by {ports[p]['circuit']})"
+                    for p in (src, dst) if p in ports and ports[p]["status"] != "free"]
+            if busy:
+                fault(d, "port_in_use", f"already patched: {'; '.join(busy)}")
+                continue
+            sockets = [e for e in (src, dst)
+                       if e in ports or (serials.parse(e) or (None, None))[1] is not None]
+            clash = sorted({claimed_by[p] for p in sockets if p in claimed_by})
+            if clash:
+                fault(d, "duplicate_port",
+                      "a port on this row is already taken by row "
+                      + ", ".join(str(r) for r in clash))
+                continue
+            for p in sockets:
+                claimed_by[p] = d["row"]
+
+            # A bare serial says "any suitable port on this box". Whether one
+            # is left is knowable now, and a sheet that asks a 4-port switch
+            # for five uplinks should hear about it here, not row by row.
+            wanted = cable or next((m for m in media if m), "")
+            for e in serial_ends:
+                sn, idx = serials.parse(e)
+                media_e = declared_media(e) or (ports[e]["type"] if e in ports else wanted)
+                if not media_e:
+                    continue
+                if idx is None:
+                    if free_left(sn, media_e) <= 0:
+                        fault(d, "device_full",
+                              f"device {sn} has no free {media_e} port left")
+                        break
+                take(sn, media_e)
+            else:
+                # anything further depends on placement, which has not happened yet
+                continue
             continue
 
         missing = [p for p in (src, dst) if p not in ports]
@@ -747,9 +931,15 @@ def _resolve_endpoints(topology, demands):
                 if port in taken:
                     # taken by an earlier row of THIS sheet, which is a
                     # different problem from one already patched on the map —
-                    # and the row number is what the user needs to go and fix
-                    d["malformed"] = (f"port {serial}:{wanted_port} is already claimed "
-                                      f"by row {taken[port]} of this sheet")
+                    # and the row number is what the user needs to go and fix.
+                    # When the claiming row is this one, the row is patching a
+                    # port to itself; say that, the way the review does, rather
+                    # than pointing the user back at the line they are reading.
+                    d["malformed"] = (
+                        "source and destination are the same port"
+                        if taken[port] == d["row"] else
+                        f"port {serial}:{wanted_port} is already claimed "
+                        f"by row {taken[port]} of this sheet")
                     break
                 if p["status"] != "free":
                     d["malformed"] = (f"port {serial}:{wanted_port} is already patched"

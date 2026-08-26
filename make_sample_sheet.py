@@ -142,8 +142,15 @@ BUNDLES = [
 ]
 
 
+def endpoint(topology, port_id):
+    """Split a port id into the two cells the sheet now uses: the serial of the
+    box, and the port number on it."""
+    dev_id, _, index = port_id.rpartition(":")
+    return topology["devices"][dev_id]["serial"], index
+
+
 def build_clean(topology):
-    rows = [["SRC_PORT", "DST_PORT", "GROUP", "LABEL"]]
+    rows = [["SRC_DEVICE", "SRC_PORT", "DST_DEVICE", "DST_PORT", "GROUP", "LABEL"]]
     for group, a_rack, b_rack, cable, count in BUNDLES:
         a = free_ports(topology, a_rack, cable, count)
         b = free_ports(topology, b_rack, cable, count)
@@ -152,31 +159,37 @@ def build_clean(topology):
                   f"on {a_rack}/{b_rack}")
             continue
         for src, dst in zip(a, b):
-            rows.append([src, dst, group, ""])
+            a_sn, a_p = endpoint(topology, src)
+            b_sn, b_p = endpoint(topology, dst)
+            rows.append([a_sn, a_p, b_sn, b_p, group, ""])
     return rows
 
 
 def build_broken(topology):
     """One row per fault the preflight review reports, so you can see what a
     bad sheet looks like before trusting the tool with a real one."""
-    a = free_ports(topology, "A1-S05", "fiber", 4)
-    b = free_ports(topology, "D5-N06", "fiber", 3)
-    copper = free_ports(topology, "A1-S05", "copper", 1)
-    taken = next((pid for pid, p in topology["ports"].items()
-                  if p["rack"] == "A1-S05" and p["status"] == "used"), "A1-S05:FIB-PP-01:1")
-    same_rack = free_ports(topology, "A1-S05", "fiber", 6)
+    E = lambda pid: endpoint(topology, pid)
+    a = [E(p) for p in free_ports(topology, "A1-S05", "fiber", 4)]
+    b = [E(p) for p in free_ports(topology, "D5-N06", "fiber", 3)]
+    copper = E(free_ports(topology, "A1-S05", "copper", 1)[0])
+    taken = E(next((pid for pid, p in topology["ports"].items()
+                    if p["rack"] == "A1-S05" and p["status"] == "used"),
+                   "A1-S05:FIB-PP-01:1"))
+    same_rack = [E(p) for p in free_ports(topology, "A1-S05", "fiber", 6)]
 
     return [
-        ["SRC_PORT", "DST_PORT", "GROUP"],
-        [a[0], b[0], "GOOD"],                    # fine
-        [a[1], b[1], "GOOD"],                    # fine
-        [a[0], b[2], "DUPLICATE"],               # reuses row 2's source port
-        ["A1-S99:FIB-PP-01:1", b[2], "TYPO"],    # port does not exist
-        [taken, b[2], "BUSY"],                   # already patched
-        [copper[0], b[2], "MIXED-MEDIA"],        # copper -> fiber
-        [a[2], a[2], "SELF"],                    # source == destination
-        [same_rack[4], same_rack[5], "INTRA"],   # both ends in one rack
-        [a[3], "", "INCOMPLETE"],                # missing destination
+        ["SRC_DEVICE", "SRC_PORT", "DST_DEVICE", "DST_PORT", "GROUP"],
+        [*a[0], *b[0], "GOOD"],                      # fine
+        [*a[1], *b[1], "GOOD"],                      # fine
+        [*a[0], *b[2], "DUPLICATE"],                 # reuses row 2's source port
+        ["9999999999", "1", *b[2], "TYPO"],          # no such serial
+        [*taken, *b[2], "BUSY"],                     # already patched
+        [*copper, *b[2], "MIXED-MEDIA"],             # copper -> fiber
+        [*a[2], *a[2], "SELF"],                      # source == destination
+        [*same_rack[4], *same_rack[5], "INTRA"],     # both ends in one rack
+        [*a[3], "", "", "INCOMPLETE"],               # missing destination
+        ["", "7", *b[2], "PORT-NO-DEVICE"],          # port number, no box beside it
+        [a[3][0], "9999", *b[2], "NO-SUCH-PORT"],    # box exists, port number does not
     ]
 
 
@@ -198,15 +211,16 @@ def build_new_devices(topology):
         ["7700100004", "server", "2", "2", "2", "blue", "App server (blue zone)"],
     ]
     # note the chaining: the servers hang off the NEW switch, which itself
-    # uplinks to an existing ToR
-    # An endpoint is either a port id, a bare serial (any suitable port), or
-    # <serial>:<port> to name the socket exactly. LABEL is optional.
+    # uplinks to an existing ToR.
+    # Each end is a serial in its own column, with the port number optional
+    # beside it — blank means "any suitable port on that box", which is the
+    # normal case when the kit is still in its crate.
     p2p = [
-        ["SRC_PORT", "DST_PORT", "GROUP", "CABLE", "LABEL"],
-        ["7700100001", tor, "UPLINK", "fiber", "Leaf uplink to ToR"],
-        ["7700100002:3", "7700100001:5", "ACCESS", "copper", "App server 1"],
-        ["7700100003", "7700100001", "ACCESS", "copper", ""],
-        ["7700100004", "7700100001", "ACCESS", "copper", "Blue-zone server"],
+        ["SRC_DEVICE", "SRC_PORT", "DST_DEVICE", "DST_PORT", "GROUP", "CABLE", "LABEL"],
+        ["7700100001", "",  tor,          "",  "UPLINK", "fiber",  "Leaf uplink to ToR"],
+        ["7700100002", "3", "7700100001", "5", "ACCESS", "copper", "App server 1"],
+        ["7700100003", "",  "7700100001", "",  "ACCESS", "copper", ""],
+        ["7700100004", "",  "7700100001", "",  "ACCESS", "copper", "Blue-zone server"],
     ]
     return {"P2P": p2p, "Devices": devices}
 

@@ -884,6 +884,93 @@ def main():
                                        "U_SIZE": "1", "FIBER": "1",
                                        xlsxreader.ROW_KEY: 2}])[0]["label"] == "server")
 
+    # ---------- device and port in separate columns ----------
+    # A sheet may name each end as one cell, or as a serial with the port
+    # number beside it. The device column is what decides which: with it
+    # present SRC_PORT holds a bare number, without it a whole endpoint.
+    split = bulkplan.demands_from_rows([
+        {"SRC_DEVICE": "4827193056", "SRC_PORT": "12",
+         "DST_DEVICE": "5488209915", "DST_PORT": "3", xlsxreader.ROW_KEY: 2},
+        {"SRC_DEVICE": "4827193056", "SRC_PORT": "",
+         "DST_DEVICE": "5488209915", "DST_PORT": "", xlsxreader.ROW_KEY: 3},
+    ])
+    check("a serial and a port number in separate columns become one endpoint",
+          split[0]["src"] == "4827193056:12" and split[0]["dst"] == "5488209915:3",
+          str([split[0]["src"], split[0]["dst"]]))
+    check("a blank port column means 'any suitable port on that box'",
+          split[1]["src"] == "4827193056" and split[1]["dst"] == "5488209915",
+          str([split[1]["src"], split[1]["dst"]]))
+
+    # the single-column form has to keep working — sheets written last week
+    # still arrive, and SRC_PORT means something different in each
+    single = bulkplan.demands_from_rows([
+        {"SRC_PORT": "A1-S05:FIB-PP-01:2", "DST_PORT": "D5-N06:FIB-PP-01:1",
+         xlsxreader.ROW_KEY: 2}])
+    check("without a device column SRC_PORT is still a whole endpoint",
+          single[0]["src"] == "A1-S05:FIB-PP-01:2", single[0]["src"])
+
+    # A blank device column is not a licence to read the port number as an
+    # endpoint: that would turn "12" into a port id and fail far from the typo.
+    orphan = bulkplan.demands_from_rows([
+        {"SRC_DEVICE": "", "SRC_PORT": "7",
+         "DST_DEVICE": "5488209915", "DST_PORT": "3", xlsxreader.ROW_KEY: 2}])
+    check("a port number with no device beside it is reported, not invented",
+          orphan[0]["src"] == "" and "no source port" in orphan[0]["malformed"],
+          str(orphan[0]))
+
+    # The whole point of naming the socket: it says which medium, so the sheet
+    # does not have to. Demanding CABLE for it would reject rows the planner
+    # accepts — the disagreement this project cannot afford.
+    # find two boxes that really do have a free fibre port right now, rather
+    # than naming one and hoping the map still agrees
+    def _free_fiber_port(exclude_rack=None):
+        for pid, p in T["ports"].items():
+            if (p["type"] == "fiber" and p["status"] == "free"
+                    and p["rack"] != exclude_rack):
+                dev = T["devices"][p["device"]]
+                if dev.get("serial"):
+                    return dev, p["index"]
+        raise RuntimeError("no free fibre port anywhere on the map")
+
+    dev_a, idx_a = _free_fiber_port()
+    dev_b, idx_b = _free_fiber_port(exclude_rack=dev_a["rack"])
+
+    named = bulkplan.validate(T, bulkplan.demands_from_rows([
+        {"SRC_DEVICE": dev_a["serial"], "SRC_PORT": str(idx_a),
+         "DST_DEVICE": dev_b["serial"], "DST_PORT": str(idx_b),
+         xlsxreader.ROW_KEY: 2}]))
+    check("naming the port needs no CABLE column",
+          not any(i["kind"] == "no_cable_type" for i in named["issues"]),
+          str(named["issues"]))
+    bare = bulkplan.validate(T, bulkplan.demands_from_rows([
+        {"SRC_DEVICE": dev_a["serial"], "SRC_PORT": "",
+         "DST_DEVICE": dev_b["serial"], "DST_PORT": "",
+         xlsxreader.ROW_KEY: 2}]))
+    check("a bare serial on both ends still needs CABLE",
+          any(i["kind"] == "no_cable_type" for i in bare["issues"]),
+          str(bare["issues"]))
+
+    # asking one box for more ports than it has left is knowable before any
+    # routing happens, and several rows must draw on the same supply
+    small = min((d for d in T["devices"].values()
+                 if d.get("serial") and 0 < d["fiber_ports"] <= 4),
+                key=lambda d: d["fiber_ports"])
+    # every row needs its OWN destination, or the sheet trips over the
+    # duplicate-port rule before it ever reaches the capacity question
+    spare = [(T["devices"][p["device"]]["serial"], p["index"])
+             for p in T["ports"].values()
+             if p["type"] == "fiber" and p["status"] == "free"
+             and p["rack"] != small["rack"]
+             and T["devices"][p["device"]].get("serial")][:small["fiber_ports"] + 2]
+    greedy = bulkplan.validate(T, bulkplan.demands_from_rows([
+        {"SRC_DEVICE": small["serial"], "SRC_PORT": "", "CABLE": "fiber",
+         "DST_DEVICE": sn, "DST_PORT": str(idx), xlsxreader.ROW_KEY: r}
+        for r, (sn, idx) in enumerate(spare, start=2)]))
+    check("rows asking one box for 'any port' draw on a shared supply",
+          any(i["kind"] == "device_full" for i in greedy["issues"]),
+          f"{small['id']} has {small['fiber_ports']} fibre ports, "
+          f"{len(spare)} rows asked — {greedy['by_kind']}")
+
     # ---------- every planned row carries its diagram ----------
     # The browser cannot look these ports up itself: a plan's route may pass
     # through a device the plan has not installed yet, which is simply absent
