@@ -1620,6 +1620,12 @@ $("btnBulkExecute").onclick = () => {
       btn.disabled = false; btn.textContent = "בצע את כל המסלולים";
       return alert("הביצוע נכשל: " + res.error);
     }
+    // Rack the new kit locally FIRST. The circuits committed below land on
+    // ports that did not exist when this page loaded the map, so merging
+    // them afterwards would be too late.
+    for (const inst of (res.devices ? res.devices.installed : []) || [])
+      applyDeviceLocally(inst);
+
     const byRow = new Map(res.committed.map(c => [c.row, c.circuit]));
     for (const r of bulkPlan.results){
       const c = byRow.get(r.row);
@@ -1642,15 +1648,41 @@ $("btnBulkExecute").onclick = () => {
   });
 };
 
+// A device the server just racked. Everything index() builds at boot has to be
+// extended by hand here — the alternative is refetching a 24MB map to learn
+// about one new switch.
+function applyDeviceLocally(inst){
+  const d = inst.device;
+  if (!d || T.devices[d.id]) return;          // idempotent: a re-click adds nothing
+  T.devices[d.id] = d;
+  (devicesByRack[d.rack] ||= []).push(d);
+  devicesByRack[d.rack].sort((a, b) => b.u_start - a.u_start);
+
+  const list = (portsByDevice[d.id] ||= []);
+  const rs = (rackStats[d.rack] ||= {free:0, used:0, total:0});
+  const ps = (podStats[T.racks[d.rack].pod] ||= {free:0, used:0, total:0});
+  for (const p of (inst.ports || [])){
+    T.ports[p.id] = p;
+    list.push(p);
+    rs.total++; ps.total++;
+    // ports arrive free; the cabling that follows moves them to used through
+    // applyCircuitLocally, so counting them as used here would double-count
+    p.status === "used" ? (rs.used++, ps.used++) : (rs.free++, ps.free++);
+  }
+  list.sort((a, b) => a.index - b.index);
+}
+
 function applyCircuitLocally(circuit){
   for (const pid of [circuit.a_port, circuit.b_port]){
     const p = T.ports[pid];
+    if (!p){ console.warn("unknown endpoint port, local map is behind:", pid); continue; }
     p.status = "used"; p.circuit = circuit.id; p.role = "endpoint";
     p.peer = pid === circuit.a_port ? circuit.b_port : circuit.a_port;
     bumpPortStats(pid);
   }
   for (const pid of circuit.transit_ports){
     const p = T.ports[pid];
+    if (!p){ console.warn("unknown transit port, local map is behind:", pid); continue; }
     p.status = "used"; p.circuit = circuit.id; p.role = "transit"; p.peer = null;
     bumpPortStats(pid);
   }

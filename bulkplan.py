@@ -947,10 +947,19 @@ def execute_devices(topology, siting, new_devices):
                             "reason": f"{site['rack']} U{site['u_end']}-U{site['u_start']} "
                                       "was taken since the plan was made"})
             continue
-        dev_id = materialise(topology, specs[site["serial"]], site)
+        spec = specs[site["serial"]]
+        dev_id = materialise(topology, spec, site)
+        # Ship the device record and its ports, not just where the box went.
+        # Whoever asked for this execution is holding a copy of the map that
+        # predates the device, and the cabling committed a moment later
+        # references ports that copy has never heard of.
+        n_ports = spec["fiber_ports"] + spec["copper_ports"]
         installed.append({"serial": site["serial"], "device_id": dev_id,
                           "rack": site["rack"], "u_start": site["u_start"],
-                          "u_end": site["u_end"]})
+                          "u_end": site["u_end"],
+                          "device": topology["devices"][dev_id],
+                          "ports": [topology["ports"][f"{dev_id}:{i}"]
+                                    for i in range(1, n_ports + 1)]})
     return {"installed": installed, "skipped": skipped}
 
 
