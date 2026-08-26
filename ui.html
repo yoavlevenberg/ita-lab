@@ -319,6 +319,15 @@
   table.bulk tr.clickable:hover td{background:#1b2027}
   table.bulk tr.open td{background:#1b2431}
   table.bulk tr.jumprow td{background:var(--panel2); padding:10px 12px}
+  /* the per-row detail: the same card a single lookup shows, opened in place */
+  .rowdetail{margin-top:12px; display:flex; flex-direction:column; gap:10px}
+  .rowdetail .opt-card{background:var(--panel)}
+  .rowdetail .opt-card.chosen{border-color:var(--free); box-shadow:0 0 0 1px var(--free) inset}
+  .rd-head{display:flex; align-items:center; gap:10px; font-size:11.5px; color:var(--muted)}
+  .rd-head span{flex:1}
+  .rd-h{font-size:11px; color:var(--muted); margin:14px 0 8px; font-weight:600}
+  .rd-load{font-size:11.5px; color:var(--muted); padding:6px 0}
+  .rd-chosen{font-size:11px; color:var(--free); font-weight:700; white-space:nowrap}
   table.bulk tr.done td{background:#0f1f15}
   .stat{font-size:10px; padding:1px 8px; border-radius:9px; border:1px solid; white-space:nowrap}
   .stat.ok{border-color:#2c6b36; color:#7ee495}
@@ -1271,6 +1280,7 @@ function planSheet(){
     bulkPlan = res;
     bulkPlan.fileName = bulkFile.name;
     shownJump = null;
+    rowDetail = {};        // detail belongs to a plan, not to a row number
     renderBulk();
   }).catch(e => bulkError(String(e)));
 }
@@ -1392,6 +1402,7 @@ $("btnBulkPlan").onclick = () => {
 function bulkClear(){
   bulkPlan = null;
   bulkFile = null;
+  rowDetail = {}; shownJump = null;
   $("bulkResult").innerHTML = "";
   $("bulkFooter").style.display = "none";
   // a file input will not fire `change` for the same file twice unless its
@@ -1579,13 +1590,135 @@ function bulkRow(r){
     <td style="color:var(--muted);font-size:10.5px">${escapeHtml(r.note || "")}</td>
     <td style="text-align:center">${open ? "▾" : "▸"} ${print}</td></tr>`;
 
-  // the same cable-jump picture a single route gets, opened in place
-  const detail = open && r.jump ? `<tr class="jumprow"><td colspan="10">
+  // The full picture a single port-to-port lookup gives, opened in place: the
+  // jump diagram first (it arrives with the plan, so it is instant), then the
+  // segments, strands and Work Order once the row's detail has been fetched.
+  const detail = !open ? "" : `<tr class="jumprow"><td colspan="10">
       <div style="font-size:11px;color:var(--muted);margin-bottom:4px">
         מסלול הכבל — ${r.hops === 0 ? "כבל גישור בתוך הארון" : r.hops + " קפיצות בין מסדים"}
         ${r.label ? " · " + escapeHtml(r.label) : ""}</div>
-      ${drawJumps(r.jump)}</td></tr>` : "";
+      ${r.jump ? drawJumps(r.jump) : ""}
+      <div id="rowDetail-${r.row}" class="rowdetail">${renderRowDetail(r.row)}</div>
+    </td></tr>`;
   return main + detail;
+}
+
+// Detail fetched per row: {options, chosen, locked, more}. Kept keyed by row
+// so reopening a row it has already been fetched for costs nothing.
+let rowDetail = {};
+
+function renderRowDetail(row){
+  const d = rowDetail[row];
+  if (!d) return `<div class="rd-load">טוען פירוט מסלול…</div>`;
+  if (d.error) return `<div class="rd-load" style="color:#ff9d97">${escapeHtml(d.error)}</div>`;
+
+  const head = d.locked
+    ? `<div class="rd-head">המסלול שהותקן בפועל — אין עוד מה לבחור</div>`
+    : `<div class="rd-head">
+         <span>${d.options.length} ${d.options.length === 1 ? "אפשרות" : "אפשרויות"} לשורה הזו · הנבחרת מסומנת</span>
+         ${d.more ? `<button class="ghost" onclick="moreRowOptions(${row})"
+              ${d.busy ? "disabled" : ""}>עוד אפשרות</button>` : ""}
+       </div>`;
+
+  return head + d.options.map((o, i) => renderRowOption(row, o, i, d)).join("");
+}
+
+function renderRowOption(row, route, i, d){
+  const jumpPorts = [route.src_port, ...route.transit_points.map(t => t.port), route.dst_port];
+  const isChosen = i === d.chosen;
+  const word = route.cable_type === "fiber" ? "סיב" : "זוג";
+
+  const pick = d.locked ? "" : isChosen
+    ? `<span class="rd-chosen">✓ זו האפשרות שתבוצע</span>`
+    : `<button class="primary" onclick="chooseRowOption(${row},${i})"
+         ${d.busy ? "disabled" : ""}>בחר את האפשרות הזו</button>`;
+
+  return `
+    <div class="opt-card${isChosen ? " chosen" : ""}">
+      <div class="opt-head">
+        <h3 style="font-size:13px;margin:0">אפשרות ${i + 1}</h3>
+        <span class="pill ${domainCls(route.domain)}">domain ${route.domain}</span>
+        <button class="ghost" onclick="focusRowOption(${row},${i})">הצג במפה</button>
+        ${pick}
+      </div>
+      <div class="checks">
+        <span class="check">✓ סוג כבל תואם קצה-לקצה (${route.cable_type === "fiber" ? "סיב↔סיב" : "נחושת↔נחושת"})</span>
+        <span class="check">✓ גיד פנוי אומת בכל אחד מ-${route.segments.length} המקטעים</span>
+        ${route.shared_segments && route.shared_segments.length
+          ? `<span class="check warn">⚠ חופף ב-${route.shared_segments.length} מקטע/ים עם אפשרות קודמת</span>`
+          : `<span class="check">✓ נפרד פיזית מכל אפשרות קודמת</span>`}
+        ${route.domain === "mixed"
+          ? `<span class="check warn">⚠ המסלול מחליף שדרה באמצע — לא נשאר ברגל רדונדנטיות אחת</span>` : ""}
+      </div>
+      <div class="kv" style="margin-top:10px">
+        <div><span class="k">קפיצות</span> ${route.segments.length}</div>
+        <div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>
+        <div><span class="k">מקור</span> <span class="mono">${escapeHtml(route.src_location)}</span></div>
+        <div><span class="k">יעד</span> <span class="mono">${escapeHtml(route.dst_location)}</span></div>
+      </div>
+      <h4 class="rd-h">מקטעים, גידים ותפוסה</h4>
+      ${route.segments.map(s => {
+        const pct = Math.round(s.used_before / s.capacity * 100);
+        return `<div class="seg">
+          <div class="st"><span class="mono">${s.edge_id}</span>
+            <span style="color:var(--muted)">${s.length_m} מ' · ${s.used_before}/${s.capacity} · ${s.remaining_before} פנויים</span></div>
+          <div class="strand"><span class="sid">${word} #${s.strand_index}</span>
+            <span class="mono sp">${s.strand_port_from}</span><span class="ar">⇄</span>
+            <span class="mono sp">${s.strand_port_to}</span></div>
+          <div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div></div>`;
+      }).join("") || `<div class="rd-load">כבל גישור יחיד בתוך הארון — אין מקטעי טראנק</div>`}
+      ${route.transit_points.length ? `<h4 class="rd-h">נקודות גישור (Cross-connect)</h4>
+        ${route.transit_points.map(t => `<div class="mono" style="font-size:11.5px;margin:3px 0">${escapeHtml(t.location)}</div>`).join("")}` : ""}
+      <h4 class="rd-h">Work Order</h4>
+      <pre class="wo">${escapeHtml(route.work_order || "")}</pre>
+    </div>`;
+}
+
+function fetchRowDetail(row, count){
+  rowDetail[row] = {...(rowDetail[row] || {}), busy: true};
+  return fetch("/api/bulk/row", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ plan_id: bulkPlan.plan_id, row, count: count || 2 })
+  }).then(r => r.json()).then(res => {
+    rowDetail[row] = res.status === "ok" ? res
+                   : { error: res.reason || res.error || "לא ניתן לחשב מסלול לשורה הזו" };
+    renderBulk();
+  }).catch(e => { rowDetail[row] = { error: String(e) }; renderBulk(); });
+}
+
+function moreRowOptions(row){
+  const d = rowDetail[row];
+  fetchRowDetail(row, (d && d.options ? d.options.length : 2) + 1);
+  renderBulk();
+}
+
+function focusRowOption(row, i){
+  const o = rowDetail[row] && rowDetail[row].options[i];
+  if (!o) return;
+  currentPath = o.hop_racks;
+  currentSegIds = o.segments.map(s => s.edge_id);
+  renderMap();
+}
+
+function chooseRowOption(row, i){
+  rowDetail[row].busy = true; renderBulk();
+  fetch("/api/bulk/choose", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ plan_id: bulkPlan.plan_id, row, option: i })
+  }).then(r => r.json()).then(res => {
+    if (res.status !== "ok"){
+      rowDetail[row].busy = false; renderBulk();
+      return alert("לא ניתן לבחור: " + (res.reason || res.error));
+    }
+    // the row's summary line changes with the route, and so does the plan's
+    const at = bulkPlan.results.findIndex(x => x.row === row);
+    if (at >= 0) bulkPlan.results[at] = res.result;
+    bulkPlan.summary = res.summary;
+    rowDetail[row].chosen = i;
+    rowDetail[row].busy = false;
+    focusRowOption(row, i);
+    renderBulk();
+  }).catch(e => { rowDetail[row].busy = false; renderBulk(); alert("שגיאה: " + e); });
 }
 
 // Which planned row has its diagram open. One at a time: the panel is already
@@ -1594,8 +1727,12 @@ let shownJump = null;
 
 function toggleJump(row){
   const r = bulkPlan && bulkPlan.results.find(x => x.row === row);
-  if (!r || !r.jump) return;
+  // a failed row has no route to open; everything else does, including a row
+  // whose whole path is one patch lead and so has no jump diagram
+  if (!r || r.status === "failed") return;
   shownJump = shownJump === row ? null : row;
+  // the detail is fetched on first open only — reopening a row is free
+  if (shownJump !== null && !rowDetail[row]) fetchRowDetail(row, 2);
   // highlight the same route on the farm map behind the panel, exactly as a
   // single SHOW ROUTE does
   if (shownJump === null){
@@ -1635,6 +1772,7 @@ $("btnBulkExecute").onclick = () => {
       const r = bulkPlan.results.find(x => x.row === f.row);
       if (r){ r.status = "failed"; r.reason = f.reason; }
     }
+    rowDetail = {};        // proposals became history; refetch on next open
     renderStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();

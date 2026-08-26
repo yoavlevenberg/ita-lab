@@ -37,6 +37,11 @@ Endpoints
   POST /api/bulk/plan          raw .xlsx body (+ preference query params)
                                -> preflight review AND a full plan, held
                                server-side under a plan_id
+  POST /api/bulk/row           {plan_id, row, count} -> full detail for one
+                               planned row plus alternatives for it, computed
+                               against the rest of the plan
+  POST /api/bulk/choose        {plan_id, row, option} -> makes one of those
+                               alternatives the row's plan
   POST /api/bulk/execute       {plan_id} -> commits every planned row, each
                                revalidated first; a stale row fails alone
   GET  /api/workorder?...      printable Work Order (HTML) for one route
@@ -277,6 +282,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/bulk/plan":
             return self._bulk_plan(url)
 
+        if url.path == "/api/bulk/row":
+            return self._bulk_row()
+
+        if url.path == "/api/bulk/choose":
+            return self._bulk_choose()
+
         if url.path == "/api/bulk/execute":
             return self._bulk_execute()
 
@@ -390,6 +401,164 @@ class Handler(BaseHTTPRequestHandler):
                         for r in result["results"]],
         })
 
+    def _plan_state(self, plan, exclude_row=None):
+        """The live map with everything this plan intends applied, EXCEPT one
+        row. That is the state the excluded row was routed in, and the state
+        any alternative for it has to fit into — an alternative that collided
+        with a sibling row would be no alternative at all.
+
+        Rows already committed are in the live map already; only the pending
+        ones are replayed.
+        """
+        with WRITE_LOCK:
+            work = copy.deepcopy(TOPOLOGY)
+
+        siting = plan.get("siting")
+        if siting:
+            specs = {d["serial"]: d for d in plan.get("new_devices", [])}
+            known = set(bulkplan.serials.index(work))
+            for site in siting["placements"]:
+                if site["status"] == "ok" and site["serial"] not in known:
+                    bulkplan.materialise(work, specs[site["serial"]], site)
+
+        for r in plan["results"]:
+            if r["row"] == exclude_row or r.get("status") != "ok" or not r.get("route"):
+                continue
+            try:
+                pathengine.commit_route(work, r["route"], f"PLAN-{r['row']:04d}")
+            except (KeyError, pathengine.RouteError):
+                pass    # a sibling that no longer fits is that row's problem
+        return work
+
+    def _bulk_row(self):
+        """Full detail for one planned row, and alternatives for it — the same
+        thing a single port-to-port lookup shows, for a row that came from a
+        sheet."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        plan = PLANS.get(req.get("plan_id"))
+        if not plan:
+            return self._send(404, {"error": "that plan is no longer available — re-upload the sheet"})
+        try:
+            row = int(req.get("row"))
+        except (TypeError, ValueError):
+            return self._send(400, {"error": "row is required"})
+        count = max(1, min(int(req.get("count") or 2), 8))
+
+        result = next((r for r in plan["results"] if r["row"] == row), None)
+        if not result:
+            return self._send(404, {"error": f"row {row} is not in this plan"})
+        if not result.get("route"):
+            return self._send(409, {"error": result.get("reason")
+                                    or f"row {row} was never planned"})
+
+        chosen = result["route"]
+        # A committed row is history: show what was actually installed rather
+        # than offering choices that can no longer be taken.
+        if result.get("status") == "committed":
+            chosen = dict(chosen)
+            chosen["work_order"] = workorder.render(
+                chosen, circuit_id=result.get("circuit_id"))
+            chosen["option_index"] = 1
+            chosen.setdefault("shared_segments", [])
+            return self._send(200, {"status": "ok", "row": row, "locked": True,
+                                    "chosen": 0, "options": [chosen]})
+
+        work = self._plan_state(plan, exclude_row=row)
+        try:
+            options = pathengine.resolve_route_options(
+                chosen["src_port"], chosen["dst_port"], count=count, topology=work)
+        except pathengine.RouteError as e:
+            return self._send(200, {"status": "failed", "reason": str(e)})
+
+        # Which of these is the one the plan is currently holding? Compare the
+        # physical path, not object identity — these were computed just now on
+        # a fresh copy and share nothing with the stored route.
+        fingerprint = [(s["edge_id"], s["strand_index"]) for s in chosen["segments"]]
+        current = next((i for i, o in enumerate(options)
+                        if [(s["edge_id"], s["strand_index"]) for s in o["segments"]]
+                        == fingerprint), None)
+        if current is None:
+            # the plan's own route is always an option, even if the router no
+            # longer ranks it in the top `count`
+            keep = dict(chosen)
+            keep["option_index"] = 0
+            keep.setdefault("shared_segments", [])
+            options.insert(0, keep)
+            current = 0
+
+        for route in options:
+            route["work_order"] = workorder.render(route)
+        return self._send(200, {"status": "ok", "row": row, "locked": False,
+                                "chosen": current, "options": options,
+                                "more": len(options) >= count})
+
+    def _bulk_choose(self):
+        """Swap in one of the alternatives as the row's plan. The plan is what
+        execute reads, so this is the only place a choice becomes real."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        plan = PLANS.get(req.get("plan_id"))
+        if not plan:
+            return self._send(404, {"error": "that plan is no longer available — re-upload the sheet"})
+        try:
+            row, pick = int(req.get("row")), int(req.get("option"))
+        except (TypeError, ValueError):
+            return self._send(400, {"error": "row and option are required"})
+
+        result = next((r for r in plan["results"] if r["row"] == row), None)
+        if not result or not result.get("route"):
+            return self._send(404, {"error": f"row {row} is not a planned row"})
+        if result.get("status") == "committed":
+            return self._send(409, {"error": f"row {row} is already installed as "
+                                             f"{result.get('circuit_id')}"})
+
+        work = self._plan_state(plan, exclude_row=row)
+        try:
+            options = pathengine.resolve_route_options(
+                result["route"]["src_port"], result["route"]["dst_port"],
+                count=max(pick + 1, 2), topology=work)
+        except pathengine.RouteError as e:
+            return self._send(200, {"status": "failed", "reason": str(e)})
+        if not 0 <= pick < len(options):
+            return self._send(409, {"error": "that option is no longer available — "
+                                             "reopen the row"})
+
+        route = options[pick]
+        # Prove it still fits before it becomes the plan: reserving it on the
+        # same state it was computed against is the difference between an
+        # option and a promise.
+        try:
+            pathengine.commit_route(work, route, f"PLAN-{row:04d}")
+        except (KeyError, pathengine.RouteError) as e:
+            return self._send(200, {"status": "failed", "reason": f"could not reserve: {e}"})
+
+        result["route"] = route
+        result["jump"] = bulkplan._jump_chain(work, route)
+        result["hops"] = len(route["segments"])
+        result["cable_type"] = route["cable_type"]
+        result["domain"] = route["domain"]
+        result["total_length_m"] = route["total_length_m"]
+        result["strands"] = [{"edge_id": s["edge_id"], "index": s["strand_index"]}
+                             for s in route["segments"]]
+        result["note"] = "נבחר ידנית"
+        plan["summary"] = bulkplan._summary(plan["results"])
+        if plan.get("siting"):
+            plan["summary"]["devices_placed"] = plan["siting"]["ok"]
+            plan["summary"]["devices_failed"] = plan["siting"]["failed"]
+
+        return self._send(200, {"status": "ok", "row": row,
+                                "summary": plan["summary"],
+                                "result": {k: v for k, v in result.items() if k != "route"}})
+
     def _bulk_execute(self):
         length = int(self.headers.get("Content-Length", 0))
         try:
@@ -416,10 +585,13 @@ class Handler(BaseHTTPRequestHandler):
             outcome["devices"] = racked
             # mark before releasing the lock, so a second click on the same plan
             # cannot slip in and commit the same rows twice
-            committed_rows = {c["row"] for c in outcome["committed"]}
+            committed_rows = {c["row"]: c["circuit"]["id"] for c in outcome["committed"]}
             for r in plan["results"]:
                 if r.get("row") in committed_rows:
                     r["status"] = "committed"
+                    # remember which circuit it became: reopening the row later
+                    # must show what was installed, not a proposal
+                    r["circuit_id"] = committed_rows[r["row"]]
             if outcome["committed"]:
                 pathengine.save_topology(TOPOLOGY)
         return self._send(200, {"status": "ok", **outcome})

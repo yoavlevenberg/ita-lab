@@ -453,8 +453,18 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
             if hops is None:
                 break
 
-        route = _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
-                                 reserved=reserved, reserved_ports=reserved_ports)
+        try:
+            route = _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
+                                     reserved=reserved, reserved_ports=reserved_ports)
+        except RouteError:
+            # The graph only carries trunks with spare capacity, but the options
+            # already built are holding some of it: an earlier option can take
+            # the last strand on a trunk this path needs. That means there is no
+            # FURTHER alternative — it does not mean the alternatives already
+            # found are invalid, so keep them instead of failing the request.
+            if options:
+                break
+            raise
         reserved_ports.update(t["port"] for t in route["transit_points"])
         this_edges = {s["edge_id"] for s in route["segments"]}
         prev_edges = set().union(*seen_edge_sets) if seen_edge_sets else set()

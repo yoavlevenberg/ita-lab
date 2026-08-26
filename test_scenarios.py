@@ -235,6 +235,32 @@ def main():
     check("the first two options are fully disjoint",
           not opts[1]["shared_segments"], str(opts[1]["shared_segments"][:3]))
 
+    # Asking for more alternatives than physically exist must return the ones
+    # that do. The options hold spare capacity while they are being offered, so
+    # a later one can find the last strand on a trunk already taken by an
+    # earlier one — that is "no further alternative", not "this request failed",
+    # and it must not throw away the options already found.
+    greedy = resolve_route_options(src, dst, count=40, topology=T)
+    check("asking for far more options than exist returns the ones that do",
+          1 <= len(greedy) <= 40, f"got {len(greedy)}")
+    check("every option returned under pressure is still a complete route",
+          all(o["segments"] and o["src_port"] == src and o["dst_port"] == dst
+              for o in greedy))
+    claims = Counter((s["edge_id"], s["strand_index"])
+                     for o in greedy for s in o["segments"])
+    check("options offered under pressure still quote distinct strands",
+          all(v == 1 for v in claims.values()),
+          f"{sum(1 for v in claims.values() if v > 1)} double-quoted")
+
+    # A port pair with genuinely no route must still raise, rather than coming
+    # back as an empty list the caller has to guess about.
+    try:
+        resolve_route_options(free_port(T, "A1-S05", "fiber"),
+                              free_port(T, "A1-S05", "copper"), topology=T)
+        check("a media mismatch is still refused outright", False, "no error raised")
+    except RouteError:
+        check("a media mismatch is still refused outright", True)
+
     # ---------- hop count outranks cable length ----------
     # Distances in this synthetic map are assumptions; hops are real work. The
     # chosen route must never be beaten on hop count by a longer alternative.
