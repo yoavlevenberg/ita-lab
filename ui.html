@@ -297,6 +297,52 @@
   .drop b{font-size:13.5px}
   .drop span{font-size:12px; color:var(--muted)}
   .drop small{font-size:10.5px; color:#586069; max-width:640px; line-height:1.75; margin-top:5px}
+  /* where you are in the upload -> review -> plan -> execute sequence. The
+     panel used to show all four stages at once with nothing saying which one
+     had actually happened. */
+  ol.steps{display:flex; gap:6px; list-style:none; margin:0 0 14px; padding:0; flex-wrap:wrap}
+  ol.steps li{display:flex; align-items:center; gap:7px; flex:1; min-width:150px;
+              font-size:11.5px; color:var(--muted); border:1px solid var(--border);
+              border-radius:8px; padding:7px 10px; background:var(--panel2)}
+  ol.steps li b{display:grid; place-items:center; width:19px; height:19px; flex:none;
+                border-radius:50%; border:1px solid var(--border); font-size:10.5px}
+  ol.steps li.on{color:var(--text); border-color:#2d5c8f; background:#16202c}
+  ol.steps li.on b{background:#1f6feb; border-color:#1f6feb; color:#fff}
+  ol.steps li.done{color:#7ee495; border-color:#2c6b36}
+  ol.steps li.done b{border-color:#2c6b36; color:#7ee495}
+
+  .getsample{display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+             margin-top:10px; font-size:11.5px; color:var(--muted)}
+  .getsample span{flex:1; min-width:210px}
+  .getsample a{text-decoration:none; padding:5px 10px; border-radius:7px;
+               border:1px solid var(--border); color:var(--text); font-size:11.5px;
+               background:var(--panel2)}
+  .getsample a:hover{border-color:#2d5c8f; background:#16202c}
+
+  /* what the sheet has to look like, shown as a sheet rather than described */
+  .fmt{margin-top:14px; border:1px solid var(--border); border-radius:9px;
+       padding:12px 14px; background:var(--panel2)}
+  .fmt-head{display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap}
+  .fmt-head h3{margin:0; font-size:12px; color:var(--muted); font-weight:600}
+  .fmt .tabs{display:flex; gap:4px}
+  .fmt .tabs button{font-size:11px; padding:4px 10px; border-radius:7px;
+                    border:1px solid var(--border); background:var(--panel);
+                    color:var(--muted); cursor:pointer}
+  .fmt .tabs button.on{border-color:#2d5c8f; background:#16202c; color:var(--text)}
+  .fmt-body{overflow-x:auto}
+  table.xls{border-collapse:collapse; font-size:11px; direction:ltr; min-width:100%;
+            font-family:Consolas,monospace; margin-bottom:10px}
+  table.xls th{background:#141b24; color:var(--muted); font-weight:600; text-align:left;
+               border:1px solid var(--border); padding:5px 9px; white-space:nowrap}
+  table.xls td{border:1px solid var(--border); padding:5px 9px; white-space:nowrap;
+               color:var(--text)}
+  table.xls td.hi{color:var(--mda); font-style:italic}
+  .fmt ul.notes{margin:0; padding-inline-start:18px; font-size:11.5px; color:var(--muted);
+                line-height:1.75}
+  .fmt ul.notes b{color:var(--text); font-weight:600}
+  .fmt-alias{margin-top:10px; padding-top:9px; border-top:1px solid var(--border);
+             font-size:11px; color:var(--muted); line-height:1.8}
+
   .prefs{margin-top:16px; border:1px solid var(--border); border-radius:9px; padding:12px 14px}
   .prefs h3{margin:0 0 9px; font-size:12px; color:var(--muted); font-weight:600}
   .prefs label{display:flex; gap:9px; align-items:flex-start; font-size:12px;
@@ -413,23 +459,92 @@
       <button class="ghost" id="btnBulkClose">סגור</button>
     </div>
     <div class="bb" id="bulkBody">
+      <ol class="steps" id="bulkSteps">
+        <li class="on" data-step="1"><b>1</b><span>בחר קובץ</span></li>
+        <li data-step="2"><b>2</b><span>ביקורת — מה תקין ומה צריך תיקון</span></li>
+        <li data-step="3"><b>3</b><span>תכנון — מסלול לכל שורה</span></li>
+        <li data-step="4"><b>4</b><span>ביצוע</span></li>
+      </ol>
+
       <div class="drop" id="bulkDrop">
         <b>גרור לכאן קובץ .xlsx</b>
         <span>או <u>לחץ לבחירת קובץ</u></span>
-        <small>עמודות נדרשות: פורט מקור ופורט יעד (SRC_PORT / DST_PORT, או Src Port,
-               From/To, A_PORT/B_PORT…). עמודת GROUP אופציונלית — אם אין, שורות בין
-               אותו זוג מסדים נחשבות אוטומטית לאותו צרור.</small>
         <input type="file" id="bulkFile" accept=".xlsx" hidden>
+      </div>
+
+      <div class="getsample">
+        <span>אין לך קובץ? הורד דוגמה — נבנית עכשיו מול המפה, אז הפורטים שבה פנויים באמת:</span>
+        <a class="ghost" href="/api/sample?kind=clean" download>גיליון תקין</a>
+        <a class="ghost" href="/api/sample?kind=devices" download>עם רכיבים חדשים</a>
+        <a class="ghost" href="/api/sample?kind=errors" download>עם שגיאות בכוונה</a>
+      </div>
+
+      <div class="fmt" id="fmtHelp">
+        <div class="fmt-head">
+          <h3>מבנה הגיליון</h3>
+          <span style="flex:1"></span>
+          <div class="tabs">
+            <button class="on" data-fmt="split">רכיב + פורט בעמודות נפרדות</button>
+            <button data-fmt="single">כתובת מלאה בעמודה אחת</button>
+          </div>
+        </div>
+
+        <div class="fmt-body" data-fmt="split">
+          <table class="xls">
+            <thead><tr><th>SRC_DEVICE</th><th>SRC_PORT</th><th>DST_DEVICE</th><th>DST_PORT</th><th>GROUP</th><th>CABLE</th><th>LABEL</th></tr></thead>
+            <tbody>
+              <tr><td>5488209915</td><td>2</td><td>6238981942</td><td>1</td><td>SVC-CORE</td><td></td><td>קו ראשי</td></tr>
+              <tr><td>5488209915</td><td class="hi">ריק</td><td>6238981942</td><td class="hi">ריק</td><td>SVC-CORE</td><td class="hi">fiber</td><td></td></tr>
+              <tr><td>A1-S05:FIB-PP-01</td><td>3</td><td>6238981942</td><td>2</td><td>SVC-CORE</td><td></td><td></td></tr>
+            </tbody>
+          </table>
+          <ul class="notes">
+            <li><b>SRC_DEVICE / DST_DEVICE</b> — הרכיב. סיריאל (מספר), או מזהה מלא כולל הארון
+                כמו <span class="mono">A1-S05:FIB-PP-01</span>. שם רכיב לבדו לא מספיק —
+                יש 640 ארונות.</li>
+            <li><b>SRC_PORT / DST_PORT</b> — <b>רשות</b>. מספר הפורט, או <b>השאר ריק</b>
+                כדי שהכלי יבחר פורט מתאים בעצמו.</li>
+            <li><b>CABLE</b> — נדרש <u>רק</u> כששני הצדדים בלי מספר פורט. שקע מפורש כבר
+                אומר אם הוא סיב או נחושת.</li>
+            <li><b>GROUP</b> ו-<b>LABEL</b> — רשות. שורות באותו GROUP מתוכננות יחד ומנוסות
+                להישאר צמודות פיזית.</li>
+          </ul>
+        </div>
+
+        <div class="fmt-body" data-fmt="single" hidden>
+          <table class="xls">
+            <thead><tr><th>SRC_PORT</th><th>DST_PORT</th><th>GROUP</th><th>LABEL</th></tr></thead>
+            <tbody>
+              <tr><td>A1-S05:FIB-PP-01:2</td><td>D5-N06:FIB-PP-01:1</td><td>SVC-CORE</td><td></td></tr>
+              <tr><td>5488209915:3</td><td>6238981942:2</td><td>SVC-CORE</td><td></td></tr>
+            </tbody>
+          </table>
+          <ul class="notes">
+            <li>כתובת שלמה בתא אחד: <span class="mono">ארון:רכיב:פורט</span> או
+                <span class="mono">סיריאל:פורט</span>.</li>
+            <li>הצורה הזו עדיין נתמכת במלואה — גיליון ישן ימשיך לעבוד.</li>
+            <li><b>מה שקובע איזו צורה זו</b>: אם יש עמודת רכיב, עמודת הפורט היא מספר.
+                אם אין — היא כתובת שלמה.</li>
+          </ul>
+        </div>
+
+        <div class="fmt-alias">
+          שמות עמודות גמישים ועמידים לשגיאות כתיב:
+          <span class="mono">SOURCE_DEVICE</span>, <span class="mono">FROM_SN</span>,
+          <span class="mono">מקור</span>, <span class="mono">A_PORT</span>,
+          <span class="mono">DEST_PORT</span>, <span class="mono">תיאור</span>…
+          כל תיקון שנעשה מדווח לך ולא נעשה בשקט.
+        </div>
       </div>
 
       <div class="prefs">
         <h3>רכיבים חדשים</h3>
         <label><input type="checkbox" id="prefDevices">
           <span><b>הקובץ כולל רכיבים חדשים להתקנה</b> — תיקרא לשונית
-          <span class="mono">Devices</span> (סיריאל, סוג, כמה U, כמה פורטים), והכלי
-          ימליץ באיזה מסד ובאיזה U להרכיב כל רכיב. בלשונית
-          <span class="mono">P2P</span> פשוט תכתוב את הסיריאל בעמודת הפורט,
-          כאילו הרכיב כבר מותקן.</span></label>
+          <span class="mono">Devices</span> (סיריאל, TYPE, U_SIZE, FIBER, COPPER,
+          ZONE, LABEL), והכלי ימליץ באיזה מסד ובאיזה U להרכיב כל רכיב. בלשונית
+          <span class="mono">P2P</span> כותבים את הסיריאל שלו כרגיל, כאילו הוא כבר
+          מותקן.</span></label>
       </div>
 
       <div class="prefs">
@@ -1213,6 +1328,26 @@ $("btnBulk").onclick = bulkOpen;
 $("btnBulkClose").onclick = bulkClose;
 $("bulkOverlay").onclick = e => { if (e.target === $("bulkOverlay")) bulkClose(); };
 
+// The two accepted sheet shapes, shown as a sheet. Documenting only one of
+// them is how a correct file gets written in the wrong form.
+document.querySelectorAll(".fmt .tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".fmt .tabs button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".fmt-body").forEach(x => x.hidden = x.dataset.fmt !== b.dataset.fmt);
+});
+
+// Which stage the panel is actually at. Everything used to be on screen at
+// once, so "did it plan, or only check?" was answered by reading the buttons.
+function setStep(n){
+  document.querySelectorAll("#bulkSteps li").forEach(li => {
+    const s = Number(li.dataset.step);
+    li.classList.toggle("on", s === n);
+    li.classList.toggle("done", s < n);
+  });
+  // the format guide has done its job once a file is in
+  $("fmtHelp").hidden = n > 1;
+  document.querySelector(".getsample").hidden = n > 1;
+}
+
 $("bulkDrop").onclick = () => $("bulkFile").click();
 $("bulkFile").onchange = e => { if (e.target.files[0]) uploadSheet(e.target.files[0]); };
 
@@ -1252,6 +1387,7 @@ function uploadSheet(file){
 
   bulkFile = file;
   bulkPlan = null;
+  setStep(2);
   $("bulkResult").innerHTML = `<div class="empty">בודק את ${escapeHtml(file.name)}…</div>`;
   $("bulkFooter").style.display = "none";
 
@@ -1281,6 +1417,7 @@ function planSheet(){
     bulkPlan.fileName = bulkFile.name;
     shownJump = null;
     rowDetail = {};        // detail belongs to a plan, not to a row number
+    setStep(3);
     renderBulk();
   }).catch(e => bulkError(String(e)));
 }
@@ -1403,6 +1540,7 @@ function bulkClear(){
   bulkPlan = null;
   bulkFile = null;
   rowDetail = {}; shownJump = null;
+  setStep(1);
   $("bulkResult").innerHTML = "";
   $("bulkFooter").style.display = "none";
   // a file input will not fire `change` for the same file twice unless its
@@ -1773,6 +1911,7 @@ $("btnBulkExecute").onclick = () => {
       if (r){ r.status = "failed"; r.reason = f.reason; }
     }
     rowDetail = {};        // proposals became history; refetch on next open
+    setStep(4);
     renderStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();

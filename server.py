@@ -45,6 +45,8 @@ Endpoints
   POST /api/bulk/execute       {plan_id} -> commits every planned row, each
                                revalidated first; a stale row fails alone
   GET  /api/workorder?...      printable Work Order (HTML) for one route
+  GET  /api/sample?kind=...    a demand sheet (.xlsx) built against the live
+                               map, so its ports are free right now
 """
 
 import copy
@@ -59,6 +61,7 @@ from urllib.parse import urlparse, parse_qs
 
 import assistant
 import bulkplan
+import make_sample_sheet
 import pathengine
 import placement
 import wo_html
@@ -190,6 +193,9 @@ class Handler(BaseHTTPRequestHandler):
                 "colours": zones.COLOURS,
                 "audit": zones.audit(TOPOLOGY),
             })
+
+        if url.path == "/api/sample":
+            return self._sample(url)
 
         if url.path == "/api/workorder":
             # Printable sheet for a route the browser is already showing, or
@@ -400,6 +406,41 @@ class Handler(BaseHTTPRequestHandler):
             "results": [{k: v for k, v in r.items() if k != "route"}
                         for r in result["results"]],
         })
+
+    def _sample(self, url):
+        """A demand sheet filled with ports that are free RIGHT NOW.
+
+        A checked-in example stops being valid the moment a plan is executed,
+        which is exactly when someone reaches for it — so the file is built on
+        request, against the live map, and never stored.
+        """
+        kind = (parse_qs(url.query).get("kind", ["clean"])[0] or "clean").lower()
+        builders = {
+            "clean":   (lambda: {"P2P": make_sample_sheet.build_clean(TOPOLOGY)},
+                        "sample_demand.xlsx"),
+            "devices": (lambda: make_sample_sheet.build_new_devices(TOPOLOGY),
+                        "sample_demand_new_devices.xlsx"),
+            "errors":  (lambda: {"P2P": make_sample_sheet.build_broken(TOPOLOGY)},
+                        "sample_demand_with_errors.xlsx"),
+        }
+        if kind not in builders:
+            return self._send(404, {"error": f"no sample called '{kind}'"})
+
+        build, filename = builders[kind]
+        buf = io.BytesIO()
+        with WRITE_LOCK:            # reads the map while a commit may be writing it
+            tabs = build()
+        make_sample_sheet.write_xlsx(buf, tabs)
+
+        body = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-"
+                                         "officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _plan_state(self, plan, exclude_row=None):
         """The live map with everything this plan intends applied, EXCEPT one

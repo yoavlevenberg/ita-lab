@@ -111,7 +111,10 @@ def write_xlsx(path, tabs):
         f'<Override PartName="/xl/sharedStrings.xml" ContentType="{SPREADSHEET}.sharedStrings+xml"/>'
         '</Types>')
 
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    # `path` may be an open file object — the server builds a sample straight
+    # into memory rather than writing one to disk to serve it back
+    if not hasattr(path, "write"):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", content_types)
         z.writestr("_rels/.rels", root_rels)
