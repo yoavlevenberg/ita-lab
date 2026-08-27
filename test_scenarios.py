@@ -935,6 +935,37 @@ def main():
     check("without a device column SRC_PORT is still a whole endpoint",
           single[0]["src"] == "A1-S05:FIB-PP-01:2", single[0]["src"])
 
+    # The UI shows device ids, and every one of them contains colons
+    # (A1-S05:FIB-PP-01). Copying one into the device column and typing the
+    # port beside it is the obvious thing to do, and it has to work — testing
+    # "does the device cell contain a colon" to mean "it already names a port"
+    # silently dropped the port column and blamed the device for not existing.
+    panel = next(d for d in T["devices"].values()
+                 if len(_idx_by_status(d["id"], d, True)) >= 2)
+    p1, p2 = _idx_by_status(panel["id"], panel, True)[:2]
+
+    by_id = bulkplan.demands_from_rows([
+        {"SRC_DEVICE": panel["id"], "SRC_PORT": str(p1),
+         "DST_DEVICE": panel["serial"], "DST_PORT": str(p2), xlsxreader.ROW_KEY: 2}])
+    check("a device id in the device column keeps the port beside it",
+          by_id[0]["src"] == f"{panel['id']}:{p1}", by_id[0]["src"])
+
+    # the two spellings must land on the identical port, or a sheet written one
+    # way plans differently from the same sheet written the other
+    by_serial = bulkplan._resolve_endpoints(T, bulkplan.demands_from_rows([
+        {"SRC_DEVICE": panel["serial"], "SRC_PORT": str(p1),
+         "DST_DEVICE": panel["serial"], "DST_PORT": str(p2), xlsxreader.ROW_KEY: 2}]))[0]
+    check("a device id and a serial address the same port the same way",
+          by_serial["src"] == f"{panel['id']}:{p1}",
+          f"{by_serial['src']} vs {panel['id']}:{p1} — {by_serial.get('malformed')}")
+
+    # a serial that already carries its port must not have a second one glued on
+    dup = bulkplan.demands_from_rows([
+        {"SRC_DEVICE": f"{panel['serial']}:{p1}", "SRC_PORT": str(p1),
+         "DST_DEVICE": panel["serial"], "DST_PORT": str(p2), xlsxreader.ROW_KEY: 2}])
+    check("a serial already carrying its port is left alone",
+          dup[0]["src"] == f"{panel['serial']}:{p1}", dup[0]["src"])
+
     # A blank device column is not a licence to read the port number as an
     # endpoint: that would turn "12" into a port id and fail far from the typo.
     orphan = bulkplan.demands_from_rows([

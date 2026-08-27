@@ -246,10 +246,19 @@ def _endpoint(row, dev_aliases, port_aliases, split):
         # a port with no box beside it names nothing; let the caller report the
         # row as half-filled rather than inventing an endpoint from the number
         return ""
-    # A serial already carrying its own port suffix wins — someone filled the
-    # device column the old way, and honouring it beats gluing on a second
-    # colon and failing to parse.
-    if not port or ":" in device:
+    if not port:
+        return device
+    # An end already carrying its own port wins: someone filled the device
+    # column the old way, and honouring it beats gluing on a second port.
+    #
+    # Testing that with "does it contain a colon" was wrong, and quietly so:
+    # every device id on this map has one (A1-S05:FIB-PP-01), so copying an id
+    # out of the UI and typing the port beside it — the obvious thing to do —
+    # dropped the port column and reported the DEVICE as a port that does not
+    # exist. Only a serial can carry its port in one cell, so only a serial is
+    # asked.
+    parsed = serials.parse(device)
+    if parsed and parsed[1] is not None:
         return device
     return f"{device}:{port}"
 
@@ -636,8 +645,19 @@ def validate(topology, demands, new_devices=()):
 
         missing = [p for p in (src, dst) if p not in ports]
         if missing:
-            fault(d, "unknown_port",
-                  f"port does not exist on the map: {', '.join(missing)}")
+            # "port does not exist" is true but unhelpful when the real mistake
+            # is in the device half of the cell — a name instead of a full id,
+            # or a serial with a digit wrong. Say which half is unrecognised.
+            detail = []
+            for p in missing:
+                dev_part = p.rpartition(":")[0]
+                if dev_part and dev_part not in topology["devices"]:
+                    detail.append(f"{p} — no device '{dev_part}' on the map "
+                                  f"(name a device by its serial, or by its full "
+                                  f"id including the cabinet, e.g. A1-S05:FIB-PP-01)")
+                else:
+                    detail.append(f"{p} — that device has no such port")
+            fault(d, "unknown_port", "; ".join(detail))
             continue
 
         a, b = ports[src], ports[dst]
