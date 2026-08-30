@@ -314,6 +314,46 @@ def demands_from_rows(rows):
 # so the planner picks a free one of the right media — the same way it already
 # picks cross-connect ports along a route.
 
+CABLE_SYNONYMS = {"fibre": "fiber", "optic": "fiber", "optical": "fiber",
+                  "rj45": "copper", "utp": "copper", "eth": "copper"}
+
+
+def _norm_cable(text):
+    c = (text or "").strip().lower()
+    return CABLE_SYNONYMS.get(c, c)
+
+
+def unknown_port_message(topology, port_id):
+    """Why a port id names nothing. Shared by the review and the planner so the
+    two cannot drift into describing the same fault differently.
+
+    "port does not exist" is true but unhelpful when the mistake is in the
+    device half of the cell — a name without its cabinet, or a serial with a
+    digit wrong. Say which half is unrecognised.
+    """
+    dev_part = port_id.rpartition(":")[0]
+    if dev_part and dev_part not in topology["devices"]:
+        return (f"{port_id} — no device '{dev_part}' on the map (name a device by "
+                f"its serial, or by its full id including the cabinet, e.g. "
+                f"A1-S05:FIB-PP-01)")
+    return f"{port_id} — that device has no such port"
+
+
+def port_id_for(topology, serial_index, value):
+    """The single socket an endpoint names, or None when it names none — a bare
+    serial, an unknown serial, or a port that is not on the map."""
+    if not value:
+        return None
+    hit = serials.parse(value)
+    if hit:
+        if hit[1] is None:
+            return None
+        dev_id = serial_index.get(hit[0])
+        port = f"{dev_id}:{hit[1]}" if dev_id else None
+        return port if port in topology["ports"] else None
+    return value if value in topology["ports"] else None
+
+
 def looks_like_serial(text):
     """Serials are plain numbers, so this is what tells '4827193056:12' apart
     from a port id like 'A1-S05:FIB-PP-01:2'."""
@@ -581,8 +621,13 @@ def validate(topology, demands, new_devices=()):
             # names a socket, and a socket already has a medium — demanding a
             # CABLE column for it would reject rows the planner accepts.
             bare = [e for e in serial_ends if serials.parse(e)[1] is None]
-            cable = (d.get("cable") or "").strip().lower().replace("fibre", "fiber")
-            if bare and cable not in ("fiber", "copper"):
+            cable = _norm_cable(d.get("cable"))
+            media = [declared_media(e) or (ports[e]["type"] if e in ports else None)
+                     for e in (src, dst)]
+            # A named socket at EITHER end settles the medium for the row, so a
+            # CABLE column is only needed when neither end names one. Asking for
+            # it anyway rejected rows the planner goes on to route happily.
+            if bare and cable not in ("fiber", "copper") and not any(media):
                 fault(d, "no_cable_type",
                       "this row names a device by serial without a port, so it must "
                       "also say which media to use — add a CABLE column with "
@@ -591,8 +636,6 @@ def validate(topology, demands, new_devices=()):
 
             # Both media knowable? Then a mismatch is knowable too, and saying
             # so now beats letting the router discover it after placement.
-            media = [declared_media(e) or (ports[e]["type"] if e in ports else None)
-                     for e in (src, dst)]
             if all(media) and media[0] != media[1]:
                 fault(d, "cable_mismatch",
                       f"cable type mismatch: source is {media[0]}, destination is {media[1]}")
@@ -620,27 +663,35 @@ def validate(topology, demands, new_devices=()):
                       "a port on this row is already taken by row "
                       + ", ".join(str(r) for r in clash))
                 continue
-            for p in sockets:
-                claimed_by[p] = d["row"]
-
             # A bare serial says "any suitable port on this box". Whether one
             # is left is knowable now, and a sheet that asks a 4-port switch
             # for five uplinks should hear about it here, not row by row.
+            #
+            # Checked BEFORE anything is claimed, and rolled back if it fails:
+            # a row that ends up faulted is never planned, so it consumes
+            # nothing, and a later row asking for the same port is not clashing
+            # with it. Claiming first made this flag rows that were fine.
             wanted = cable or next((m for m in media if m), "")
+            spent, full = [], ""
             for e in serial_ends:
                 sn, idx = serials.parse(e)
                 media_e = declared_media(e) or (ports[e]["type"] if e in ports else wanted)
                 if not media_e:
                     continue
-                if idx is None:
-                    if free_left(sn, media_e) <= 0:
-                        fault(d, "device_full",
-                              f"device {sn} has no free {media_e} port left")
-                        break
+                if idx is None and free_left(sn, media_e) <= 0:
+                    full = f"device {sn} has no free {media_e} port left"
+                    break
                 take(sn, media_e)
-            else:
-                # anything further depends on placement, which has not happened yet
+                spent.append((sn, media_e))
+            if full:
+                for sn, m in spent:              # give the row's ports back
+                    pool[(sn, m)] = free_left(sn, m) + 1
+                fault(d, "device_full", full)
                 continue
+
+            for p in sockets:
+                claimed_by[p] = d["row"]
+            # anything further depends on placement, which has not happened yet
             continue
 
         missing = [p for p in (src, dst) if p not in ports]
@@ -648,16 +699,8 @@ def validate(topology, demands, new_devices=()):
             # "port does not exist" is true but unhelpful when the real mistake
             # is in the device half of the cell — a name instead of a full id,
             # or a serial with a digit wrong. Say which half is unrecognised.
-            detail = []
-            for p in missing:
-                dev_part = p.rpartition(":")[0]
-                if dev_part and dev_part not in topology["devices"]:
-                    detail.append(f"{p} — no device '{dev_part}' on the map "
-                                  f"(name a device by its serial, or by its full "
-                                  f"id including the cabinet, e.g. A1-S05:FIB-PP-01)")
-                else:
-                    detail.append(f"{p} — that device has no such port")
-            fault(d, "unknown_port", "; ".join(detail))
+            fault(d, "unknown_port",
+                  "; ".join(unknown_port_message(topology, p) for p in missing))
             continue
 
         a, b = ports[src], ports[dst]
@@ -911,86 +954,138 @@ def _choose(options, prefs, seat):
 # --------------------------------------------------------------------------
 
 def _resolve_endpoints(topology, demands):
-    """Replace any serial in a P2P row with a concrete free port on that
-    device, so the router downstream only ever deals in port ids.
+    """Turn every endpoint into a concrete port on the map, and refuse the row
+    here — where the fault is about the SHEET — rather than letting the router
+    discover it three layers down.
 
     Ports chosen here are remembered as the rows are walked, because two rows
-    naming the same device must land on two different ports of it — the whole
+    naming the same device must land on two different ports of it: the whole
     point of a switch is that it has many.
+
+    Every check applies whichever way the port was written. It used to skip any
+    endpoint that was not a serial, so `5488209915:4` was checked for existing,
+    being free and matching the media, while `A1-S05:FIB-PP-01:4` — the same
+    socket — was checked for none of them and failed later with a rougher
+    message. Two spellings of one port have to behave identically.
     """
     index = serials.index(topology)
+    ports = topology["ports"]
     taken, out = {}, []          # port -> the row that claimed it
 
     for d in demands:
         d = dict(d)
-        cable = d.get("cable") or ""
-        cable = {"fibre": "fiber", "optic": "fiber", "optical": "fiber",
-                 "rj45": "copper", "utp": "copper", "eth": "copper"}.get(cable, cable)
+        declared = _norm_cable(d.get("cable"))
+        # A row claims its ports only if the WHOLE row resolves. A row that
+        # ends up malformed is never planned, so it consumes nothing, and a
+        # later row asking for the same port is not clashing with anything —
+        # holding the claim made this refuse rows the review passed.
+        claims = {}
+
+        # What medium is this row? A named socket answers it, whichever END it
+        # is on — so settle it before resolving anything. Reading it as we went
+        # made the same row behave differently depending on which side happened
+        # to be the open one.
+        media = declared
+        if media not in ("fiber", "copper"):
+            for side in ("src", "dst"):
+                pid = port_id_for(topology, index, d[side])
+                if pid:
+                    media = ports[pid]["type"]
+                    break
 
         for side in ("src", "dst"):
             value = d[side]
-            if not value or not looks_like_serial(value):
+            if not value:
                 continue
-            serial, wanted_port = serials.parse(value)
-            dev_id = index.get(serial)
-            if not dev_id:
-                d["malformed"] = f"serial {serial} is not a device on the map"
+
+            serial = wanted = None
+            if looks_like_serial(value):
+                serial, wanted = serials.parse(value)
+                dev_id = index.get(serial)
+                if not dev_id:
+                    d["malformed"] = f"serial {serial} is not a device on the map"
+                    break
+
+                if wanted is None:
+                    # Naming only the box leaves the port open, and a box has
+                    # both kinds of socket — so something has to say which.
+                    if media not in ("fiber", "copper"):
+                        d["malformed"] = (
+                            f"row refers to device {serial} by serial but does not "
+                            "say which cable type to use (add a CABLE column, or "
+                            f"write {serial}:<port> to name the port itself)")
+                        break
+                    port = free_port_on_device(topology, dev_id, media,
+                                               {**taken, **claims})
+                    if not port:
+                        dev = topology["devices"][dev_id]
+                        d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
+                                          f"{media} port left")
+                        break
+                    claims[port] = d["row"]
+                    d[side] = port
+                    d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
+                                                          "device": dev_id}
+                    continue
+
+                port = f"{dev_id}:{wanted}"
+                shown = f"port {serial}:{wanted}"
+            else:
+                port = value
+                shown = f"port {value}"
+
+            # ---- the same checks, however the socket was spelled ----
+            p = ports.get(port)
+            if p is None:
+                if serial:
+                    dev = topology["devices"][index[serial]]
+                    d["malformed"] = (f"device {serial} ({dev['label']}) has no port "
+                                      f"{wanted} — it has "
+                                      f"{dev['fiber_ports'] + dev['copper_ports']}")
+                else:
+                    d["malformed"] = unknown_port_message(topology, port)
                 break
 
-            if wanted_port is not None:
-                # <serial>:<port> names the exact socket, so honour it rather
-                # than choosing — and say plainly when it cannot be honoured
-                port = f"{dev_id}:{wanted_port}"
-                p = topology["ports"].get(port)
-                if p is None:
-                    dev = topology["devices"][dev_id]
-                    d["malformed"] = (f"device {serial} ({dev['label']}) has no port "
-                                      f"{wanted_port} — it has "
-                                      f"{dev['fiber_ports'] + dev['copper_ports']}")
-                    break
-                if port in taken:
-                    # taken by an earlier row of THIS sheet, which is a
-                    # different problem from one already patched on the map —
-                    # and the row number is what the user needs to go and fix.
-                    # When the claiming row is this one, the row is patching a
-                    # port to itself; say that, the way the review does, rather
-                    # than pointing the user back at the line they are reading.
-                    d["malformed"] = (
-                        "source and destination are the same port"
-                        if taken[port] == d["row"] else
-                        f"port {serial}:{wanted_port} is already claimed "
-                        f"by row {taken[port]} of this sheet")
-                    break
-                if p["status"] != "free":
-                    d["malformed"] = (f"port {serial}:{wanted_port} is already patched"
-                                      + (f" by {p['circuit']}" if p.get("circuit") else ""))
-                    break
-                if cable in ("fiber", "copper") and p["type"] != cable:
-                    d["malformed"] = (f"port {serial}:{wanted_port} is {p['type']}, "
-                                      f"but the row asks for {cable}")
-                    break
-                cable = cable or p["type"]
-            else:
-                if cable not in ("fiber", "copper"):
-                    # naming only the device leaves the port open, and a device
-                    # has both kinds — so the row has to say which
-                    d["malformed"] = (f"row refers to device {serial} by serial but does "
-                                      "not say which cable type to use "
-                                      "(add a CABLE column, or write "
-                                      f"{serial}:<port> to name the port itself)")
-                    break
-                port = free_port_on_device(topology, dev_id, cable, taken)
-                if not port:
-                    dev = topology["devices"][dev_id]
-                    d["malformed"] = (f"device {serial} ({dev['label']}) has no free "
-                                      f"{cable} port left")
-                    break
-            taken[port] = d["row"]
+            if port in taken or port in claims:
+                # Claimed by an earlier row of THIS sheet, which is a different
+                # problem from one already patched on the map — and the row
+                # number is what the user needs to go and fix. When the
+                # claiming row is this one, the row is patching a port to
+                # itself; say that rather than pointing back at the line the
+                # user is already reading.
+                owner = claims.get(port, taken.get(port))
+                d["malformed"] = (
+                    "source and destination are the same port"
+                    if owner == d["row"] else
+                    f"{shown} is already claimed by row {owner} of this sheet")
+                break
+
+            if p["status"] != "free":
+                d["malformed"] = (f"{shown} is already patched"
+                                  + (f" by {p['circuit']}" if p.get("circuit") else ""))
+                break
+
+            if declared and p["type"] != declared:
+                d["malformed"] = (f"{shown} is {p['type']}, but the row asks "
+                                  f"for {declared}")
+                break
+            if media and p["type"] != media:
+                d["malformed"] = (f"cable type mismatch: this row has a {media} end "
+                                  f"and a {p['type']} end")
+                break
+
+            media = media or p["type"]
+            claims[port] = d["row"]
             d[side] = port
-            d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
-                                                 "device": dev_id}
+            if serial:
+                d.setdefault("resolved", {})[side] = {"serial": serial, "port": port,
+                                                      "device": index[serial]}
+
+        if not d.get("malformed"):
+            taken.update(claims)
         out.append(d)
     return out
+
 
 def _jump_chain(topology, route):
     """The route as a list of stops the browser can draw directly.

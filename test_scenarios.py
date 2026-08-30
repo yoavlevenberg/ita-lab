@@ -15,6 +15,7 @@ from collections import Counter
 
 import assistant
 import bulkplan
+import test_agreement
 import fuzzy
 import placement
 import xlsxreader
@@ -1007,6 +1008,24 @@ def main():
           any(i["kind"] == "no_cable_type" for i in bare["issues"]),
           str(bare["issues"]))
 
+    # One named socket settles the medium for the whole row, whichever end it
+    # is on — asking for CABLE anyway rejected rows the planner routes happily,
+    # and made the answer depend on which side was left open.
+    for a_open in (False, True):
+        row = {"SRC_DEVICE": dev_a["id"], "SRC_PORT": str(idx_a),
+               "DST_DEVICE": dev_b["serial"], "DST_PORT": "", xlsxreader.ROW_KEY: 2}
+        if a_open:                       # same row, sides swapped
+            row = {"SRC_DEVICE": dev_b["serial"], "SRC_PORT": "",
+                   "DST_DEVICE": dev_a["id"], "DST_PORT": str(idx_a),
+                   xlsxreader.ROW_KEY: 2}
+        demands = bulkplan.demands_from_rows([row])
+        rev = bulkplan.validate(T, demands)
+        got = bulkplan._resolve_endpoints(T, demands)[0]
+        where = "destination" if a_open else "source"
+        check(f"a socket named at the {where} settles the media without CABLE",
+              not rev["issues"] and not got.get("malformed"),
+              f"review={[i['kind'] for i in rev['issues']]} planner={got.get('malformed')}")
+
     # asking one box for more ports than it has left is knowable before any
     # routing happens, and several rows must draw on the same supply
     small = min((d for d in T["devices"].values()
@@ -1051,6 +1070,13 @@ def main():
     check("an intra-rack patch still shows BOTH of its ends",
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
+
+    # ---------- the review must predict the plan (a property, not examples) ----
+    # Every other check here is one hand-written row and one expected message,
+    # which is exactly what let this rule break twice while 172 checks passed.
+    # These generate sheets and assert a relationship between the two sides.
+    # A longer sweep lives in test_agreement.py; this is the standing guard.
+    test_agreement.run(T, check, sheets=250, plans=6)
 
     print()
     passed = sum(results)
