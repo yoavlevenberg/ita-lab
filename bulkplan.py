@@ -106,6 +106,10 @@ TYPE_SYNONYMS = {
 }
 
 
+# Header resolution is per sheet, not per cell — see _pick.
+_HEADER_MEMO = {}
+
+
 def _pick(row, aliases):
     """Read a column by any of its accepted names, tolerating a typo in the
     header.
@@ -120,10 +124,23 @@ def _pick(row, aliases):
         if v:
             return v.strip()
 
+    # Which column a mistyped header belongs to depends only on WHICH columns
+    # this row has filled in, never on what is in them — and every row of a
+    # sheet has the same header. Remember the answer so a 500-row file resolves
+    # its headers once instead of fuzzy-matching every header against every
+    # alias on every row, which was the single most expensive thing about
+    # reading a file.
+    shape = (tuple(k for k, v in row.items() if v and k != xlsxreader.ROW_KEY),
+             aliases)
+    if shape in _HEADER_MEMO:
+        hit = _HEADER_MEMO[shape]
+        return str(row[hit]).strip() if hit else ""
+
     # Every alias in the group names the SAME column, so map them all to one
     # value: being torn between SOURCE_PORT and SRC_PORT is not an ambiguity
     # to refuse, it is the same answer twice.
     same = dict.fromkeys(aliases, "hit")
+    found = None
     for key, value in row.items():
         if key == xlsxreader.ROW_KEY or not value:
             continue
@@ -133,8 +150,12 @@ def _pick(row, aliases):
         # away headers that differ only in spacing or case, like "U SIZE" for
         # "USIZE", which the loop above never sees.
         if fuzzy.match(key, same):
-            return str(value).strip()
-    return ""
+            found = key
+            break
+    if len(_HEADER_MEMO) > 2000:      # a long-lived server, not one sheet
+        _HEADER_MEMO.clear()
+    _HEADER_MEMO[shape] = found
+    return str(row[found]).strip() if found else ""
 
 
 def _has_column(row, aliases):
@@ -361,14 +382,24 @@ def looks_like_serial(text):
 
 
 def free_port_on_device(topology, device_id, cable_type, exclude=()):
-    """Lowest-numbered free port of the right media on a device."""
-    best = None
-    for pid, p in topology["ports"].items():
-        if (p["device"] == device_id and p["status"] == "free"
+    """Lowest-numbered free port of the right media on a device.
+
+    Addressed directly rather than found by sweeping the map: a port id is
+    `<device>:<index>`, so the handful this device owns can be asked for by
+    name. Scanning all 120,000 ports to answer a question about one box cost
+    eight milliseconds a call, and a sheet full of serials calls it per row.
+    """
+    dev = topology["devices"].get(device_id)
+    if not dev:
+        return None
+    ports = topology["ports"]
+    for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1):
+        pid = f"{device_id}:{i}"
+        p = ports.get(pid)
+        if (p is not None and p["status"] == "free"
                 and p["type"] == cable_type and pid not in exclude):
-            if best is None or p["index"] < topology["ports"][best]["index"]:
-                best = pid
-    return best
+            return pid
+    return None
 
 
 # --------------------------------------------------------------------------

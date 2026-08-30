@@ -34,6 +34,7 @@ rest of this tool.
 """
 
 import difflib
+import functools
 import re
 
 # Hebrew final forms are the same letter; a word typed with the wrong one is a
@@ -62,11 +63,21 @@ def budget(n, lenient=False):
     return 3
 
 
+@functools.lru_cache(maxsize=8192)
+def _normalised(text):
+    t = text.strip().lower().translate(HEBREW_FINALS)
+    return re.sub(r"[\s_\-./]+", "", t)
+
+
 def normalise(text):
     """Fold away everything that is never meaningful: case, spacing,
-    separators, and Hebrew final forms."""
-    t = str(text or "").strip().lower().translate(HEBREW_FINALS)
-    return re.sub(r"[\s_\-./]+", "", t)
+    separators, and Hebrew final forms.
+
+    Cached: the same few dozen column headers and alias spellings are folded
+    over and over — reading one sheet did it a million times, and the regex
+    dominated the cost of reading a file.
+    """
+    return _normalised(str(text or ""))
 
 
 def distance(a, b):
@@ -117,8 +128,16 @@ def match(text, candidates, lenient=False):
 
     scored = []
     for spelling, value in mapping.items():
-        d = distance(text, spelling)
-        if d <= budget(max(len(want), len(normalise(spelling))), lenient):
+        other = normalise(spelling)
+        allowed = budget(max(len(want), len(other)), lenient)
+        # Every edit changes the length by at most one, so two strings whose
+        # lengths differ by more than the budget cannot possibly be within it.
+        # Checking that first skips the quadratic distance matrix for the great
+        # majority of pairs, which is where reading a sheet spent its time.
+        if abs(len(want) - len(other)) > allowed:
+            continue
+        d = distance(want, other)
+        if d <= allowed:
             scored.append((d, spelling, value))
     if not scored:
         return None
