@@ -372,6 +372,9 @@
             font-size:11.5px; color:var(--muted)}
   .rackhead span{flex:1}
   button.danger.sm{font-size:10.5px; padding:3px 9px}
+  .partial-note{border:1px solid #7a5a1e; background:#241d10; color:#ffd490;
+                border-radius:8px; padding:9px 11px; margin-bottom:10px;
+                font-size:11.5px; line-height:1.7}
   .rel-note{font-size:11.5px; margin-top:8px; line-height:1.7}
   .rel-note .warn{color:#ffb84d}
   .rel-note .good{color:var(--free)}
@@ -986,6 +989,27 @@ function clickPort(portId){
     renderDevice();
     return;
   }
+  // A truncated connection is waiting for a far end, so a click on a free port
+  // is most likely aimed at finishing it. Offered, never assumed.
+  if (openCircuit && T.circuits[openCircuit] && T.circuits[openCircuit].partial){
+    const c = T.circuits[openCircuit];
+    if (p.type !== c.cable_type){
+      alert(`${openCircuit} הוא ${c.cable_type === "fiber" ? "סיב" : "נחושת"}, ` +
+            `והפורט הזה ${p.type === "fiber" ? "סיב" : "נחושת"}. בחר פורט מאותו סוג.`);
+      return;
+    }
+    if (confirm(`לחבר את ${openCircuit} לכאן?
+
+${locate(portId)}
+
+` +
+                `המסלול הקיים יישמר ותתווסף לו הקפיצה האחרונה בלבד.`)){
+      extendCircuit(openCircuit, portId);
+      return;
+    }
+    return;
+  }
+
   if (sel.src === portId) sel.src = null;
   else if (sel.dst === portId) sel.dst = null;
   else if (!sel.src) sel.src = portId;
@@ -1242,18 +1266,31 @@ function showExistingCircuit(cid){
     routeOptions = [];
     $("btnMoreOptions").style.display = "none";
     renderMap();
-    $("drawerTitle").innerHTML = `חיבור קיים <span class="mono">${c.id}</span>
-        <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`;
+    $("drawerTitle").innerHTML = c.partial
+      ? `<span style="color:#ffb84d">חיבור לא גמור</span>
+         <span class="mono">${c.id}</span>
+         <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`
+      : `חיבור קיים <span class="mono">${c.id}</span>
+         <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`;
+    openCircuit = c.partial ? c.id : null;
     const jumpPorts = [c.a_port, ...c.transit_ports, c.b_port];
     $("drawerBody").innerHTML = `
       <div style="grid-column:1/-1">
+        ${c.partial ? `<div class="partial-note">
+            <b>⚠ הקצה האחרון הוסר.</b> המסלול מגיע עד
+            <span class="mono">${c.open_end_location || ""}</span> וממתין שם.
+            לחץ על פורט פנוי כדי לחבר אותו לשם — כל השאר יישמר.
+          </div>` : ""}
         <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
         ${renderJumpChain(c.hop_racks, jumpPorts)}
         <div class="opt-actions">
           <button class="ghost" onclick="window.open('/api/workorder?circuit=${encodeURIComponent(c.id)}','_blank','noopener')">
             🖨 Work Order להדפסה</button>
+          ${c.partial ? "" : `<button class="ghost" id="btnTruncate" onclick="truncateCircuit('${c.id}')"
+            title="משאיר את כל המסלול במקום ומשחרר רק את הקצה — כדי לשלוח אותו ליעד אחר">
+            ✂ הסר רק את הקפיצה האחרונה</button>`}
           <button class="danger" id="btnRelease" onclick="releaseCircuit('${c.id}')">
-            ✂ נתק את החיבור הזה</button>
+            ✂ נתק את כל המסלול</button>
         </div>
         <div id="releaseNote" class="rel-note"></div>
       </div>
@@ -1954,6 +1991,123 @@ $("btnBulkExecute").onclick = () => {
 // Releasing is the one action here that destroys something, so it asks first
 // and says exactly what it is about to give back — how many fibres, how many
 // ports, and where. "Are you sure?" with no detail is not a question.
+// Pull only the last leg. The backbone strands already run between the rooms;
+// when just the far end is wrong, tearing all of it out to change a patch lead
+// throws away the expensive part of the work.
+function truncateCircuit(cid){
+  const c = T.circuits && T.circuits[cid];
+  const hops = c ? (c.strands || []).length : 0;
+  if (!confirm(`להסיר רק את הקפיצה האחרונה של ${cid}?
+
+` +
+               `${hops} קפיצות ← ${hops - 1}. הקצה ${c ? locate(c.b_port) : ""} ישוחרר,
+` +
+               `ושאר המסלול יישאר במקום עם קצה פתוח שאפשר לשלוח ליעד אחר.`)) return;
+  const btn = $("btnTruncate");
+  if (btn){ btn.disabled = true; btn.textContent = "מסיר…"; }
+  fetch("/api/truncate", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ circuit_id: cid })
+  }).then(r => r.json()).then(res => {
+    if (res.error){
+      if (btn){ btn.disabled = false; btn.textContent = "✂ הסר רק את הקפיצה האחרונה"; }
+      return alert("לא ניתן: " + res.error);
+    }
+    truncateLocally(res);
+    openCircuit = cid;
+    renderStats(); renderMap();
+    if (sel.rack) renderRack();
+    if (sel.device) renderDevice();
+    showExistingCircuit(cid);
+    alert(`הקפיצה האחרונה הוסרה.
+
+הפורט ${res.freed_port} פנוי,
+` +
+          `והמסלול ממתין ב-${res.open_end_location}.
+
+` +
+          `עכשיו בחר פורט יעד חדש ולחץ "חבר לכאן".`);
+  }).catch(e => {
+    if (btn){ btn.disabled = false; btn.textContent = "✂ הסר רק את הקפיצה האחרונה"; }
+    alert("שגיאה: " + e);
+  });
+}
+
+// Mirror the truncation in the page's copy of the map.
+function truncateLocally(res){
+  const c = T.circuits && T.circuits[res.circuit_id];
+  if (!c) return;
+  const p = T.ports[res.freed_port];
+  if (p){
+    if (p.status === "used"){
+      const rs = rackStats[p.rack]; if (rs){ rs.used--; rs.free++; }
+      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.used--; ps.free++; }
+    }
+    p.status = "free"; p.circuit = null; p.role = null; p.peer = null;
+  }
+  const last = (c.strands || [])[c.strands.length - 1];
+  if (last){
+    const e = T.edges.find(e => e.id === last.edge_id);
+    const ct = e && e.cable_types[last.cable_type];
+    if (ct && ct.strands && ct.strands[String(last.strand_index)] === res.circuit_id){
+      delete ct.strands[String(last.strand_index)];
+      ct.used = Object.keys(ct.strands).length;
+    }
+    c.strands = c.strands.slice(0, -1);
+    c.segment_ids = (c.segment_ids || []).slice(0, -1);
+    c.hop_racks = (c.hop_racks || []).slice(0, -1);
+  }
+  const end = T.ports[res.open_end];
+  if (end){ end.role = "open_end"; end.peer = null; }
+  const a = T.ports[c.a_port]; if (a) a.peer = null;
+  c.transit_ports = (c.transit_ports || []).slice(0, -1);
+  c.partial = true; c.open_end = res.open_end; c.b_port = null;
+}
+
+// Finish a truncated connection: route from its loose end to a port you pick.
+function extendCircuit(cid, dst){
+  fetch("/api/extend", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ circuit_id: cid, dst })
+  }).then(r => r.json()).then(res => {
+    if (res.error) return alert("לא ניתן לחבר: " + res.error);
+    // the whole circuit changed shape; the simplest correct thing is to take
+    // the server's own record of it rather than trying to patch ours
+    applyExtendLocally(res.circuit);
+    openCircuit = null;
+    sel.src = null; sel.dst = null;
+    refreshSlots(); renderStats(); renderMap();
+    if (sel.rack) renderRack();
+    if (sel.device) renderDevice();
+    showExistingCircuit(cid);
+  }).catch(e => alert("שגיאה: " + e));
+}
+
+function applyExtendLocally(c){
+  T.circuits[c.id] = c;
+  const touch = (pid, role, peer) => {
+    const p = T.ports[pid]; if (!p) return;
+    if (p.status !== "used"){
+      const rs = rackStats[p.rack]; if (rs){ rs.free--; rs.used++; }
+      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.free--; ps.used++; }
+    }
+    p.status = "used"; p.circuit = c.id; p.role = role; p.peer = peer;
+  };
+  touch(c.a_port, "endpoint", c.b_port);
+  touch(c.b_port, "endpoint", c.a_port);
+  (c.transit_ports || []).forEach(pid => touch(pid, "transit", null));
+  for (const s of c.strands || []){
+    const e = T.edges.find(e => e.id === s.edge_id);
+    const ct = e && e.cable_types[s.cable_type];
+    if (!ct) continue;
+    (ct.strands ||= {})[String(s.strand_index)] = c.id;
+    ct.used = Object.keys(ct.strands).length;
+  }
+}
+
+// Which truncated circuit is waiting for a destination, if any.
+let openCircuit = null;
+
 function releaseCircuit(cid){
   const c = T.circuits && T.circuits[cid];
   const strands = c ? (c.strands || []).length : 0;

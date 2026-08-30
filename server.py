@@ -44,6 +44,10 @@ Endpoints
                                alternatives the row's plan
   POST /api/bulk/execute       {plan_id} -> commits every planned row, each
                                revalidated first; a stale row fails alone
+  POST /api/truncate           {circuit_id | port} -> pulls only the LAST hop,
+                               leaving the rest of the path and a loose end
+  POST /api/extend             {circuit_id, dst} -> gives a truncated
+                               connection a new far end from its loose end
   POST /api/decommission       {circuit_id | port | plan_id | device | rack}
                                -> releases connections: one, or every one on a
                                device/rack, or a whole executed plan. Strands
@@ -146,6 +150,12 @@ def _route_of_circuit(circuit_id):
                             "location": pathengine.describe_port(TOPOLOGY, p)}
                            for p in circuit.get("transit_ports", [])],
         "total_length_m": circuit["total_length_m"],
+        # a truncated connection has to be able to say where it stops, or the
+        # page can only report that something is missing
+        "partial": bool(circuit.get("partial")),
+        "open_end": circuit.get("open_end"),
+        "open_end_location": (pathengine.describe_port(TOPOLOGY, circuit["open_end"])
+                              if circuit.get("open_end") else None),
     }
 
 
@@ -235,7 +245,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": f"circuit {cid} not found"})
             enriched = dict(circuit)
             enriched["a_location"] = pathengine.describe_port(TOPOLOGY, circuit["a_port"])
-            enriched["b_location"] = pathengine.describe_port(TOPOLOGY, circuit["b_port"])
+            # a truncated connection has no far end, and has to be able to say
+            # where it does stop — otherwise the page can only report that
+            # something is missing
+            enriched["b_location"] = (pathengine.describe_port(TOPOLOGY, circuit["b_port"])
+                                      if circuit.get("b_port") else "— אין קצה, המסלול קטום")
+            enriched["open_end_location"] = (
+                pathengine.describe_port(TOPOLOGY, circuit["open_end"])
+                if circuit.get("open_end") else None)
             return self._send(200, enriched)
 
         return self._send(404, {"error": "not found"})
@@ -292,6 +309,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if url.path == "/api/bulk/plan":
             return self._bulk_plan(url)
+
+        if url.path == "/api/truncate":
+            return self._truncate()
+
+        if url.path == "/api/extend":
+            return self._extend()
 
         if url.path == "/api/decommission":
             return self._decommission()
@@ -530,6 +553,59 @@ class Handler(BaseHTTPRequestHandler):
                                 "refused": refused,
                                 "freed_ports": sorted({p for r in released
                                                        for p in r["ports"]})})
+
+    def _truncate(self):
+        """Pull only the last leg of a connection, keeping the rest of the path.
+
+        The expensive part of a route is the backbone strands already pulled
+        between rooms; when only the far end is wrong, that should not be torn
+        out to change a patch lead.
+        """
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        cid = req.get("circuit_id")
+        if not cid and req.get("port"):
+            p = TOPOLOGY["ports"].get(req["port"])
+            if p is None:
+                return self._send(404, {"error": f"no port {req['port']} on the map"})
+            cid = p.get("circuit")
+        if not cid:
+            return self._send(400, {"error": "circuit_id or port is required"})
+
+        with WRITE_LOCK:
+            try:
+                rec = pathengine.truncate_route(TOPOLOGY, cid)
+            except pathengine.DecommissionError as e:
+                return self._send(409, {"error": str(e)})
+            pathengine.save_topology(TOPOLOGY)
+        return self._send(200, {"status": "ok", **rec,
+                                "circuit": TOPOLOGY["circuits"][cid]})
+
+    def _extend(self):
+        """Give a truncated connection a new far end."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        cid, dst = req.get("circuit_id"), req.get("dst")
+        if not cid or not dst:
+            return self._send(400, {"error": "circuit_id and dst are required"})
+
+        with WRITE_LOCK:
+            try:
+                circuit = pathengine.extend_route(TOPOLOGY, cid, dst)
+            except (pathengine.RouteError, KeyError) as e:
+                return self._send(409, {"error": str(e)})
+            pathengine.save_topology(TOPOLOGY)
+        return self._send(200, {"status": "ok", "circuit": circuit,
+                                "work_order": workorder.render(
+                                    _route_of_circuit(cid), circuit_id=cid)})
 
     def _circuits_named_by(self, req):
         """Which circuits a release request is asking about. One id, or every

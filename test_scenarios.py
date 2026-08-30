@@ -96,9 +96,20 @@ def main():
     orphan = [p for p in T["ports"].values() if p["status"] == "used" and not p["circuit"]]
     check("every used port belongs to a circuit", not orphan, f"{len(orphan)} orphans")
 
+    # A truncated circuit deliberately has one end and no peer, so symmetry is
+    # asserted only where a peer is claimed — and separately, that a peerless
+    # endpoint belongs to a circuit that admits it is partial, so this cannot
+    # quietly excuse a genuinely broken pair.
     asym = [p for p in T["ports"].values()
-            if p["role"] == "endpoint" and T["ports"][p["peer"]]["peer"] != p["id"]]
+            if p["role"] == "endpoint" and p["peer"]
+            and T["ports"][p["peer"]]["peer"] != p["id"]]
     check("endpoint ports point back at each other", not asym, f"{len(asym)} asymmetric")
+
+    loose = [p for p in T["ports"].values()
+             if p["role"] in ("endpoint", "open_end") and not p["peer"]
+             and not (T["circuits"].get(p["circuit"]) or {}).get("partial")]
+    check("a peerless endpoint only exists on a circuit marked partial",
+          not loose, f"{len(loose)} loose ends")
 
     # ---------- layout ----------
     all_pods = list(T["pods"].keys())
@@ -1105,7 +1116,8 @@ def main():
           round_trips == checked, f"{round_trips} of {checked} round-tripped")
 
     work = copy.deepcopy(T)
-    victim = sorted(work["circuits"])[500]
+    victim = next(c for c in sorted(work["circuits"])
+                  if not work["circuits"][c].get("partial"))
     held = work["circuits"][victim]
     rec = decommission_route(work, victim)
     check("releasing an existing circuit frees its ports",
@@ -1130,7 +1142,8 @@ def main():
     # The one that matters: a strand another circuit now holds must never be
     # taken back, and a refusal must change nothing at all.
     work = copy.deepcopy(T)
-    target = sorted(work["circuits"])[10]
+    target = next(c for c in sorted(work["circuits"])
+                  if work["circuits"][c].get("strands") and not work["circuits"][c].get("partial"))
     s = work["circuits"][target]["strands"][0]
     edge = next(e for e in work["edges"] if e["id"] == s["edge_id"])
     edge["cable_types"][s["cable_type"]]["strands"][str(s["strand_index"])] = "CIR-OTHER"
@@ -1147,10 +1160,80 @@ def main():
           edge["cable_types"][s["cable_type"]]["strands"].get(str(s["strand_index"])) == "CIR-OTHER"
           and bool(forced["conflicts"]))
 
+    # ---------- pulling only the last leg ----------
+    # The backbone strands between rooms are the expensive part of a route.
+    # When only the far end is wrong they should survive changing a patch lead.
+    from pathengine import truncate_route, extend_route
+
+    work = copy.deepcopy(T)
+    start = _fingerprint(work)
+    # skip anything already truncated: the map is allowed to hold a partial
+    # circuit, and a fixture that trips over one is a fixture, not a bug
+    long_cid = next(c["id"] for c in work["circuits"].values()
+                    if len(c["strands"]) >= 4 and not c.get("partial"))
+    was = copy.deepcopy(work["circuits"][long_cid])
+    tr = truncate_route(work, long_cid)
+    cut = work["circuits"][long_cid]
+    check("truncating drops exactly one hop",
+          len(cut["strands"]) == len(was["strands"]) - 1,
+          f"{len(was['strands'])} -> {len(cut['strands'])}")
+    check("the far endpoint is freed", work["ports"][was["b_port"]]["status"] == "free")
+    check("every earlier strand is untouched",
+          all(next(e for e in work["edges"] if e["id"] == s["edge_id"])
+              ["cable_types"][s["cable_type"]]["strands"].get(str(s["strand_index"]))
+              == long_cid for s in cut["strands"]))
+    check("the loose end stays patched and is marked as one",
+          work["ports"][tr["open_end"]]["status"] == "used"
+          and work["ports"][tr["open_end"]]["role"] == "open_end")
+    check("the circuit admits it is unfinished",
+          cut["partial"] and cut["b_port"] is None)
+    check("trunk used counts still match after truncating",
+          all(ct["used"] == len(ct.get("strands") or {})
+              for e in work["edges"] for ct in e["cable_types"].values()))
+
+    # putting it back exactly must be indistinguishable from never having cut it
+    extend_route(work, long_cid, was["b_port"])
+    check("truncate then re-extend to the same port restores the map exactly",
+          _fingerprint(work) == start)
+
+    # and the point of the feature: send it somewhere else, keeping the path
+    truncate_route(work, long_cid)
+    end_rack = work["ports"][work["circuits"][long_cid]["open_end"]]["rack"]
+    elsewhere = next(p["id"] for p in work["ports"].values()
+                     if p["status"] == "free" and p["type"] == was["cable_type"]
+                     and p["rack"] not in (end_rack, work["ports"][was["b_port"]]["rack"]))
+    extend_route(work, long_cid, elsewhere)
+    now = work["circuits"][long_cid]
+    kept = sum(1 for s in now["strands"] if s in was["strands"])
+    check("re-aiming the last leg keeps every earlier hop",
+          kept == len(was["strands"]) - 1, f"kept {kept} of {len(was['strands']) - 1}")
+    check("and the source end never moved", now["a_port"] == was["a_port"])
+    check("and the abandoned destination stayed free",
+          work["ports"][was["b_port"]]["status"] == "free")
+    check("a re-aimed circuit is whole again, with no partial flag left behind",
+          not now.get("partial") and now["b_port"] == elsewhere)
+
+    # a truncated circuit must still be releasable — its shape is different
+    # Built here rather than borrowed, so "back to how it was" means back to
+    # before this circuit existed at all — releasing an EXISTING one correctly
+    # leaves the map different, since that circuit is now gone.
+    work2 = copy.deepcopy(T)
+    fresh = _fingerprint(work2)
+    made = resolve_route_options(free_port(work2, "A1-S05", "fiber"),
+                                 free_port(work2, "D5-N06", "fiber"),
+                                 count=1, topology=work2)[0]
+    cid2 = next_circuit_id(work2)
+    __import__("pathengine").commit_route(work2, made, cid2)
+    truncate_route(work2, cid2)
+    rel2 = decommission_route(work2, cid2)
+    check("a truncated circuit can still be released, loose end and all",
+          not rel2["conflicts"] and _fingerprint(work2) == fresh,
+          f"conflicts={rel2['conflicts'][:2]} identical={_fingerprint(work2) == fresh}")
+
     # the whole point: a freed port can be patched somewhere else
     work = copy.deepcopy(T)
     ep = next(p for p in work["ports"].values()
-              if p["status"] == "used" and p["role"] == "endpoint")
+              if p["status"] == "used" and p["role"] == "endpoint" and p["peer"])
     old_peer = ep["peer"]
     decommission_route(work, ep["circuit"])
     check("a released port becomes free again", work["ports"][ep["id"]]["status"] == "free")

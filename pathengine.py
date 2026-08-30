@@ -565,8 +565,11 @@ def decommission_route(topology, circuit_id, force=False):
             conflicts.append(f"{s['edge_id']} {s['cable_type']} strand "
                              f"#{s['strand_index']} is held by {holder}, not {circuit_id}")
 
-    owned_ports = ([circuit["a_port"], circuit["b_port"]]
-                   + list(circuit.get("transit_ports") or []))
+    # A truncated circuit has no far end and does have an open end, so build
+    # the list from what is actually there rather than from the usual shape.
+    owned_ports = [p for p in (circuit.get("a_port"), circuit.get("b_port"),
+                               circuit.get("open_end"))
+                   if p] + list(circuit.get("transit_ports") or [])
     for pid in owned_ports:
         p = ports.get(pid)
         if p is None:
@@ -608,6 +611,169 @@ def decommission_route(topology, circuit_id, force=False):
     return {"circuit_id": circuit_id, "strands": freed_strands,
             "ports": freed_ports, "conflicts": conflicts,
             "a_port": circuit["a_port"], "b_port": circuit["b_port"]}
+
+
+def open_end_of(topology, circuit):
+    """Where a truncated circuit currently stops: the cross-connect port that
+    the remaining trunk still lands on, waiting for a new final leg."""
+    if not circuit.get("partial"):
+        return None
+    return circuit.get("open_end")
+
+
+def truncate_route(topology, circuit_id):
+    """Pull the LAST leg only, and leave the rest of the path in place.
+
+    A route is a chain of trunk strands joined by cross-connects. When only the
+    far end is wrong, tearing the whole thing out throws away the expensive
+    part — the backbone strands already pulled between rooms — to change a
+    patch lead. This frees the far endpoint and the final strand, and the
+    cross-connect that fed it becomes the circuit's open end: still patched,
+    still holding the trunk behind it, waiting to be sent somewhere else.
+
+    The circuit is left explicitly marked `partial`, because a connection with
+    one end loose is not carrying anything and must not be mistaken for one
+    that is.
+    """
+    circuit = (topology.get("circuits") or {}).get(circuit_id)
+    if not circuit:
+        raise DecommissionError(f"No circuit {circuit_id} on the map.")
+    if circuit.get("partial"):
+        raise DecommissionError(
+            f"{circuit_id} already ends in mid-air at "
+            f"{describe_port(topology, circuit['open_end'])} — give it a "
+            f"destination, or release it completely.")
+
+    strands = circuit.get("strands") or []
+    if len(strands) <= 1:
+        raise DecommissionError(
+            f"{circuit_id} is a single hop, so its last hop is the whole "
+            f"connection — release it instead of truncating it.")
+
+    last = strands[-1]
+    edge = next((e for e in topology["edges"] if e["id"] == last["edge_id"]), None)
+    ct = edge["cable_types"].get(last["cable_type"]) if edge else None
+    holder = (ct.get("strands") or {}).get(str(last["strand_index"])) if ct else None
+    if holder != circuit_id:
+        raise DecommissionError(
+            f"the last strand of {circuit_id} ({last['edge_id']} "
+            f"#{last['strand_index']}) is held by {holder or 'nobody'}, so "
+            f"nothing was changed.")
+
+    # the cross-connect that joined the last two hops becomes the open end
+    transit = list(circuit.get("transit_ports") or [])
+    if not transit:
+        raise DecommissionError(
+            f"{circuit_id} has no cross-connect to stop at — release it instead.")
+    new_end = transit[-1]
+
+    b_port = circuit["b_port"]
+    if topology["ports"].get(b_port, {}).get("circuit") != circuit_id:
+        raise DecommissionError(
+            f"port {b_port} is not held by {circuit_id}, so nothing was changed.")
+
+    # ---- release just that leg ----
+    del ct["strands"][str(last["strand_index"])]
+    ct["used"] = len(ct["strands"])
+
+    p = topology["ports"][b_port]
+    p["status"], p["circuit"], p["role"], p["peer"] = "free", None, None, None
+
+    end = topology["ports"][new_end]
+    end["role"] = "open_end"
+    end["peer"] = None
+
+    a = topology["ports"][circuit["a_port"]]
+    a["peer"] = None            # its far end no longer exists
+
+    circuit["strands"] = strands[:-1]
+    circuit["segment_ids"] = circuit["segment_ids"][:-1]
+    circuit["transit_ports"] = transit[:-1]
+    circuit["hop_racks"] = circuit["hop_racks"][:-1]
+    circuit["total_length_m"] = round(
+        circuit["total_length_m"] - (edge["length_m"] if edge else 0), 1)
+    circuit["partial"] = True
+    circuit["open_end"] = new_end
+    circuit.pop("b_port", None)
+    circuit["b_port"] = None
+
+    return {"circuit_id": circuit_id, "freed_port": b_port,
+            "freed_strand": f"{last['edge_id']}#{last['strand_index']}",
+            "open_end": new_end,
+            "open_end_location": describe_port(topology, new_end),
+            "remaining_hops": len(circuit["strands"])}
+
+
+def extend_route(topology, circuit_id, dst_port_id):
+    """Give a truncated circuit a new final leg, to a different destination.
+
+    Routed from the open end, so everything already pulled is kept and only
+    what is missing is added.
+    """
+    circuit = (topology.get("circuits") or {}).get(circuit_id)
+    if not circuit:
+        raise RouteError(f"No circuit {circuit_id} on the map.")
+    if not circuit.get("partial"):
+        raise RouteError(f"{circuit_id} already has both ends; nothing to extend.")
+
+    end_id = circuit["open_end"]
+    end = topology["ports"][end_id]
+    dst = _port(topology, dst_port_id)
+    if dst["status"] != "free":
+        raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    if dst["type"] != circuit["cable_type"]:
+        raise RouteError(f"Cable type mismatch: this circuit is "
+                         f"{circuit['cable_type']}, {dst_port_id} is {dst['type']}.")
+
+    # The open end is occupied by this very circuit, and the router refuses a
+    # used source. Free it for the search and put it back either way, so a
+    # failed search cannot leave the map looking different.
+    saved = (end["status"], end["circuit"], end["role"], end["peer"])
+    end["status"], end["circuit"], end["role"], end["peer"] = "free", None, None, None
+    try:
+        if end["rack"] == dst["rack"]:
+            tail = intra_rack_route(topology, end_id, dst_port_id, circuit["cable_type"])
+        else:
+            tail = resolve_route_options(end_id, dst_port_id, count=1,
+                                         topology=topology)[0]
+    finally:
+        end["status"], end["circuit"], end["role"], end["peer"] = saved
+
+    edges = {e["id"]: e for e in topology["edges"]}
+    for seg in tail["segments"]:
+        ct = edges[seg["edge_id"]]["cable_types"][circuit["cable_type"]]
+        ct.setdefault("strands", {})[str(seg["strand_index"])] = circuit_id
+        ct["used"] = len(ct["strands"])
+        circuit["strands"].append({
+            "edge_id": seg["edge_id"], "cable_type": circuit["cable_type"],
+            "strand_index": seg["strand_index"],
+            "from_port": seg["strand_port_from"], "to_port": seg["strand_port_to"]})
+        circuit["segment_ids"].append(seg["edge_id"])
+
+    # the old open end is a cross-connect again, now that something leads on
+    end["role"] = "transit"
+    end["peer"] = None
+    circuit["transit_ports"].append(end_id)
+    for tp in tail["transit_points"]:
+        p = topology["ports"][tp["port"]]
+        p["status"], p["circuit"], p["role"], p["peer"] = "used", circuit_id, "transit", None
+        circuit["transit_ports"].append(tp["port"])
+
+    dst["status"], dst["circuit"], dst["role"] = "used", circuit_id, "endpoint"
+    dst["peer"] = circuit["a_port"]
+    topology["ports"][circuit["a_port"]]["peer"] = dst_port_id
+
+    circuit["b_port"] = dst_port_id
+    circuit["hop_racks"] = circuit["hop_racks"] + tail["hop_racks"][1:]
+    circuit["total_length_m"] = round(
+        circuit["total_length_m"] + tail["total_length_m"], 1)
+    # Dropped rather than set to False: a circuit with both ends again is a
+    # whole circuit, and should be indistinguishable from one that was never
+    # truncated — including byte-for-byte, which is what the round-trip test
+    # compares.
+    circuit.pop("partial", None)
+    circuit.pop("open_end", None)
+    return circuit
 
 
 def commit_route(topology, route, circuit_id):
