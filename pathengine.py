@@ -199,6 +199,77 @@ def intra_rack_route(topology, src_port_id, dst_port_id, cable_type):
     }
 
 
+def direct_route(topology, src_port_id, dst_port_id):
+    """One jump and no more: patch these two ports to each other directly.
+
+    The automatic router answers "how do I get there", which for two cabinets
+    with no cable between them means six hops across the site. Sometimes the
+    question is the other one — "is there a single cable I can patch here?" —
+    and a six-hop answer to that is not a smaller version of the right answer,
+    it is a different one. So this refuses rather than routes, and says what it
+    found instead.
+
+    Two ports in one cabinet are a patch lead and consume no trunk at all. Two
+    cabinets with a trunk between them are one strand of it.
+    """
+    if src_port_id == dst_port_id:
+        raise RouteError(f"Source and destination are the same port ({src_port_id}).")
+
+    src, dst = _port(topology, src_port_id), _port(topology, dst_port_id)
+    if src["status"] != "free":
+        raise RouteError(f"Source port {src_port_id} is already in use.")
+    if dst["status"] != "free":
+        raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    if src["type"] != dst["type"]:
+        raise RouteError(f"Cable type mismatch: source is {src['type']}, "
+                         f"destination is {dst['type']}. Both ends must be the "
+                         f"same media.")
+
+    cable_type = src["type"]
+    a, b = src["rack"], dst["rack"]
+    if a == b:
+        route = intra_rack_route(topology, src_port_id, dst_port_id, cable_type)
+        route.update(shared_segments=[], fully_disjoint_from_previous=True,
+                     option_index=1, direct=True)
+        return route
+
+    edge = next((e for e in topology["edges"]
+                 if {e["from"], e["to"]} == {a, b} and cable_type in e["cable_types"]),
+                None)
+    if edge is None:
+        raise RouteError(
+            f"No {cable_type} cable runs directly between {a} and {b}, so there "
+            f"is no single jump to make. Turn off direct mode to route through "
+            f"the site instead.")
+    if is_trunk_full(edge, cable_type):
+        raise RouteError(f"The {cable_type} trunk between {a} and {b} is full — "
+                         f"no strand left for a direct patch.")
+
+    ct = edge["cable_types"][cable_type]
+    used = len(ct.get("strands") or {})
+    seg = _segment({"id": edge["id"], "obj": edge, "domain": edge["domain"],
+                    "length_m": edge["length_m"], "capacity": ct["capacity"],
+                    "used": used, "remaining": ct["capacity"] - used},
+                   a, b, cable_type)
+    return {
+        "status": "ok",
+        "cable_type": cable_type,
+        "domain": edge["domain"],
+        "src_port": src_port_id,
+        "dst_port": dst_port_id,
+        "src_location": describe_port(topology, src_port_id),
+        "dst_location": describe_port(topology, dst_port_id),
+        "hop_racks": [a, b],
+        "segments": [seg],
+        "transit_points": [],           # one jump has nothing in the middle
+        "total_length_m": round(edge["length_m"], 1),
+        "shared_segments": [],
+        "fully_disjoint_from_previous": True,
+        "option_index": 1,
+        "direct": True,
+    }
+
+
 def _segment(e, a, b, cable_type, reserved=None):
     """One hop of a route: which trunk, and which numbered strand inside it
     gets patched at each end.

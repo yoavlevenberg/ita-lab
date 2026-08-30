@@ -58,6 +58,7 @@ Endpoints
                                map, so its ports are free right now
 """
 
+import contextlib
 import copy
 import io
 import json
@@ -94,7 +95,52 @@ WRITE_LOCK = threading.Lock()
 
 # Plans live server-side between plan and execute, so the browser never has to
 # ship whole route objects back and never gets to rewrite one on the way.
+#
+# Capped, because they were not: every sheet ever uploaded stayed for the life
+# of the process, each holding full route objects, and one of them now also
+# holds a working copy of the map. A day of use grew without limit.
 PLANS = {}
+MAX_PLANS = 20            # whole plans kept addressable
+MAX_PLAN_STATES = 3       # working maps kept — these are the 32MB ones
+
+# Bumped by anything that changes the live map. A plan's working copy is built
+# from the map, so it is only trustworthy while this has not moved.
+MAP_VERSION = 0
+
+
+def _map_changed():
+    global MAP_VERSION
+    MAP_VERSION += 1
+
+
+_STATE_SEQ = 0
+
+
+def _next_state_seq():
+    global _STATE_SEQ
+    _STATE_SEQ += 1
+    return _STATE_SEQ
+
+
+def _trim_plan_states(keep=None):
+    """Keep only the few most recently USED working maps. A plan without one is
+    not lost — it rebuilds on next use — but a plan holding one costs 32MB.
+
+    Ordered by last use, not by when the sheet was uploaded: ordering by upload
+    threw away the map belonging to the plan being looked at, whenever that
+    plan was not the newest one.
+    """
+    holders = [p for p in PLANS.values() if p.get("_state") and p is not keep]
+    holders.sort(key=lambda p: p["_state"]["seq"])
+    budget = MAX_PLAN_STATES - (1 if keep is not None else 0)
+    for stale in holders[:max(0, len(holders) - budget)]:
+        stale.pop("_state", None)
+
+
+def _remember_plan(plan_id, plan):
+    PLANS[plan_id] = plan
+    for old in list(PLANS)[:-MAX_PLANS]:
+        PLANS.pop(old, None)
 
 # Proposed single routes, kept only so they can be re-rendered as a printable
 # Work Order without the browser posting the whole route back. Capped, because
@@ -274,8 +320,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "src and dst are required"})
 
             try:
-                options = pathengine.resolve_route_options(
-                    src, dst, domain=domain, count=count, topology=TOPOLOGY)
+                if req.get("direct"):
+                    # "is there a single cable I can patch here" is a different
+                    # question from "how do I get there", and a six-hop answer
+                    # to it is wrong rather than merely long
+                    options = [pathengine.direct_route(TOPOLOGY, src, dst)]
+                else:
+                    options = pathengine.resolve_route_options(
+                        src, dst, domain=domain, count=count, topology=TOPOLOGY)
             except pathengine.RouteError as e:
                 return self._send(200, {"status": "failed", "reason": str(e)})
 
@@ -304,6 +356,7 @@ class Handler(BaseHTTPRequestHandler):
                 circuit_id = pathengine.next_circuit_id(TOPOLOGY)
                 circuit = pathengine.commit_route(TOPOLOGY, route, circuit_id)
                 pathengine.save_topology(TOPOLOGY)
+                _map_changed()
             work_order = workorder.render(route, circuit_id=circuit_id)
             return self._send(200, {"status": "ok", "circuit": circuit, "work_order": work_order})
 
@@ -420,7 +473,7 @@ class Handler(BaseHTTPRequestHandler):
         result["new_devices"] = new_devices
 
         plan_id = f"PLAN-{len(PLANS) + 1:04d}"
-        PLANS[plan_id] = result
+        _remember_plan(plan_id, result)
         # the routes themselves stay server-side; the browser gets the summary
         # it needs to render the table and decide whether to commit
         siting = result.get("siting")
@@ -473,34 +526,82 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @contextlib.contextmanager
     def _plan_state(self, plan, exclude_row=None):
-        """The live map with everything this plan intends applied, EXCEPT one
-        row. That is the state the excluded row was routed in, and the state
-        any alternative for it has to fit into — an alternative that collided
-        with a sibling row would be no alternative at all.
+        """The plan's working map with one row lifted out, for as long as you
+        hold it. That is the state the row was routed in, and the state any
+        alternative for it has to fit into — an alternative that collided with
+        a sibling row of the same sheet would be no alternative at all.
 
-        Rows already committed are in the live map already; only the pending
-        ones are replayed.
+        A context manager because the map is now shared and mutated rather
+        than copied: the row is released on the way in and put back on the way
+        out, under the plan's own lock so two requests cannot interleave.
         """
+        with plan.setdefault("_lock", threading.Lock()):
+            work = self._plan_base(plan)
+            cid = f"PLAN-{exclude_row:04d}" if exclude_row is not None else None
+            if cid and cid in (work.get("circuits") or {}):
+                pathengine.decommission_route(work, cid)
+            try:
+                yield work
+            finally:
+                # put back whatever the row holds NOW — _bulk_choose may have
+                # swapped its route while we were inside
+                row = next((r for r in plan["results"]
+                            if r["row"] == exclude_row), None)
+                if cid and row and row.get("status") == "ok" and row.get("route"):
+                    try:
+                        pathengine.commit_route(work, row["route"], cid)
+                    except (KeyError, pathengine.RouteError):
+                        # rather than leave a map that quietly disagrees with
+                        # the plan, throw it away and rebuild on next use
+                        plan.pop("_state", None)
+
+    def _plan_base(self, plan):
+        """This plan's map, with every pending row applied."""
+        # Built once per plan and kept with it. Every pending row is committed
+        # into it as PLAN-xxxx, so the map already looks the way the plan
+        # intends; a request that needs one row left out releases just that
+        # row and puts it back afterwards.
+        #
+        # This used to deep-copy the whole 32MB map on every call, half a
+        # second each, so opening a row or asking for another option paid it
+        # every single time. Releasing one circuit is a handful of dictionary
+        # edits — which only became possible once connections could be
+        # released at all.
+        #
+        # Dropped whenever the live map moves underneath it: an alternative
+        # computed against a stale map is worse than a slow one.
+        cached = plan.get("_state")
+        if cached is not None and cached["version"] == MAP_VERSION:
+            cached["seq"] = _next_state_seq()      # touched, so keep it longer
+            return cached["map"]
+
         with WRITE_LOCK:
-            work = copy.deepcopy(TOPOLOGY)
+            base = copy.deepcopy(TOPOLOGY)
 
         siting = plan.get("siting")
         if siting:
             specs = {d["serial"]: d for d in plan.get("new_devices", [])}
-            known = set(bulkplan.serials.index(work))
+            known = set(bulkplan.serials.index(base))
             for site in siting["placements"]:
                 if site["status"] == "ok" and site["serial"] not in known:
-                    bulkplan.materialise(work, specs[site["serial"]], site)
+                    bulkplan.materialise(base, specs[site["serial"]], site)
 
         for r in plan["results"]:
-            if r["row"] == exclude_row or r.get("status") != "ok" or not r.get("route"):
+            if r.get("status") != "ok" or not r.get("route"):
                 continue
             try:
-                pathengine.commit_route(work, r["route"], f"PLAN-{r['row']:04d}")
+                pathengine.commit_route(base, r["route"], f"PLAN-{r['row']:04d}")
             except (KeyError, pathengine.RouteError):
-                pass    # a sibling that no longer fits is that row's problem
-        return work
+                pass
+
+        plan["_state"] = {"version": MAP_VERSION, "map": base,
+                          "seq": _next_state_seq()}
+        _trim_plan_states(keep=plan)
+        # returned from the local, not re-read from the plan: a bug in trimming
+        # should never be able to turn this into a KeyError at the call site
+        return base
 
     def _decommission(self):
         """Release connections. One circuit, or every circuit on a device, a
@@ -541,6 +642,7 @@ class Handler(BaseHTTPRequestHandler):
                     refused.append({"circuit_id": cid, "reason": str(e)})
             if released:
                 pathengine.save_topology(TOPOLOGY)
+                _map_changed()
 
         # a plan whose circuits are gone must not still offer to reopen them
         for plan in PLANS.values():
@@ -582,6 +684,7 @@ class Handler(BaseHTTPRequestHandler):
             except pathengine.DecommissionError as e:
                 return self._send(409, {"error": str(e)})
             pathengine.save_topology(TOPOLOGY)
+            _map_changed()
         return self._send(200, {"status": "ok", **rec,
                                 "circuit": TOPOLOGY["circuits"][cid]})
 
@@ -603,6 +706,7 @@ class Handler(BaseHTTPRequestHandler):
             except (pathengine.RouteError, KeyError) as e:
                 return self._send(409, {"error": str(e)})
             pathengine.save_topology(TOPOLOGY)
+            _map_changed()
         return self._send(200, {"status": "ok", "circuit": circuit,
                                 "work_order": workorder.render(
                                     _route_of_circuit(cid), circuit_id=cid)})
@@ -683,16 +787,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"status": "ok", "row": row, "locked": True,
                                     "chosen": 0, "options": [chosen]})
 
-        work = self._plan_state(plan, exclude_row=row)
-        try:
-            options = pathengine.resolve_route_options(
-                chosen["src_port"], chosen["dst_port"], count=count, topology=work)
-        except pathengine.RouteError as e:
-            return self._send(200, {"status": "failed", "reason": str(e)})
+        with self._plan_state(plan, exclude_row=row) as work:
+            try:
+                options = pathengine.resolve_route_options(
+                    chosen["src_port"], chosen["dst_port"], count=count, topology=work)
+            except pathengine.RouteError as e:
+                return self._send(200, {"status": "failed", "reason": str(e)})
 
         # Which of these is the one the plan is currently holding? Compare the
-        # physical path, not object identity — these were computed just now on
-        # a fresh copy and share nothing with the stored route.
+        # physical path, not object identity — these were computed against the
+        # plan's own map and share nothing with the stored route.
         fingerprint = [(s["edge_id"], s["strand_index"]) for s in chosen["segments"]]
         current = next((i for i, o in enumerate(options)
                         if [(s["edge_id"], s["strand_index"]) for s in o["segments"]]
@@ -736,28 +840,33 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(409, {"error": f"row {row} is already installed as "
                                              f"{result.get('circuit_id')}"})
 
-        work = self._plan_state(plan, exclude_row=row)
-        try:
-            options = pathengine.resolve_route_options(
-                result["route"]["src_port"], result["route"]["dst_port"],
-                count=max(pick + 1, 2), topology=work)
-        except pathengine.RouteError as e:
-            return self._send(200, {"status": "failed", "reason": str(e)})
-        if not 0 <= pick < len(options):
-            return self._send(409, {"error": "that option is no longer available — "
-                                             "reopen the row"})
+        with self._plan_state(plan, exclude_row=row) as work:
+            try:
+                options = pathengine.resolve_route_options(
+                    result["route"]["src_port"], result["route"]["dst_port"],
+                    count=max(pick + 1, 2), topology=work)
+            except pathengine.RouteError as e:
+                return self._send(200, {"status": "failed", "reason": str(e)})
+            if not 0 <= pick < len(options):
+                return self._send(409, {"error": "that option is no longer available — "
+                                                 "reopen the row"})
 
-        route = options[pick]
-        # Prove it still fits before it becomes the plan: reserving it on the
-        # same state it was computed against is the difference between an
-        # option and a promise.
-        try:
-            pathengine.commit_route(work, route, f"PLAN-{row:04d}")
-        except (KeyError, pathengine.RouteError) as e:
-            return self._send(200, {"status": "failed", "reason": f"could not reserve: {e}"})
+            route = options[pick]
+            # Prove it still fits before it becomes the plan: reserving it on
+            # the same state it was computed against is the difference between
+            # an option and a promise. Released again straight away so the
+            # context manager can put back whichever route the row ends up
+            # holding, without it being committed twice.
+            try:
+                pathengine.commit_route(work, route, f"PLAN-{row:04d}")
+            except (KeyError, pathengine.RouteError) as e:
+                return self._send(200, {"status": "failed",
+                                        "reason": f"could not reserve: {e}"})
+            jump = bulkplan._jump_chain(work, route)
+            pathengine.decommission_route(work, f"PLAN-{row:04d}")
+            result["route"] = route
 
-        result["route"] = route
-        result["jump"] = bulkplan._jump_chain(work, route)
+        result["jump"] = jump
         result["hops"] = len(route["segments"])
         result["cable_type"] = route["cable_type"]
         result["domain"] = route["domain"]
@@ -809,6 +918,7 @@ class Handler(BaseHTTPRequestHandler):
                     r["circuit_id"] = committed_rows[r["row"]]
             if outcome["committed"]:
                 pathengine.save_topology(TOPOLOGY)
+                _map_changed()
         return self._send(200, {"status": "ok", **outcome})
 
     def log_message(self, fmt, *args):

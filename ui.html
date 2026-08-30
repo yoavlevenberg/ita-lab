@@ -372,6 +372,10 @@
             font-size:11.5px; color:var(--muted)}
   .rackhead span{flex:1}
   button.danger.sm{font-size:10.5px; padding:3px 9px}
+  label.tgl{display:flex; align-items:center; gap:6px; font-size:11.5px;
+            color:var(--muted); cursor:pointer; white-space:nowrap}
+  label.tgl input{accent-color:#1f6feb; margin:0}
+  label.tgl:hover span{color:var(--text)}
   .partial-note{border:1px solid #7a5a1e; background:#241d10; color:#ffd490;
                 border-radius:8px; padding:9px 11px; margin-bottom:10px;
                 font-size:11.5px; line-height:1.7}
@@ -458,6 +462,9 @@
     <option value="A">דומיין A (שדרה S)</option>
     <option value="B">דומיין B (שדרה N)</option>
   </select>
+  <label class="tgl" title="לחבר את שני הפורטים ישירות בקפיצה אחת — כבל גישור בתוך הארון, או גיד אחד בטראנק שמחבר את שני הארונות. אם אין כבל ישיר ביניהם, תקבל הודעה במקום מסלול ארוך.">
+    <input type="checkbox" id="directMode"><span>חיבור ישיר (קפיצה אחת)</span>
+  </label>
   <button class="primary" id="btnRoute">SHOW ROUTE</button>
   <button class="ghost" id="btnBulk">טעינת אקסל</button>
   <button class="ghost" id="btnClear">נקה</button>
@@ -1128,7 +1135,8 @@ $("btnMoreOptions").onclick = () => fetchRouteOptions(routeOptions.length + 1);
 function fetchRouteOptions(count){
   fetch("/api/route", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ src:routeSrc, dst:routeDst, domain:$("domainSel").value, count })
+    body: JSON.stringify({ src:routeSrc, dst:routeDst, domain:$("domainSel").value,
+                           count, direct: $("directMode").checked })
   }).then(r => r.json()).then(res => {
     if (res.status === "failed" || res.error){
       currentPath = []; currentSegIds = []; renderMap();
@@ -1151,11 +1159,18 @@ function showRouteOptions(options, requestedCount){
   focusOption(0);
 
   const forced = !!$("domainSel").value;
+  if (direct){
+    $("drawerTitle").innerHTML = options[0].intra_rack
+      ? `חיבור ישיר — כבל גישור בתוך הארון <span class="pill">ללא טראנק</span>`
+      : `חיבור ישיר — קפיצה אחת <span class="pill">${options[0].segments.length} מקטע</span>`;
+  } else
   $("drawerTitle").textContent = options.length > 1
     ? `${options.length} מסלולים מוצעים — לחיצה על "הצג במפה" מדגישה כל אחד בנפרד`
     : "מסלול מוצע" + (forced ? " (דומיין נכפה ידנית)" : "");
   $("drawerBody").innerHTML = options.map((route, i) => renderOptionCard(route, i)).join("");
-  $("btnMoreOptions").style.display = (!forced && options.length >= requestedCount) ? "" : "none";
+  const direct = options.length === 1 && options[0].direct;
+  $("btnMoreOptions").style.display =
+      (!forced && !direct && options.length >= requestedCount) ? "" : "none";
   $("btnMoreOptions").disabled = false;
   $("btnMoreOptions").textContent = "עוד אפשרות";
   openDrawer();

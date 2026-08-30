@@ -1082,6 +1082,40 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- a manual, single-jump link ----------
+    # The router answers "how do I get there", which for two cabinets with no
+    # cable between them is six hops across the site. Sometimes the question is
+    # "is there ONE cable I can patch here", and a six-hop answer to that is
+    # not a longer version of the right answer — it is a different one.
+    from pathengine import direct_route
+
+    in_one_rack = {}
+    for pid, p in T["ports"].items():
+        if p["rack"] == "A1-S05" and p["type"] == "fiber" and p["status"] == "free":
+            in_one_rack.setdefault(p["device"], pid)
+    panel, box = list(in_one_rack.values())[:2]
+    patch = direct_route(T, panel, box)
+    check("panel to device in one cabinet is a patch lead, consuming no trunk",
+          patch["segments"] == [] and patch["intra_rack"] and patch["direct"])
+
+    trunk = next(e for e in T["edges"] if "fiber" in e["cable_types"])
+    near_a = next(p for p, v in T["ports"].items()
+                  if v["rack"] == trunk["from"] and v["type"] == "fiber" and v["status"] == "free")
+    near_b = next(p for p, v in T["ports"].items()
+                  if v["rack"] == trunk["to"] and v["type"] == "fiber" and v["status"] == "free")
+    one = direct_route(T, near_a, near_b)
+    check("two cabinets with a cable between them give exactly one hop",
+          len(one["segments"]) == 1 and not one["transit_points"],
+          f"{len(one['segments'])} segments")
+
+    try:
+        direct_route(T, free_port(T, "A1-S05", "fiber"), free_port(T, "D5-N06", "fiber"))
+        check("cabinets with no direct cable are refused, not routed around",
+              False, "it produced a route")
+    except RouteError as e:
+        check("cabinets with no direct cable are refused, not routed around",
+              "directly" in str(e), str(e)[:60])
+
     # ---------- releasing a connection ----------
     # decommission_route claims to be the exact inverse of commit_route, and
     # "exact" is checkable: fingerprint the map, commit, release, compare. A
