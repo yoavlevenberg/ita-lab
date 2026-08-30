@@ -44,6 +44,11 @@ Endpoints
                                alternatives the row's plan
   POST /api/bulk/execute       {plan_id} -> commits every planned row, each
                                revalidated first; a stale row fails alone
+  POST /api/decommission       {circuit_id | port | plan_id | device | rack}
+                               -> releases connections: one, or every one on a
+                               device/rack, or a whole executed plan. Strands
+                               and ports go back only if that circuit really
+                               holds them
   GET  /api/workorder?...      printable Work Order (HTML) for one route
   GET  /api/sample?kind=...    a demand sheet (.xlsx) built against the live
                                map, so its ports are free right now
@@ -288,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/bulk/plan":
             return self._bulk_plan(url)
 
+        if url.path == "/api/decommission":
+            return self._decommission()
+
         if url.path == "/api/bulk/row":
             return self._bulk_row()
 
@@ -470,6 +478,96 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, pathengine.RouteError):
                 pass    # a sibling that no longer fits is that row's problem
         return work
+
+    def _decommission(self):
+        """Release connections. One circuit, or every circuit on a device, a
+        rack, or a whole executed plan.
+
+        The map used to be append-only, so a wrong execution could not be taken
+        back and the lab filled up with test circuits until routing failed.
+        """
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+
+        with WRITE_LOCK:
+            wanted = self._circuits_named_by(req)
+            if isinstance(wanted, dict):        # an error the helper built
+                return self._send(wanted.pop("code", 400), wanted)
+            if not wanted:
+                return self._send(404, {"error": "nothing to release — "
+                                                 "no matching connection"})
+
+            # "Are you sure?" with no detail is not a question. A dry run lets
+            # the browser name what is about to go before it asks.
+            if req.get("dry_run"):
+                return self._send(200, {"status": "ok", "would_release": [
+                    f"{cid}  {pathengine.describe_port(TOPOLOGY, circuits[cid]['a_port'])}"
+                    f"  ⇄  {pathengine.describe_port(TOPOLOGY, circuits[cid]['b_port'])}"
+                    for cid in wanted
+                    for circuits in [TOPOLOGY["circuits"]]]})
+
+            released, refused = [], []
+            for cid in wanted:
+                try:
+                    released.append(pathengine.decommission_route(
+                        TOPOLOGY, cid, force=bool(req.get("force"))))
+                except pathengine.DecommissionError as e:
+                    refused.append({"circuit_id": cid, "reason": str(e)})
+            if released:
+                pathengine.save_topology(TOPOLOGY)
+
+        # a plan whose circuits are gone must not still offer to reopen them
+        for plan in PLANS.values():
+            for r in plan.get("results", []):
+                if r.get("circuit_id") in {x["circuit_id"] for x in released}:
+                    r["status"] = "ok"
+                    r.pop("circuit_id", None)
+
+        return self._send(200, {"status": "ok", "released": released,
+                                "refused": refused,
+                                "freed_ports": sorted({p for r in released
+                                                       for p in r["ports"]})})
+
+    def _circuits_named_by(self, req):
+        """Which circuits a release request is asking about. One id, or every
+        circuit on a port's device, in a rack, or committed by a plan — the
+        difference between 'unplug this' and 'clear all of this'."""
+        circuits = TOPOLOGY.get("circuits") or {}
+
+        if req.get("circuit_id"):
+            cid = req["circuit_id"]
+            return [cid] if cid in circuits else {
+                "code": 404, "error": f"no circuit {cid} on the map"}
+
+        if req.get("port"):
+            p = TOPOLOGY["ports"].get(req["port"])
+            if p is None:
+                return {"code": 404, "error": f"no port {req['port']} on the map"}
+            if not p.get("circuit"):
+                return {"code": 409, "error": f"port {req['port']} is not patched"}
+            return [p["circuit"]]
+
+        if req.get("plan_id"):
+            plan = PLANS.get(req["plan_id"])
+            if not plan:
+                return {"code": 404, "error": "that plan is no longer available"}
+            return [r["circuit_id"] for r in plan["results"]
+                    if r.get("circuit_id") in circuits]
+
+        # everything on one device, or one rack — "remove all" at the scope the
+        # user is actually looking at
+        scope = req.get("device") or req.get("rack")
+        if scope:
+            key = "device" if req.get("device") else "rack"
+            here = {p["circuit"] for p in TOPOLOGY["ports"].values()
+                    if p.get(key) == scope and p.get("circuit")}
+            return sorted(c for c in here if c in circuits)
+
+        return {"code": 400, "error": "say what to release: circuit_id, port, "
+                                      "plan_id, device or rack"}
 
     def _bulk_row(self):
         """Full detail for one planned row, and alternatives for it — the same

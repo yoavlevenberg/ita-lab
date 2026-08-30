@@ -366,6 +366,15 @@
   table.bulk tr.open td{background:#1b2431}
   table.bulk tr.jumprow td{background:var(--panel2); padding:10px 12px}
   /* the per-row detail: the same card a single lookup shows, opened in place */
+  button.danger{border-color:#7d2b28; color:#ff9d97; background:#1d1416}
+  button.danger:hover{background:#2a1a1c; border-color:#a33a35}
+  .rackhead{display:flex; align-items:center; gap:10px; margin-bottom:8px;
+            font-size:11.5px; color:var(--muted)}
+  .rackhead span{flex:1}
+  button.danger.sm{font-size:10.5px; padding:3px 9px}
+  .rel-note{font-size:11.5px; margin-top:8px; line-height:1.7}
+  .rel-note .warn{color:#ffb84d}
+  .rel-note .good{color:var(--free)}
   .rowdetail{margin-top:12px; display:flex; flex-direction:column; gap:10px}
   .rowdetail .opt-card{background:var(--panel)}
   .rowdetail .opt-card.chosen{border-color:var(--free); box-shadow:0 0 0 1px var(--free) inset}
@@ -580,6 +589,7 @@
     </div>
     <div class="bf" id="bulkFooter" style="display:none">
       <span id="bulkFootInfo" style="flex:1;font-size:12px;color:var(--muted)"></span>
+      <button class="danger" id="btnBulkUndo" style="display:none">✂ בטל את הביצוע</button>
       <button class="ghost" id="btnBulkClear">נקה</button>
       <button id="btnBulkDownload">הורד סיכום</button>
       <button class="primary" id="btnBulkPlan">תכנן מסלולים</button>
@@ -879,8 +889,11 @@ function renderRack(){
   }
 
   $("rackPanel").innerHTML =
-    `<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px">
-       פוד ${meta.pod} · שדרה ${meta.row} · עמדה ${meta.position} · ${st.used}/${st.total} פורטים תפוסים
+    `<div class="rackhead">
+       <span>פוד ${meta.pod} · שדרה ${meta.row} · עמדה ${meta.position} ·
+         ${st.used}/${st.total} פורטים תפוסים</span>
+       ${st.used ? `<button class="danger sm" onclick="releaseAll('rack','${rid}')"
+            title="מנתק כל חיבור שנוגע במסד הזה">✂ נתק הכל במסד</button>` : ""}
      </div>
      <div class="elev">
        <div class="ugutter">${gut}</div>
@@ -1239,7 +1252,10 @@ function showExistingCircuit(cid){
         <div class="opt-actions">
           <button class="ghost" onclick="window.open('/api/workorder?circuit=${encodeURIComponent(c.id)}','_blank','noopener')">
             🖨 Work Order להדפסה</button>
+          <button class="danger" id="btnRelease" onclick="releaseCircuit('${c.id}')">
+            ✂ נתק את החיבור הזה</button>
         </div>
+        <div id="releaseNote" class="rel-note"></div>
       </div>
       <div>
         <div class="kv">
@@ -1692,6 +1708,9 @@ function renderBulk(){
   $("bulkFooter").style.display = "";
   $("btnBulkPlan").style.display = "none";
   $("btnBulkExecute").style.display = "";
+  // only offered once something was actually written — undoing a proposal is
+  // just clearing it, and the two must not look like the same button
+  $("btnBulkUndo").style.display = committed ? "" : "none";
   $("btnBulkDownload").style.display = "";
   $("btnBulkExecute").disabled = !anyPending;
   $("btnBulkExecute").textContent = anyPending
@@ -1883,6 +1902,10 @@ function toggleJump(row){
   renderBulk();
 }
 
+$("btnBulkUndo").onclick = () => {
+  if (bulkPlan) releaseAll("plan", bulkPlan.plan_id);
+};
+
 $("btnBulkExecute").onclick = () => {
   if (!bulkPlan) return;
   const btn = $("btnBulkExecute");
@@ -1928,6 +1951,126 @@ $("btnBulkExecute").onclick = () => {
 // A device the server just racked. Everything index() builds at boot has to be
 // extended by hand here — the alternative is refetching a 24MB map to learn
 // about one new switch.
+// Releasing is the one action here that destroys something, so it asks first
+// and says exactly what it is about to give back — how many fibres, how many
+// ports, and where. "Are you sure?" with no detail is not a question.
+function releaseCircuit(cid){
+  const c = T.circuits && T.circuits[cid];
+  const strands = c ? (c.strands || []).length : 0;
+  const ports = c ? 2 + (c.transit_ports || []).length : 0;
+  const where = c ? `${locate(c.a_port)}  ⇄  ${locate(c.b_port)}` : cid;
+  if (!confirm(`לנתק את ${cid}?
+
+${where}
+
+` +
+               `${strands} גידים ו-${ports} פורטים ישוחררו וייכתבו חזרה ל-topology.json.
+` +
+               `הפורטים יהיו פנויים מיד לחיבור חדש.`)) return;
+
+  const btn = $("btnRelease");
+  if (btn){ btn.disabled = true; btn.textContent = "מנתק…"; }
+  fetch("/api/decommission", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ circuit_id: cid })
+  }).then(r => r.json()).then(res => {
+    if (res.error || !(res.released || []).length){
+      if (btn){ btn.disabled = false; btn.textContent = "✂ נתק את החיבור הזה"; }
+      return alert("הניתוק נכשל: " + (res.error || (res.refused[0] || {}).reason));
+    }
+    releaseLocally(res.released[0]);
+    currentPath = []; currentSegIds = [];
+    renderStats(); renderMap();
+    if (sel.rack) renderRack();
+    if (sel.device) renderDevice();
+    const note = $("releaseNote");
+    if (note) note.innerHTML =
+      `<span class="good">✓ ${cid} נותק.</span> שוחררו ${res.released[0].strands.length} גידים ו-` +
+      `${res.released[0].ports.length} פורטים. הפורטים פנויים — אפשר לבחור אותם ולתכנן מסלול חדש.`;
+    if (btn){ btn.style.display = "none"; }
+  }).catch(e => {
+    if (btn){ btn.disabled = false; btn.textContent = "✂ נתק את החיבור הזה"; }
+    alert("שגיאה: " + e);
+  });
+}
+
+// The inverse of applyCircuitLocally: give the strands back to their trunks and
+// the ports back to the pool, so the page matches the map without refetching it.
+function releaseLocally(rec){
+  const c = T.circuits && T.circuits[rec.circuit_id];
+  for (const pid of rec.ports){
+    const p = T.ports[pid];
+    if (!p) continue;
+    if (p.status === "used"){
+      const rs = rackStats[p.rack]; if (rs){ rs.used--; rs.free++; }
+      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.used--; ps.free++; }
+    }
+    p.status = "free"; p.circuit = null; p.role = null; p.peer = null;
+  }
+  for (const s of (c ? c.strands || [] : [])){
+    const e = T.edges.find(e => e.id === s.edge_id);
+    const ct = e && e.cable_types[s.cable_type];
+    if (!ct || !ct.strands) continue;
+    if (ct.strands[String(s.strand_index)] === rec.circuit_id){
+      delete ct.strands[String(s.strand_index)];
+      ct.used = Object.keys(ct.strands).length;
+    }
+  }
+  if (T.circuits) delete T.circuits[rec.circuit_id];
+}
+
+// "Remove all" at whatever scope is on screen — a whole cabinet, or every row
+// a sheet just executed. Same guard as a single release: say what is about to
+// go, and count it, before doing it.
+function releaseAll(kind, value){
+  const body = kind === "plan" ? { plan_id: value } : { [kind]: value };
+  const what = kind === "rack" ? `מסד ${value}`
+             : kind === "device" ? `רכיב ${value}`
+             : "כל מה שהגיליון הזה ביצע";
+
+  fetch("/api/decommission", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ ...body, dry_run: true })
+  }).then(r => r.json()).then(pre => {
+    const n = (pre.would_release || []).length;
+    if (pre.error) return alert(pre.error);
+    if (!n) return alert("אין כאן חיבורים לנתק.");
+    if (!confirm(`לנתק ${n} ${n === 1 ? "חיבור" : "חיבורים"} — ${what}?
+
+` +
+                 pre.would_release.slice(0, 12).join("\n") +
+                 (n > 12 ? `
+… ועוד ${n - 12}` : "") +
+                 `
+
+הפורטים והגידים ישוחררו וייכתבו ל-topology.json.`)) return;
+
+    fetch("/api/decommission", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    }).then(r => r.json()).then(res => {
+      if (res.error) return alert("הניתוק נכשל: " + res.error);
+      (res.released || []).forEach(releaseLocally);
+      currentPath = []; currentSegIds = [];
+      renderStats(); renderMap();
+      if (sel.rack) renderRack();
+      if (sel.device) renderDevice();
+      if (kind === "plan" && bulkPlan){
+        const gone = new Set(res.released.map(r => r.circuit_id));
+        bulkPlan.results.forEach(r => {
+          if (gone.has(r.circuit_id)){ r.status = "ok"; delete r.circuit_id; }
+        });
+        rowDetail = {}; setStep(3); renderBulk();
+      }
+      const refused = (res.refused || []).length;
+      alert(`נותקו ${res.released.length} חיבורים.` +
+            (refused ? `
+${refused} סורבו — ראה קונסול.` : ""));
+      if (refused) console.warn("refused:", res.refused);
+    }).catch(e => alert("שגיאה: " + e));
+  }).catch(e => alert("שגיאה: " + e));
+}
+
 function applyDeviceLocally(inst){
   const d = inst.device;
   if (!d || T.devices[d.id]) return;          // idempotent: a re-click adds nothing

@@ -1071,6 +1071,98 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- releasing a connection ----------
+    # decommission_route claims to be the exact inverse of commit_route, and
+    # "exact" is checkable: fingerprint the map, commit, release, compare. A
+    # release that leaves one strand behind would show up as free capacity that
+    # is really carrying traffic, which is the kind of error nothing else
+    # notices until a technician is standing at the wrong cabinet.
+    import hashlib as _hashlib
+    import json as _json
+    from pathengine import decommission_route, DecommissionError, next_circuit_id
+
+    def _fingerprint(t):
+        return _hashlib.sha256(_json.dumps(t, sort_keys=True, default=str).encode()).hexdigest()
+
+    round_trips, checked = 0, 0
+    for a_rack, b_rack, media in (("A1-S05", "D5-N06", "fiber"),
+                                  ("A1-S03", "A3-S06", "copper"),
+                                  ("B3-S04", "B3-N07", "fiber")):
+        work = copy.deepcopy(T)
+        before = _fingerprint(work)
+        route = resolve_route_options(free_port(work, a_rack, media),
+                                      free_port(work, b_rack, media),
+                                      count=1, topology=work)[0]
+        cid = next_circuit_id(work)
+        pathengine_commit = __import__("pathengine").commit_route
+        pathengine_commit(work, route, cid)
+        checked += 1
+        if _fingerprint(work) == before:
+            continue                      # commit did nothing; not a round trip
+        decommission_route(work, cid)
+        round_trips += _fingerprint(work) == before
+    check("committing then releasing leaves the map byte-identical",
+          round_trips == checked, f"{round_trips} of {checked} round-tripped")
+
+    work = copy.deepcopy(T)
+    victim = sorted(work["circuits"])[500]
+    held = work["circuits"][victim]
+    rec = decommission_route(work, victim)
+    check("releasing an existing circuit frees its ports",
+          all(work["ports"][p]["status"] == "free" and not work["ports"][p]["circuit"]
+              for p in rec["ports"]), str(rec["ports"][:2]))
+    check("releasing gives every strand back to its trunk",
+          all(str(s["strand_index"]) not in
+              (next(e for e in work["edges"] if e["id"] == s["edge_id"])
+               ["cable_types"][s["cable_type"]].get("strands") or {})
+              for s in held["strands"]))
+    check("a released trunk's used count matches its remaining strands",
+          all(ct["used"] == len(ct.get("strands") or {})
+              for e in work["edges"] for ct in e["cable_types"].values()))
+    check("the circuit itself is gone", victim not in work["circuits"])
+
+    try:
+        decommission_route(work, victim)
+        check("releasing the same circuit twice is refused", False, "no error")
+    except DecommissionError:
+        check("releasing the same circuit twice is refused", True)
+
+    # The one that matters: a strand another circuit now holds must never be
+    # taken back, and a refusal must change nothing at all.
+    work = copy.deepcopy(T)
+    target = sorted(work["circuits"])[10]
+    s = work["circuits"][target]["strands"][0]
+    edge = next(e for e in work["edges"] if e["id"] == s["edge_id"])
+    edge["cable_types"][s["cable_type"]]["strands"][str(s["strand_index"])] = "CIR-OTHER"
+    guarded = _fingerprint(work)
+    try:
+        decommission_route(work, target)
+        check("refuses to take back a strand another circuit holds", False, "released it")
+    except DecommissionError:
+        check("refuses to take back a strand another circuit holds", True)
+    check("and a refusal leaves the map completely untouched",
+          _fingerprint(work) == guarded)
+    forced = decommission_route(work, target, force=True)
+    check("force still will not steal the other circuit's strand",
+          edge["cable_types"][s["cable_type"]]["strands"].get(str(s["strand_index"])) == "CIR-OTHER"
+          and bool(forced["conflicts"]))
+
+    # the whole point: a freed port can be patched somewhere else
+    work = copy.deepcopy(T)
+    ep = next(p for p in work["ports"].values()
+              if p["status"] == "used" and p["role"] == "endpoint")
+    old_peer = ep["peer"]
+    decommission_route(work, ep["circuit"])
+    check("a released port becomes free again", work["ports"][ep["id"]]["status"] == "free")
+    far = next(p for p in work["ports"].values()
+               if p["status"] == "free" and p["type"] == ep["type"]
+               and p["rack"] != ep["rack"] and p["id"] != old_peer)
+    try:
+        again = resolve_route_options(ep["id"], far["id"], count=1, topology=work)
+        check("and can be routed to a different destination", bool(again))
+    except RouteError as e:
+        check("and can be routed to a different destination", False, str(e))
+
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,
     # which is exactly what let this rule break twice while 172 checks passed.

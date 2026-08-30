@@ -517,6 +517,99 @@ def revalidate_route(topology, route):
                              "recompute the route.")
 
 
+class DecommissionError(Exception):
+    """The circuit cannot be released as recorded — usually because the map no
+    longer matches what it claims to hold."""
+
+
+def decommission_route(topology, circuit_id, force=False):
+    """Take a circuit out: give its strands back to the trunks, free its ports,
+    and forget it. The exact inverse of commit_route.
+
+    Until this existed the tool could only ever add. That is not what a room
+    does — cabling gets pulled — and it showed: the lab map only filled up, a
+    wrong execution could not be undone, and pointed at the real ITA a link
+    released THERE would have stayed occupied here forever.
+
+    Nothing is freed on the circuit's say-so alone. Every strand and every port
+    is checked to be held by THIS circuit before it is released, because the
+    damage from releasing someone else's fibre is silent: the map would show a
+    free strand that is carrying live traffic, and the next plan would hand it
+    to a technician. A disagreement raises instead, naming what it found, and
+    `force` is there for a genuinely corrupt record — it releases only the parts
+    that do agree and reports the rest.
+    """
+    circuit = (topology.get("circuits") or {}).get(circuit_id)
+    if not circuit:
+        raise DecommissionError(f"No circuit {circuit_id} on the map.")
+
+    edges = {e["id"]: e for e in topology["edges"]}
+    ports = topology["ports"]
+    conflicts, freed_strands, freed_ports = [], [], []
+
+    # ---- check everything BEFORE touching anything ----
+    for s in circuit.get("strands", []):
+        edge = edges.get(s["edge_id"])
+        if edge is None:
+            conflicts.append(f"trunk {s['edge_id']} is no longer on the map")
+            continue
+        ct = edge["cable_types"].get(s["cable_type"])
+        if ct is None:
+            conflicts.append(f"trunk {s['edge_id']} has no {s['cable_type']} any more")
+            continue
+        holder = (ct.get("strands") or {}).get(str(s["strand_index"]))
+        if holder is None:
+            conflicts.append(f"{s['edge_id']} {s['cable_type']} strand "
+                             f"#{s['strand_index']} is already free")
+        elif holder != circuit_id:
+            conflicts.append(f"{s['edge_id']} {s['cable_type']} strand "
+                             f"#{s['strand_index']} is held by {holder}, not {circuit_id}")
+
+    owned_ports = ([circuit["a_port"], circuit["b_port"]]
+                   + list(circuit.get("transit_ports") or []))
+    for pid in owned_ports:
+        p = ports.get(pid)
+        if p is None:
+            conflicts.append(f"port {pid} is no longer on the map")
+        elif p.get("circuit") != circuit_id:
+            conflicts.append(f"port {pid} is held by {p.get('circuit') or 'nobody'}, "
+                             f"not {circuit_id}")
+
+    if conflicts and not force:
+        raise DecommissionError(
+            f"{circuit_id} does not match the map, so nothing was released: "
+            + "; ".join(conflicts[:4])
+            + (f" (+{len(conflicts) - 4} more)" if len(conflicts) > 4 else ""))
+
+    # ---- release ----
+    for s in circuit.get("strands", []):
+        edge = edges.get(s["edge_id"])
+        ct = edge["cable_types"].get(s["cable_type"]) if edge else None
+        if ct is None:
+            continue
+        strands = ct.get("strands") or {}
+        if strands.get(str(s["strand_index"])) != circuit_id:
+            continue                      # someone else's; force must not steal it
+        del strands[str(s["strand_index"])]
+        ct["used"] = len(strands)
+        freed_strands.append(f"{s['edge_id']}#{s['strand_index']}")
+
+    for pid in owned_ports:
+        p = ports.get(pid)
+        if p is None or p.get("circuit") != circuit_id:
+            continue
+        p["status"] = "free"
+        p["circuit"] = None
+        p["role"] = None
+        p["peer"] = None
+        freed_ports.append(pid)
+
+    del topology["circuits"][circuit_id]
+    return {"circuit_id": circuit_id, "strands": freed_strands,
+            "ports": freed_ports, "conflicts": conflicts,
+            "a_port": circuit["a_port"], "b_port": circuit["b_port"]}
+
+
 def commit_route(topology, route, circuit_id):
     """Apply an approved route: consume the ports, charge the trunks, and
     record the circuit. In production this is where the ITA write-back goes."""
