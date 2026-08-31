@@ -36,6 +36,47 @@ WARN_PCT = 75
 FULL_PCT = 100
 
 
+def port_stats(topology):
+    """How many ports are free and used, per cabinet, per pod, and overall.
+
+    The browser used to work these out by walking all 120,256 ports, which is
+    why it needed all 120,256 ports. Computed here they are a few kilobytes,
+    and — more importantly — they are computed from the map the server is
+    actually routing against, so the counts on screen cannot drift away from
+    the ones the router sees.
+    """
+    racks, pods = {}, {}
+    used_total = 0
+    for p in topology["ports"].values():
+        r = racks.setdefault(p["rack"], {"free": 0, "used": 0, "total": 0})
+        r["total"] += 1
+        if p["status"] == "used":
+            r["used"] += 1
+            used_total += 1
+        else:
+            r["free"] += 1
+
+    for rid, r in racks.items():
+        pod = topology["racks"][rid]["pod"]
+        b = pods.setdefault(pod, {"free": 0, "used": 0, "total": 0})
+        b["free"] += r["free"]
+        b["used"] += r["used"]
+        b["total"] += r["total"]
+
+    return {
+        "racks": racks,
+        "pods": pods,
+        "totals": {
+            "racks": len(topology["racks"]),
+            "devices": len(topology["devices"]),
+            "ports": len(topology["ports"]),
+            "ports_used": used_total,
+            "ports_free": len(topology["ports"]) - used_total,
+            "circuits": len(topology.get("circuits") or {}),
+        },
+    }
+
+
 def classify(topology, edge):
     """What kind of trunk this is, from the cabinets it joins."""
     racks, pods = topology["racks"], topology["pods"]

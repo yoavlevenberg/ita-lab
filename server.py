@@ -60,6 +60,12 @@ Endpoints
                                serial, id, name or label — typo-tolerant
   GET  /api/capacity           what is filling up: trunk strands by kind and
                                the tightest individual trunks and cabinets
+  GET  /api/topology[?full=1]  the map WITHOUT its 120,256 ports (1.9MB rather
+                               than 26MB), plus ready-made port counts per
+                               cabinet and pod; ?full=1 for everything
+  GET  /api/rack?id=A1-S05     that cabinet's ports, fetched when it is opened
+  GET  /api/stats              the port counts alone — the single source of
+                               truth for the numbers the interface shows
 """
 
 import contextlib
@@ -192,11 +198,16 @@ def _route_of_circuit(circuit_id):
             "strand_port_from": s["from_port"], "strand_port_to": s["to_port"],
         })
 
+    # A truncated circuit has no far end; it stops at its open end. Reading one
+    # used to crash here, because every circuit was assumed to have both.
+    far = circuit.get("b_port") or circuit.get("open_end")
     return {
         "cable_type": ct_name, "domain": circuit["domain"],
-        "src_port": circuit["a_port"], "dst_port": circuit["b_port"],
+        "src_port": circuit["a_port"], "dst_port": far,
         "src_location": pathengine.describe_port(TOPOLOGY, circuit["a_port"]),
-        "dst_location": pathengine.describe_port(TOPOLOGY, circuit["b_port"]),
+        "dst_location": (pathengine.describe_port(TOPOLOGY, far) if far
+                         else "— אין קצה, המסלול קטום"),
+        "partial": bool(circuit.get("partial")),
         "hop_racks": circuit["hop_racks"], "segments": segments,
         "transit_points": [{"port": p, "rack": TOPOLOGY["ports"][p]["rack"],
                             "location": pathengine.describe_port(TOPOLOGY, p)}
@@ -252,7 +263,53 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, html, "text/html; charset=utf-8")
 
         if url.path == "/api/topology":
-            return self._send(200, TOPOLOGY)
+            # Ports are 23.3MB of the map's 32.5MB, and the browser looks at
+            # one cabinet's worth at a time. They are fetched per cabinet
+            # instead (/api/rack), and the counts the interface needs come
+            # ready-made — computed from the map the router itself uses, so
+            # what is on screen cannot drift from what the router sees.
+            #
+            # ?full=1 still returns everything, for anything that genuinely
+            # wants the whole map.
+            if parse_qs(url.query).get("full", ["0"])[0] in ("1", "true", "on"):
+                return self._send(200, TOPOLOGY)
+            slim = {k: v for k, v in TOPOLOGY.items()
+                    if k not in ("ports", "circuits")}
+            slim["stats"] = capacity.port_stats(TOPOLOGY)
+            slim["slim"] = True
+            return self._send(200, slim)
+
+        if url.path == "/api/stats":
+            # The one source of truth for the counts on screen. The browser
+            # used to add and subtract them itself after every commit and
+            # release, which is arithmetic that can only drift — and drift
+            # silently, since nothing compares it to anything.
+            return self._send(200, capacity.port_stats(TOPOLOGY))
+
+        if url.path == "/api/rack":
+            rid = parse_qs(url.query).get("id", [None])[0]
+            if rid not in TOPOLOGY["racks"]:
+                return self._send(404, {"error": f"no cabinet {rid} on the map"})
+            # Addressed through the cabinet's own devices rather than by
+            # sweeping the map: a port id is <device>:<index>, so this costs
+            # the ~190 ports the cabinet has instead of all 120,256.
+            ports = {}
+            for d in TOPOLOGY["devices"].values():
+                if d["rack"] != rid:
+                    continue
+                for i in range(1, d["fiber_ports"] + d["copper_ports"] + 1):
+                    p = TOPOLOGY["ports"].get(f"{d['id']}:{i}")
+                    if p is None:
+                        continue
+                    # A patched port's far end is almost always in a DIFFERENT
+                    # cabinet, and the page holds one cabinet at a time — so it
+                    # is described here rather than looked up there. Without
+                    # this the panel would fall back to printing a raw port id.
+                    if p.get("peer"):
+                        p = {**p, "peer_location":
+                             pathengine.describe_port(TOPOLOGY, p["peer"])}
+                    ports[p["id"]] = p
+            return self._send(200, {"rack": rid, "ports": ports})
 
         if url.path == "/api/zones":
             return self._send(200, {
@@ -314,6 +371,14 @@ class Handler(BaseHTTPRequestHandler):
             enriched["open_end_location"] = (
                 pathengine.describe_port(TOPOLOGY, circuit["open_end"])
                 if circuit.get("open_end") else None)
+            # Ready-to-draw stops, the same shape a planned row carries. The
+            # browser holds one cabinet's ports at a time and a circuit crosses
+            # several, so it cannot look these up for itself.
+            route = _route_of_circuit(cid)
+            enriched["jump"] = bulkplan._jump_chain(TOPOLOGY, route) if route else []
+            enriched["transit_locations"] = [
+                pathengine.describe_port(TOPOLOGY, p)
+                for p in circuit.get("transit_ports", [])]
             return self._send(200, enriched)
 
         return self._send(404, {"error": "not found"})
@@ -349,6 +414,9 @@ class Handler(BaseHTTPRequestHandler):
             for route in options:
                 route["work_order"] = workorder.render(route)
                 route["route_key"] = _cache_route(route)
+                # ready-to-draw stops: the browser holds one cabinet's ports at
+                # a time, and a route crosses several
+                route["jump"] = bulkplan._jump_chain(TOPOLOGY, route)
             return self._send(200, {"status": "ok", "options": options})
 
         if url.path == "/api/execute":

@@ -1082,6 +1082,64 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- the counts the interface is shown ----------
+    # The page no longer holds the map's 120,256 ports, so it cannot count them
+    # itself; it is told. Those numbers therefore have to be exactly what a
+    # full scan gives, at rest and after every kind of change — because a page
+    # showing counts that have drifted from the map the router uses is the one
+    # failure mode this whole change could introduce.
+    import capacity as _cap
+    import pathengine as _pe2
+
+    def _true_counts(t):
+        racks = {}
+        for p in t["ports"].values():
+            b = racks.setdefault(p["rack"], {"free": 0, "used": 0, "total": 0})
+            b["total"] += 1
+            b["used" if p["status"] == "used" else "free"] += 1
+        pods = {}
+        for rid, b in racks.items():
+            q = pods.setdefault(t["racks"][rid]["pod"], {"free": 0, "used": 0, "total": 0})
+            for k in ("free", "used", "total"):
+                q[k] += b[k]
+        return racks, pods
+
+    def _served(t):
+        s = _cap.port_stats(t)
+        return s["racks"], s["pods"]
+
+    check("served port counts equal a full scan, cabinet by cabinet",
+          _served(T) == _true_counts(T), "they differ")
+
+    work = copy.deepcopy(T)
+    stages = []
+    made = resolve_route_options(free_port(work, "A1-S05", "fiber"),
+                                 free_port(work, "D5-N06", "fiber"),
+                                 count=1, topology=work)[0]
+    cid_c = _pe2.next_circuit_id(work)
+    _pe2.commit_route(work, made, cid_c)
+    stages.append(("after committing a route", _served(work) == _true_counts(work)))
+    _pe2.truncate_route(work, cid_c)
+    stages.append(("after truncating it", _served(work) == _true_counts(work)))
+    far = next(p["id"] for p in work["ports"].values()
+               if p["status"] == "free" and p["type"] == "fiber"
+               and p["rack"] != work["ports"][work["circuits"][cid_c]["open_end"]]["rack"])
+    _pe2.extend_route(work, cid_c, far)
+    stages.append(("after extending it elsewhere", _served(work) == _true_counts(work)))
+    _pe2.decommission_route(work, cid_c)
+    stages.append(("after releasing it", _served(work) == _true_counts(work)))
+    for label, agreed in stages:
+        check(f"counts still equal a full scan {label}", agreed)
+
+    totals = _cap.port_stats(T)["totals"]
+    check("the totals are the map's own totals",
+          totals["ports"] == len(T["ports"])
+          and totals["ports_used"] == sum(1 for p in T["ports"].values() if p["status"] == "used")
+          and totals["ports_free"] == totals["ports"] - totals["ports_used"]
+          and totals["racks"] == len(T["racks"])
+          and totals["devices"] == len(T["devices"])
+          and totals["circuits"] == len(T["circuits"]))
+
     # ---------- what is about to run out ----------
     # A capacity report is only worth having if its numbers reconcile with the
     # map. A report that quietly disagrees is worse than none: it would be

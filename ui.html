@@ -736,6 +736,11 @@ Promise.all([
 ]).then(([t, z]) => {
   T = t;
   ZONES = z;
+  // The map arrives without its 120,256 ports — 23 of its 26 MB. A cabinet's
+  // ports are fetched when the cabinet is opened; circuits are fetched one at
+  // a time when one is looked at.
+  T.ports = T.ports || {};
+  T.circuits = T.circuits || {};
   index();
   renderZoneLegend();
   renderMap();
@@ -758,32 +763,61 @@ function renderZoneLegend(){
 function index(){
   for (const d of Object.values(T.devices)){
     (devicesByRack[d.rack] ||= []).push(d);
-    portsByDevice[d.id] = [];
+    portsByDevice[d.id] ||= [];
   }
   for (const r in devicesByRack) devicesByRack[r].sort((a,b) => b.u_start - a.u_start);
+  adoptStats(T.stats);
+}
 
-  for (const p of Object.values(T.ports)){
-    portsByDevice[p.device].push(p);
-    const s = (rackStats[p.rack] ||= {free:0, used:0, total:0});
-    s.total++; p.status === "used" ? s.used++ : s.free++;
-  }
-  for (const d in portsByDevice) portsByDevice[d].sort((a,b) => a.index - b.index);
+// Which cabinets' ports we have actually fetched.
+const loadedRacks = new Set();
 
-  for (const rid in rackStats){
-    const pod = T.racks[rid].pod, rs = rackStats[rid];
-    const s = (podStats[pod] ||= {free:0, used:0, total:0});
-    s.free += rs.free; s.used += rs.used; s.total += rs.total;
-  }
+// The counts come from the server, which computes them from the very map the
+// router uses. The page used to add and subtract them itself after every
+// commit and release — arithmetic that can only drift, and drift silently,
+// because nothing ever compared it to anything.
+function adoptStats(stats){
+  if (!stats) return;
+  rackStats = stats.racks || {};
+  podStats  = stats.pods  || {};
+  T.stats = stats;
+}
+
+// Re-read the counts after anything that changed the map. One small request
+// (~40KB) against an action that has just rewritten the map on disk.
+function refreshStats(){
+  return fetch("/api/stats").then(r => r.json()).then(s => {
+    adoptStats(s);
+    renderStats(); renderMap();
+    if (sel.rack) renderRack();
+  }).catch(() => {});
+}
+
+// A cabinet's ports, fetched once and kept. Everything that draws ports goes
+// through here first, so nothing can render a cabinet it has not loaded.
+function ensureRack(rid){
+  if (!rid || loadedRacks.has(rid)) return Promise.resolve();
+  return fetch("/api/rack?id=" + encodeURIComponent(rid))
+    .then(r => r.json())
+    .then(res => {
+      if (res.error) throw new Error(res.error);
+      for (const [pid, p] of Object.entries(res.ports)) T.ports[pid] = p;
+      for (const d of devicesByRack[rid] || []){
+        portsByDevice[d.id] = Object.values(res.ports)
+          .filter(p => p.device === d.id)
+          .sort((a, b) => a.index - b.index);
+      }
+      loadedRacks.add(rid);
+    });
 }
 
 function renderStats(){
-  const ports = Object.keys(T.ports).length;
-  const used = Object.values(T.ports).filter(p => p.status === "used").length;
+  const t = (T.stats && T.stats.totals) || {};
   const chips = [
-    [Object.keys(T.racks).length, "מסדים"],
-    [Object.keys(T.devices).length, "רכיבים"],
-    [`${ports} (${used} תפוסים)`, "פורטים"],
-    [Object.keys(T.circuits).length, "חיבורים קיימים"],
+    [t.racks ?? Object.keys(T.racks).length, "מסדים"],
+    [t.devices ?? Object.keys(T.devices).length, "רכיבים"],
+    [`${t.ports ?? 0} (${t.ports_used ?? 0} תפוסים)`, "פורטים"],
+    [t.circuits ?? 0, "חיבורים קיימים"],
   ];
   $("stats").innerHTML = chips.map(([v, l]) => `<span class="statchip"><b>${v}</b>${l}</span>`).join("");
 }
@@ -931,7 +965,14 @@ function backToOverview(){
 // ------------------------------------------------------- rack elevation ---
 function selectRack(rid){
   sel.rack = rid; sel.device = null;
-  renderMap(); renderRack();
+  // its ports are not in the page until they are asked for
+  ensureRack(rid).then(() => {
+    if (sel.rack !== rid) return;          // moved on while it was loading
+    renderMap(); renderRack();
+  }).catch(e => {
+    $("rackPanel").innerHTML = `<div class="err">${escapeHtml(String(e.message || e))}</div>`;
+  });
+  renderMap();
   $("devPanel").innerHTML = `<div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>`;
   $("devTitle").textContent = "פרטי רכיב ופורטים";
 }
@@ -1008,7 +1049,7 @@ function renderDevice(){
     for (const p of used){
       const target = p.role === "transit"
         ? `<span style="color:var(--path)">מעבר (Cross-connect) בתוך מסלול</span>`
-        : `<span class="mono">${p.peer ? locate(p.peer) : "—"}</span>`;
+        : `<span class="mono">${p.peer ? (p.peer_location || locate(p.peer)) : "—"}</span>`;
       html += `<tr data-cir="${p.circuit}" data-port="${p.id}">
                  <td class="mono">${p.index}</td><td>${target}</td>
                  <td class="mono" style="color:var(--muted)">${p.circuit}</td></tr>`;
@@ -1033,15 +1074,17 @@ function portGroup(title, ports){
     if (sel.focusPort === p.id) cls += " focus";
     const tip = p.status === "free"
       ? `${p.id} — פנוי (לחץ לבחירה)`
-      : `${p.id} — ${p.circuit}` + (p.peer ? ` → ${locate(p.peer)}` : " (מעבר)");
+      : `${p.id} — ${p.circuit}` + (p.peer ? ` → ${p.peer_location || locate(p.peer)}` : " (מעבר)");
     h += `<div class="p ${cls}" data-port="${p.id}" title="${tip}">${p.index}</div>`;
   }
   return h + `</div></div>`;
 }
 
 function locate(portId){
-  const p = T.ports[portId], d = T.devices[p.device];
-  return `${p.rack}-U${d.u_start}-P${p.index} (${d.name})`;
+  const p = T.ports[portId];
+  if (!p) return portId;          // a cabinet whose ports were never fetched
+  const d = T.devices[p.device];
+  return d ? `${p.rack}-U${d.u_start}-P${p.index} (${d.name})` : portId;
 }
 
 // ----------------------------------------------------------- searching ---
@@ -1352,7 +1395,7 @@ function renderOptionCard(route, i){
         <button class="ghost" onclick="focusOption(${i})">הצג במפה</button>
       </div>
       <h4 style="font-size:11px;color:var(--muted);margin:8px 0 6px;font-weight:600">מסלול הכבל — קפיצות בין מסדים</h4>
-      ${renderJumpChain(route.hop_racks, jumpPorts)}
+      ${route.jump ? drawJumps(route.jump) : renderJumpChain(route.hop_racks, jumpPorts)}
       <div class="checks">
         <span class="check">✓ סוג כבל תואם קצה-לקצה (${route.cable_type === "fiber" ? "סיב↔סיב" : "נחושת↔נחושת"})</span>
         <span class="check">✓ קיבולת פנויה אומתה בכל אחד מ-${route.segments.length} המקטעים</span>
@@ -1433,6 +1476,9 @@ function executeOption(i){
 function showExistingCircuit(cid){
   fetch("/api/circuit?id=" + encodeURIComponent(cid)).then(r => r.json()).then(c => {
     if (c.error) return drawerError(c.error);
+    // remembered so the release and truncate dialogs can say what they are
+    // about to undo, without needing the whole map in the page
+    (T.circuits ||= {})[c.id] = c;
     currentPath = c.hop_racks; currentSegIds = c.segment_ids;
     routeOptions = [];
     $("btnMoreOptions").style.display = "none";
@@ -1453,7 +1499,7 @@ function showExistingCircuit(cid){
             לחץ על פורט פנוי כדי לחבר אותו לשם — כל השאר יישמר.
           </div>` : ""}
         <h3 style="font-size:12px;color:var(--muted);margin:0 0 6px">מסלול הכבל — קפיצות בין מסדים</h3>
-        ${renderJumpChain(c.hop_racks, jumpPorts)}
+        ${c.jump ? drawJumps(c.jump) : renderJumpChain(c.hop_racks, jumpPorts)}
         <div class="opt-actions">
           <button class="ghost" onclick="window.open('/api/workorder?circuit=${encodeURIComponent(c.id)}','_blank','noopener')">
             🖨 Work Order להדפסה</button>
@@ -1486,7 +1532,7 @@ function showExistingCircuit(cid){
         }).join("") || c.segment_ids.map(s =>
             `<div class="mono" style="font-size:11.5px;margin:4px 0">${s}</div>`).join("")}
         ${c.transit_ports.length ? `<h3 style="font-size:12px;color:var(--muted);margin:14px 0 6px">פורטי גישור בדרך</h3>
-          ${c.transit_ports.map(p => `<div class="mono" style="font-size:11.5px;margin:3px 0">${locate(p)}</div>`).join("")}` : ""}
+          ${c.transit_ports.map((p, i) => `<div class="mono" style="font-size:11.5px;margin:3px 0">${escapeHtml((c.transit_locations || [])[i] || p)}</div>`).join("")}` : ""}
       </div>`;
     openDrawer();
   });
@@ -1505,11 +1551,11 @@ const closeDrawer = () => $("drawer").classList.remove("open");
 $("btnCloseDrawer").onclick = closeDrawer;
 
 // --------------------------------------------------------------- execute ---
-function bumpPortStats(portId){
-  const p = T.ports[portId];
-  const rs = rackStats[p.rack]; if (rs){ rs.free--; rs.used++; }
-  const pod = T.racks[p.rack].pod, ps = podStats[pod]; if (ps){ ps.free--; ps.used++; }
-}
+// Deliberately does nothing to the counters any more. They are re-read from
+// the server after every change (refreshStats), because a page that keeps its
+// own running totals is a page whose totals can quietly stop matching the map
+// the router is using — and that is the one thing that must never happen.
+function bumpPortStats(portId){}
 
 function applyExecutedOption(i, circuit, workOrderText){
   if (workOrderText) routeOptions[i].work_order = workOrderText;
@@ -1517,7 +1563,7 @@ function applyExecutedOption(i, circuit, workOrderText){
   applyCircuitLocally(circuit);
 
   sel.src = null; sel.dst = null; sel.focusPort = null;
-  refreshSlots(); renderStats(); renderMap();
+  refreshSlots(); refreshStats(); renderMap();
   if (sel.rack) renderRack();
   if (sel.device) renderDevice();
 
@@ -2244,7 +2290,7 @@ $("btnBulkExecute").onclick = () => {
     }
     rowDetail = {};        // proposals became history; refetch on next open
     setStep(4);
-    renderStats(); renderMap();
+    refreshStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();
     renderBulk();
@@ -2287,7 +2333,7 @@ function truncateCircuit(cid){
     }
     truncateLocally(res);
     openCircuit = cid;
-    renderStats(); renderMap();
+    refreshStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();
     showExistingCircuit(cid);
@@ -2311,10 +2357,6 @@ function truncateLocally(res){
   if (!c) return;
   const p = T.ports[res.freed_port];
   if (p){
-    if (p.status === "used"){
-      const rs = rackStats[p.rack]; if (rs){ rs.used--; rs.free++; }
-      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.used--; ps.free++; }
-    }
     p.status = "free"; p.circuit = null; p.role = null; p.peer = null;
   }
   const last = (c.strands || [])[c.strands.length - 1];
@@ -2348,7 +2390,7 @@ function extendCircuit(cid, dst){
     applyExtendLocally(res.circuit);
     openCircuit = null;
     sel.src = null; sel.dst = null;
-    refreshSlots(); renderStats(); renderMap();
+    refreshSlots(); refreshStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();
     showExistingCircuit(cid);
@@ -2359,10 +2401,6 @@ function applyExtendLocally(c){
   T.circuits[c.id] = c;
   const touch = (pid, role, peer) => {
     const p = T.ports[pid]; if (!p) return;
-    if (p.status !== "used"){
-      const rs = rackStats[p.rack]; if (rs){ rs.free--; rs.used++; }
-      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.free--; ps.used++; }
-    }
     p.status = "used"; p.circuit = c.id; p.role = role; p.peer = peer;
   };
   touch(c.a_port, "endpoint", c.b_port);
@@ -2406,7 +2444,7 @@ ${where}
     }
     releaseLocally(res.released[0]);
     currentPath = []; currentSegIds = [];
-    renderStats(); renderMap();
+    refreshStats(); renderMap();
     if (sel.rack) renderRack();
     if (sel.device) renderDevice();
     const note = $("releaseNote");
@@ -2427,10 +2465,6 @@ function releaseLocally(rec){
   for (const pid of rec.ports){
     const p = T.ports[pid];
     if (!p) continue;
-    if (p.status === "used"){
-      const rs = rackStats[p.rack]; if (rs){ rs.used--; rs.free++; }
-      const ps = podStats[T.racks[p.rack].pod]; if (ps){ ps.used--; ps.free++; }
-    }
     p.status = "free"; p.circuit = null; p.role = null; p.peer = null;
   }
   for (const s of (c ? c.strands || [] : [])){
@@ -2478,7 +2512,7 @@ function releaseAll(kind, value){
       if (res.error) return alert("הניתוק נכשל: " + res.error);
       (res.released || []).forEach(releaseLocally);
       currentPath = []; currentSegIds = [];
-      renderStats(); renderMap();
+      refreshStats(); renderMap();
       if (sel.rack) renderRack();
       if (sel.device) renderDevice();
       if (kind === "plan" && bulkPlan){
@@ -2505,15 +2539,9 @@ function applyDeviceLocally(inst){
   devicesByRack[d.rack].sort((a, b) => b.u_start - a.u_start);
 
   const list = (portsByDevice[d.id] ||= []);
-  const rs = (rackStats[d.rack] ||= {free:0, used:0, total:0});
-  const ps = (podStats[T.racks[d.rack].pod] ||= {free:0, used:0, total:0});
   for (const p of (inst.ports || [])){
     T.ports[p.id] = p;
     list.push(p);
-    rs.total++; ps.total++;
-    // ports arrive free; the cabling that follows moves them to used through
-    // applyCircuitLocally, so counting them as used here would double-count
-    p.status === "used" ? (rs.used++, ps.used++) : (rs.free++, ps.free++);
   }
   list.sort((a, b) => a.index - b.index);
 }
