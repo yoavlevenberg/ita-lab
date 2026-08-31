@@ -58,6 +58,8 @@ Endpoints
                                map, so its ports are free right now
   GET  /api/search?q=...       find a port, device, cabinet, pod or circuit by
                                serial, id, name or label — typo-tolerant
+  GET  /api/capacity           what is filling up: trunk strands by kind and
+                               the tightest individual trunks and cabinets
 """
 
 import contextlib
@@ -73,6 +75,7 @@ from urllib.parse import urlparse, parse_qs
 
 import assistant
 import bulkplan
+import capacity
 import make_sample_sheet
 import pathengine
 import placement
@@ -260,6 +263,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if url.path == "/api/sample":
             return self._sample(url)
+
+        if url.path == "/api/capacity":
+            return self._send(200, capacity.report(TOPOLOGY))
 
         if url.path == "/api/search":
             q = parse_qs(url.query)

@@ -272,6 +272,26 @@
     max-height:44vh; direction:ltr; margin:0; white-space:pre;
   }
   /* ---------- bulk (excel) panel ---------- */
+  #capOverlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.72); backdrop-filter:blur(3px);
+    display:none; align-items:center; justify-content:center; z-index:70; padding:24px;
+  }
+  #capOverlay.open{display:flex}
+  .capgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px}
+  .capcard{border:1px solid var(--border); border-radius:9px; padding:12px 14px;
+           background:var(--panel2)}
+  .capcard h3{margin:0 0 10px; font-size:12px; color:var(--muted); font-weight:600}
+  .caprow{margin-bottom:10px; font-size:11.5px}
+  .caprow .lbl{display:flex; justify-content:space-between; gap:10px; margin-bottom:3px}
+  .caprow .lbl b{font-weight:600}
+  .caprow .lbl span{color:var(--muted)}
+  table.cap{width:100%; border-collapse:collapse; font-size:11.5px}
+  table.cap th{text-align:right; color:var(--muted); font-weight:600; padding:5px 7px;
+               border-bottom:1px solid var(--border); font-size:10.5px; white-space:nowrap}
+  table.cap td{padding:5px 7px; border-bottom:1px solid #1b2027; white-space:nowrap}
+  table.cap tr.clickable{cursor:pointer}
+  table.cap tr.clickable:hover td{background:#1b2431}
+  table.cap td.bar{width:110px}
   #bulkOverlay{
     position:fixed; inset:0; background:rgba(2,5,10,.72); z-index:80;
     display:none; align-items:center; justify-content:center; padding:26px;
@@ -492,9 +512,21 @@
     <input type="checkbox" id="directMode"><span>חיבור ישיר (קפיצה אחת)</span>
   </label>
   <button class="primary" id="btnRoute">SHOW ROUTE</button>
+  <button class="ghost" id="btnCapacity">דוח קיבולת</button>
   <button class="ghost" id="btnBulk">טעינת אקסל</button>
   <button class="ghost" id="btnClear">נקה</button>
 </header>
+
+<div id="capOverlay">
+  <div class="bulkbox">
+    <div class="bh">
+      <h2>דוח קיבולת — מה עומד להיגמר</h2>
+      <span style="flex:1"></span>
+      <button class="ghost" id="btnCapClose">סגור</button>
+    </div>
+    <div class="bb" id="capBody"></div>
+  </div>
+</div>
 
 <div id="bulkOverlay">
   <div class="bulkbox">
@@ -1516,6 +1548,107 @@ let bulkPlan = null;
 
 const bulkOpen  = () => $("bulkOverlay").classList.add("open");
 const bulkClose = () => $("bulkOverlay").classList.remove("open");
+$("btnCapacity").onclick = () => {
+  $("capOverlay").classList.add("open");
+  $("capBody").innerHTML = `<div class="empty">קורא את המפה…</div>`;
+  fetch("/api/capacity").then(r => r.json()).then(renderCapacity)
+    .catch(e => $("capBody").innerHTML = `<div class="err">${escapeHtml(String(e))}</div>`);
+};
+$("btnCapClose").onclick = () => $("capOverlay").classList.remove("open");
+$("capOverlay").onclick = e => {
+  if (e.target === $("capOverlay")) $("capOverlay").classList.remove("open");
+};
+
+function capBar(pct){
+  return `<div class="bar"><i style="width:${Math.min(100, pct)}%;background:${heat(pct)}"></i></div>`;
+}
+
+function renderCapacity(r){
+  const t = r.totals;
+  const media = Object.entries(r.by_media);
+
+  const trunkRow = x => `
+    <tr class="clickable" onclick="showTrunk('${x.from}','${x.to}')">
+      <td class="mono">${escapeHtml(x.id)}</td>
+      <td>${x.media === "fiber" ? "סיב" : "נחושת"}</td>
+      <td style="color:var(--muted)">${escapeHtml(x.kind_he)}</td>
+      <td class="mono">${x.used}/${x.capacity}</td>
+      <td class="bar">${capBar(x.pct)}</td>
+      <td class="mono" style="color:${x.remaining === 0 ? "#ff9d97"
+                                    : x.remaining <= 3 ? "#ffb84d" : "var(--muted)"}">
+        ${x.remaining} פנויים</td>
+    </tr>`;
+
+  $("capBody").innerHTML = `
+    <div class="sumrow">
+      <span class="sumchip">טראנקים <b>${t.trunks}</b></span>
+      <span class="sumchip">גידים <b>${t.used}</b> / ${t.capacity}</span>
+      <span class="sumchip ${t.full ? "bad" : "good"}">מלאים <b>${t.full}</b></span>
+      <span class="sumchip ${t.warn ? "bad" : "good"}">מעל ${r.warn_pct}% <b>${t.warn}</b></span>
+      <span class="sumchip">חיבורים <b>${t.circuits}</b></span>
+      <span class="sumchip">פורטים פנויים <b>${t.ports_free}</b></span>
+    </div>
+
+    <div class="capgrid" style="margin-bottom:14px">
+      <div class="capcard">
+        <h3>לפי סוג טראנק — איפה זה כואב</h3>
+        ${r.by_kind.map(b => `
+          <div class="caprow">
+            <div class="lbl"><b>${escapeHtml(b.kind_he)}</b>
+              <span>${b.used}/${b.capacity} · ${b.pct}%${b.full ? ` · ${b.full} מלאים` : ""}</span></div>
+            ${capBar(b.pct)}
+          </div>`).join("")}
+        <div style="font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.7">
+          עמוד שדרה בין חדרים הוא צוואר הבקבוק היחיד לכל תעבורה בין החדרים —
+          שם 90% היא בעיה של כל האתר, ואילו אפלינק של מסד בודד ב-90% היא בעיה של מסד אחד.
+        </div>
+      </div>
+      <div class="capcard">
+        <h3>לפי מדיה</h3>
+        ${media.map(([m, b]) => `
+          <div class="caprow">
+            <div class="lbl"><b>${m === "fiber" ? "סיב" : "נחושת"}</b>
+              <span>${b.used}/${b.capacity} · ${b.pct}% · ${b.remaining} פנויים</span></div>
+            ${capBar(b.pct)}
+          </div>`).join("")}
+      </div>
+      <div class="capcard">
+        <h3>המסדים העמוסים ביותר בפורטים</h3>
+        <table class="cap"><tbody>
+          ${r.tight_racks.slice(0, 8).map(x => `
+            <tr class="clickable" onclick="gotoRack('${x.rack}')">
+              <td class="mono">${x.rack}</td>
+              <td class="bar">${capBar(x.pct)}</td>
+              <td class="mono" style="color:var(--muted)">${x.used}/${x.total}</td>
+            </tr>`).join("")}
+        </tbody></table>
+      </div>
+    </div>
+
+    <h3 style="font-size:12px;color:var(--muted);margin:0 0 8px">
+      ${t.full ? `<span style="color:#ff9d97">${t.full} טראנקים מלאים לגמרי</span> · ` : ""}
+      הטראנקים הקרובים ביותר להיגמר — לחיצה מדגישה במפה</h3>
+    <table class="cap">
+      <thead><tr><th>טראנק</th><th>מדיה</th><th>סוג</th><th>תפוסה</th><th></th><th>נותרו</th></tr></thead>
+      <tbody>${(r.full.concat(r.tightest.filter(x => x.remaining > 0))).slice(0, 25).map(trunkRow).join("")}</tbody>
+    </table>`;
+}
+
+// Highlight a trunk on the farm map behind the report.
+function showTrunk(a, b){
+  currentPath = [a, b];
+  currentSegIds = [];
+  $("capOverlay").classList.remove("open");
+  if (T.racks[a]) selectPod(T.racks[a].pod);
+  renderMap();
+}
+
+function gotoRack(rid){
+  $("capOverlay").classList.remove("open");
+  selectPod(T.racks[rid].pod);
+  selectRack(rid);
+}
+
 $("btnBulk").onclick = bulkOpen;
 $("btnBulkClose").onclick = bulkClose;
 $("bulkOverlay").onclick = e => { if (e.target === $("bulkOverlay")) bulkClose(); };

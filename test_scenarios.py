@@ -1082,6 +1082,71 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- what is about to run out ----------
+    # A capacity report is only worth having if its numbers reconcile with the
+    # map. A report that quietly disagrees is worse than none: it would be
+    # believed, and it is exactly the thing you consult before planning.
+    import capacity as cap
+    import pathengine as _pe
+
+    rep = cap.report(T)
+    tot = rep["totals"]
+
+    true_cap = sum(ct["capacity"] for e in T["edges"] for ct in e["cable_types"].values())
+    true_used = sum(len(ct.get("strands") or {})
+                    for e in T["edges"] for ct in e["cable_types"].values())
+    check("total strand capacity matches the trunks themselves",
+          tot["capacity"] == true_cap, f"{tot['capacity']} vs {true_cap}")
+    check("total strands in use matches the trunks themselves",
+          tot["used"] == true_used, f"{tot['used']} vs {true_used}")
+    check("used plus remaining is the whole capacity",
+          tot["used"] + tot["remaining"] == tot["capacity"])
+    check("the per-media totals add back up to the whole",
+          sum(b["capacity"] for b in rep["by_media"].values()) == tot["capacity"]
+          and sum(b["used"] for b in rep["by_media"].values()) == tot["used"])
+    check("the per-kind totals add back up to the whole",
+          sum(b["capacity"] for b in rep["by_kind"]) == tot["capacity"]
+          and sum(b["used"] for b in rep["by_kind"]) == tot["used"])
+    check("port totals match the map's ports",
+          tot["ports_total"] == len(T["ports"])
+          and tot["ports_used"] == sum(1 for p in T["ports"].values() if p["status"] == "used"))
+
+    check("the tightest list really is the tightest, in order",
+          all(a["pct"] >= b["pct"] for a, b in zip(rep["tightest"], rep["tightest"][1:])),
+          str([x["pct"] for x in rep["tightest"][:4]]))
+    check("nothing is listed as full unless it has zero left",
+          all(x["remaining"] == 0 for x in rep["full"]))
+    check("the count of full trunks matches the map",
+          tot["full"] == sum(1 for e in T["edges"] for ct in e["cable_types"].values()
+                             if ct["capacity"] and len(ct.get("strands") or {}) >= ct["capacity"]))
+
+    # The classification is what makes the report actionable — a cross-room
+    # backbone at 90% is a site-wide problem, one cabinet's uplink at 90% is not.
+    kinds = {b["kind"] for b in rep["by_kind"]}
+    check("trunks are classified into the kinds this layout actually has",
+          {"rack_to_eor", "eor_to_mda", "backbone_room", "backbone_cross"} <= kinds,
+          str(sorted(kinds)))
+    cross = next(b for b in rep["by_kind"] if b["kind"] == "backbone_cross")
+    check("there are exactly two cross-room backbones, one per domain",
+          cross["trunks"] == 2, str(cross["trunks"]))
+    check("every classified trunk is accounted for exactly once",
+          sum(b["trunks"] for b in rep["by_kind"]) == tot["trunks"])
+
+    # and it must track reality as the map changes
+    work = copy.deepcopy(T)
+    before = cap.report(work)["totals"]["used"]
+    made = resolve_route_options(free_port(work, "A1-S05", "fiber"),
+                                 free_port(work, "D5-N06", "fiber"),
+                                 count=1, topology=work)[0]
+    cid = _pe.next_circuit_id(work)
+    _pe.commit_route(work, made, cid)
+    after = cap.report(work)["totals"]["used"]
+    check("committing a route shows up in the report",
+          after == before + len(made["segments"]), f"{before} -> {after}")
+    _pe.decommission_route(work, cid)
+    check("and releasing it shows up too",
+          cap.report(work)["totals"]["used"] == before)
+
     # ---------- finding one thing among 120,256 ----------
     # Whoever is searching already holds a string; they should not have to know
     # which KIND of string it is. Every form the rest of the tool accepts has
