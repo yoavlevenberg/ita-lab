@@ -1082,6 +1082,94 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- the storage seam ----------
+    # This is what the ITA integration replaces, so it has to be exactly one
+    # thing, and planning must never come through it: a plan routes a whole
+    # sheet against a private copy, and those commits are a simulation. If they
+    # reached the store, a preview would patch a live data centre.
+    import pathlib as _pl
+    import store as storage
+    import tempfile as _tempfile
+    import pathengine as _pe2
+
+    class SpyStore(storage.JsonFileStore):
+        """Records what the world outside would have been asked to do."""
+        def __init__(self, path):
+            super().__init__(path)
+            self.calls = []
+
+        def commit_route(self, t, route, cid):
+            self.calls.append(("commit", cid)); return super().commit_route(t, route, cid)
+
+        def release_route(self, t, cid, force=False):
+            self.calls.append(("release", cid)); return super().release_route(t, cid, force=force)
+
+        def place_device(self, t, spec, site):
+            self.calls.append(("device", spec["serial"])); return super().place_device(t, spec, site)
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        path = _pl.Path(tmp) / "map.json"
+        work = copy.deepcopy(T)
+        _pe2.save_topology(work, path)
+        spy = SpyStore(path)
+
+        check("the store reads the map back exactly as written",
+              spy.load()["meta"] == work["meta"]
+              and len(spy.load()["ports"]) == len(work["ports"]))
+
+        # planning a whole sheet must not touch the store at all
+        # several rows, so "written once" is a claim with teeth
+        srcs = [pid for pid, q in work["ports"].items()
+                if q["rack"] == "A1-S05" and q["type"] == "fiber" and q["status"] == "free"][:4]
+        dsts = [pid for pid, q in work["ports"].items()
+                if q["rack"] == "D5-N06" and q["type"] == "fiber" and q["status"] == "free"][:4]
+        demands = bulkplan.demands_from_rows([
+            {"SRC_PORT": a, "DST_PORT": b, xlsxreader.ROW_KEY: i}
+            for i, (a, b) in enumerate(zip(srcs, dsts), start=2)])
+        bulkplan.plan(work, demands, {"group_adjacent": True})
+        check("planning a sheet never reaches the store", not spy.calls, str(spy.calls))
+
+        # executing it must
+        live = spy.load()
+        result = bulkplan.plan(live, demands, {"group_adjacent": True})
+        with spy.batch(live):
+            outcome = bulkplan.execute(live, result["results"], store=spy)
+        check("executing it does reach the store, once per circuit",
+              [k for k, _ in spy.calls] == ["commit"] * len(outcome["committed"]),
+              str(spy.calls))
+        check("and the map on disk now holds those circuits",
+              all(c["circuit"]["id"] in _pe2.load_topology(path)["circuits"]
+                  for c in outcome["committed"]))
+
+        # a batch writes once, however many changes it contains
+        writes = []
+        real_save = _pe2.save_topology
+        try:
+            _pe2.save_topology = lambda t, p=None: writes.append(1)
+            with spy.batch(live):
+                for c in outcome["committed"]:
+                    spy.release_route(live, c["circuit"]["id"])
+            check("a batch of %d releases writes the map once" % len(outcome["committed"]),
+                  len(writes) == 1, f"{len(writes)} writes")
+        finally:
+            _pe2.save_topology = real_save
+
+    # the write itself must be atomic — a crash must not be able to leave a
+    # half-written map, which is the whole reason for the temp-file dance
+    with _tempfile.TemporaryDirectory() as tmp:
+        p = _pl.Path(tmp) / "m.json"
+        _pe2.save_topology({"a": 1}, p)
+        before = p.read_text(encoding="utf-8")
+        broken = {"b": {1, 2}}          # a set cannot be serialised
+        try:
+            _pe2.save_topology(broken, p)
+        except TypeError:
+            pass
+        check("a failed write leaves the previous map intact",
+              p.read_text(encoding="utf-8") == before)
+        check("and leaves no temp file behind",
+              not (_pl.Path(tmp) / "m.json.tmp").exists())
+
     # ---------- the counts the interface is shown ----------
     # The page no longer holds the map's 120,256 ports, so it cannot count them
     # itself; it is told. Those numbers therefore have to be exactly what a
@@ -1089,7 +1177,6 @@ def main():
     # showing counts that have drifted from the map the router uses is the one
     # failure mode this whole change could introduce.
     import capacity as _cap
-    import pathengine as _pe2
 
     def _true_counts(t):
         racks = {}

@@ -33,6 +33,7 @@ the constraint logic below stays exactly as it is.
 """
 
 import json
+import os
 from pathlib import Path
 
 import networkx as nx
@@ -71,8 +72,28 @@ def load_topology(path=TOPOLOGY_PATH):
 
 
 def save_topology(topology, path=TOPOLOGY_PATH):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(topology, indent=1, ensure_ascii=False), encoding="utf-8")
+    """Write the map, atomically.
+
+    write_text() truncates the file and then writes 32MB into it, which leaves
+    roughly half a second on every commit where a crash, a full disk, or a
+    closed window would leave topology.json cut in half — the whole map gone,
+    to save one circuit. Writing a temporary file and renaming it means the
+    real file is either the old map or the new one, never a partial one:
+    os.replace is atomic on both POSIX and Windows.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    # Serialised whole and written once. json.dump() streams into the file in
+    # small pieces and costs four times as much for a map this size; the string
+    # form keeps the write as cheap as the unsafe version it replaces, so
+    # safety here costs nothing.
+    blob = json.dumps(topology, indent=1, ensure_ascii=False)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(blob)
+        fh.flush()
+        os.fsync(fh.fileno())      # on the disk, not sitting in a buffer
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------

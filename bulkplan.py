@@ -1256,7 +1256,7 @@ def _summary(results):
 # executing
 # --------------------------------------------------------------------------
 
-def execute_devices(topology, siting, new_devices):
+def execute_devices(topology, siting, new_devices, store=None):
     """Create the sited devices on the LIVE map, before their cabling is
     committed. Idempotent by serial: a plan committed twice does not rack the
     same box a second time."""
@@ -1284,7 +1284,11 @@ def execute_devices(topology, siting, new_devices):
                                       "was taken since the plan was made"})
             continue
         spec = specs[site["serial"]]
-        dev_id = materialise(topology, spec, site)
+        # `store` is how the change reaches the world outside this process —
+        # a file today, ITA later. Without one this is a plain in-memory
+        # change, which is what the planner's working copies want.
+        dev_id = (store.place_device(topology, spec, site) if store
+                  else materialise(topology, spec, site))
         # Ship the device record and its ports, not just where the box went.
         # Whoever asked for this execution is holding a copy of the map that
         # predates the device, and the cabling committed a moment later
@@ -1299,7 +1303,7 @@ def execute_devices(topology, siting, new_devices):
     return {"installed": installed, "skipped": skipped}
 
 
-def execute(topology, results):
+def execute(topology, results, store=None):
     """Commit an approved plan to the live topology, in the same order it was
     planned. Each route is revalidated first, so anything consumed since the
     plan was made is reported instead of quietly overwriting someone's work.
@@ -1318,6 +1322,7 @@ def execute(topology, results):
             failed.append({"row": r["row"], "reason": str(e)})
             continue
         cid = pathengine.next_circuit_id(topology)
-        circuit = pathengine.commit_route(topology, route, cid)
+        circuit = (store.commit_route(topology, route, cid) if store
+                   else pathengine.commit_route(topology, route, cid))
         committed.append({"row": r["row"], "circuit": circuit})
     return {"committed": committed, "failed": failed}

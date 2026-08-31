@@ -86,6 +86,7 @@ import make_sample_sheet
 import pathengine
 import placement
 import search as sitesearch
+import store as storage
 import wo_html
 import workorder
 import xlsxreader
@@ -95,7 +96,11 @@ HERE = Path(__file__).parent
 PORT = 8800
 MAX_UPLOAD = 8 * 1024 * 1024        # a demand sheet is kilobytes; refuse anything wild
 
-TOPOLOGY = pathengine.load_topology()
+# Where the map comes from and where changes go back to. Swapping this one
+# line for open_store("ita", client=...) is the intended shape of the
+# integration — see store.py.
+STORE = storage.open_store("json")
+TOPOLOGY = STORE.load()
 
 # ThreadingHTTPServer runs every request in its own thread, and committing is a
 # read-modify-write across the shared topology: pick the next circuit id, take
@@ -437,8 +442,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(409, {"error": str(e)})
 
                 circuit_id = pathengine.next_circuit_id(TOPOLOGY)
-                circuit = pathengine.commit_route(TOPOLOGY, route, circuit_id)
-                pathengine.save_topology(TOPOLOGY)
+                circuit = STORE.commit_route(TOPOLOGY, route, circuit_id)
                 _map_changed()
             work_order = workorder.render(route, circuit_id=circuit_id)
             return self._send(200, {"status": "ok", "circuit": circuit, "work_order": work_order})
@@ -717,14 +721,14 @@ class Handler(BaseHTTPRequestHandler):
                     for circuits in [TOPOLOGY["circuits"]]]})
 
             released, refused = [], []
-            for cid in wanted:
-                try:
-                    released.append(pathengine.decommission_route(
-                        TOPOLOGY, cid, force=bool(req.get("force"))))
-                except pathengine.DecommissionError as e:
-                    refused.append({"circuit_id": cid, "reason": str(e)})
+            with STORE.batch(TOPOLOGY):
+                for cid in wanted:
+                    try:
+                        released.append(STORE.release_route(
+                            TOPOLOGY, cid, force=bool(req.get("force"))))
+                    except pathengine.DecommissionError as e:
+                        refused.append({"circuit_id": cid, "reason": str(e)})
             if released:
-                pathengine.save_topology(TOPOLOGY)
                 _map_changed()
 
         # a plan whose circuits are gone must not still offer to reopen them
@@ -763,10 +767,9 @@ class Handler(BaseHTTPRequestHandler):
 
         with WRITE_LOCK:
             try:
-                rec = pathengine.truncate_route(TOPOLOGY, cid)
+                rec = STORE.truncate_route(TOPOLOGY, cid)
             except pathengine.DecommissionError as e:
                 return self._send(409, {"error": str(e)})
-            pathengine.save_topology(TOPOLOGY)
             _map_changed()
         return self._send(200, {"status": "ok", **rec,
                                 "circuit": TOPOLOGY["circuits"][cid]})
@@ -785,10 +788,9 @@ class Handler(BaseHTTPRequestHandler):
 
         with WRITE_LOCK:
             try:
-                circuit = pathengine.extend_route(TOPOLOGY, cid, dst)
+                circuit = STORE.extend_route(TOPOLOGY, cid, dst)
             except (pathengine.RouteError, KeyError) as e:
                 return self._send(409, {"error": str(e)})
-            pathengine.save_topology(TOPOLOGY)
             _map_changed()
         return self._send(200, {"status": "ok", "circuit": circuit,
                                 "work_order": workorder.render(
@@ -985,10 +987,16 @@ class Handler(BaseHTTPRequestHandler):
                                                  f"({done} row(s) already committed)."})
 
             # rack the new kit before cabling it — the routes reference ports
-            # that only exist once the device does
-            racked = bulkplan.execute_devices(TOPOLOGY, plan.get("siting"),
-                                              plan.get("new_devices", []))
-            outcome = bulkplan.execute(TOPOLOGY, plan["results"])
+            # that only exist once the device does.
+            #
+            # One batch: a file store rewrites the map once at the end instead
+            # of once per row, and an API store still makes a call per device
+            # and per circuit, because that is what an API takes.
+            with STORE.batch(TOPOLOGY):
+                racked = bulkplan.execute_devices(TOPOLOGY, plan.get("siting"),
+                                                  plan.get("new_devices", []),
+                                                  store=STORE)
+                outcome = bulkplan.execute(TOPOLOGY, plan["results"], store=STORE)
             outcome["devices"] = racked
             # mark before releasing the lock, so a second click on the same plan
             # cannot slip in and commit the same rows twice
@@ -999,9 +1007,8 @@ class Handler(BaseHTTPRequestHandler):
                     # remember which circuit it became: reopening the row later
                     # must show what was installed, not a proposal
                     r["circuit_id"] = committed_rows[r["row"]]
-            if outcome["committed"]:
-                pathengine.save_topology(TOPOLOGY)
-                _map_changed()
+            if outcome["committed"] or racked["installed"]:
+                _map_changed()      # the batch above already wrote it back
         return self._send(200, {"status": "ok", **outcome})
 
     def log_message(self, fmt, *args):
