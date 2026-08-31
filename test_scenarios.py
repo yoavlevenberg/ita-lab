@@ -1082,6 +1082,59 @@ def main():
           len(patch["jump"]) == 2 and patch["jump"][0]["rack"] == patch["jump"][1]["rack"],
           str(patch["jump"]))
 
+    # ---------- finding one thing among 120,256 ----------
+    # Whoever is searching already holds a string; they should not have to know
+    # which KIND of string it is. Every form the rest of the tool accepts has
+    # to work here too, or the search box becomes another thing to get right.
+    import search as sitesearch
+
+    a_panel = next(d for d in T["devices"].values()
+                   if d["name"] == "FIB-PP-01" and d["rack"] == "A1-S05")
+    a_port = f"{a_panel['id']}:2"
+
+    def first(q, kind=None):
+        hits = sitesearch.search(T, q)["results"]
+        return next((h for h in hits if kind is None or h["kind"] == kind), None)
+
+    for label, query, kind, want in (
+            ("a serial finds its device", a_panel["serial"], "device", a_panel["id"]),
+            ("serial:port finds that socket", f"{a_panel['serial']}:2", "port", a_port),
+            ("a port id finds the port", a_port, "port", a_port),
+            ("a device id finds the device", a_panel["id"], "device", a_panel["id"]),
+            ("a cabinet id finds the cabinet", "A1-S05", "rack", "A1-S05"),
+            ("a pod id finds the pod", "A1", "pod", "A1"),
+            ("a circuit id finds the circuit", "CIR-0007", "circuit", "CIR-0007")):
+        hit = first(query, kind)
+        check(label, hit is not None and hit["id"] == want,
+              f"{query!r} -> {hit['id'] if hit else None}")
+
+    check("a cabinet outranks the devices inside it",
+          sitesearch.search(T, "A1-S05")["results"][0]["kind"] == "rack",
+          sitesearch.search(T, "A1-S05")["results"][0]["kind"])
+    check("a device name finds every cabinet holding one",
+          len({h["rack"] for h in sitesearch.search(T, "TOR-SW-01", limit=25)["results"]}) > 5)
+    check("searching is case-insensitive",
+          first("a1-s05", "rack") is not None and first("cir-0007", "circuit") is not None)
+    check("a shortened circuit id still resolves",
+          (first("cir7", "circuit") or {}).get("id") == "CIR-0007")
+
+    typo = sitesearch.search(T, "A1-S5")
+    check("a typo is corrected AND the correction is reported",
+          typo["correction"] == "A1-S05" and bool(typo["results"]),
+          str(typo["correction"]))
+    exact = sitesearch.search(T, "A1-S05")
+    check("an exact hit is never reported as a correction", exact["correction"] is None)
+
+    check("nonsense finds nothing rather than guessing",
+          not sitesearch.search(T, "qwertyuiop-nope")["results"])
+    check("an empty query returns nothing at all",
+          not sitesearch.search(T, "")["results"] and not sitesearch.search(T, "   ")["results"])
+    check("every result carries enough to navigate to it",
+          all(h.get("pod") or h.get("rack") or h.get("kind") == "pod"
+              for h in sitesearch.search(T, "A1-S05", limit=25)["results"]))
+    check("every result says how it was matched",
+          all(h.get("why") for h in sitesearch.search(T, "TOR-SW-01", limit=25)["results"]))
+
     # ---------- a manual, single-jump link ----------
     # The router answers "how do I get there", which for two cabinets with no
     # cable between them is six hops across the site. Sometimes the question is

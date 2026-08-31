@@ -56,6 +56,8 @@ Endpoints
   GET  /api/workorder?...      printable Work Order (HTML) for one route
   GET  /api/sample?kind=...    a demand sheet (.xlsx) built against the live
                                map, so its ports are free right now
+  GET  /api/search?q=...       find a port, device, cabinet, pod or circuit by
+                               serial, id, name or label — typo-tolerant
 """
 
 import contextlib
@@ -74,6 +76,7 @@ import bulkplan
 import make_sample_sheet
 import pathengine
 import placement
+import search as sitesearch
 import wo_html
 import workorder
 import xlsxreader
@@ -257,6 +260,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if url.path == "/api/sample":
             return self._sample(url)
+
+        if url.path == "/api/search":
+            q = parse_qs(url.query)
+            return self._send(200, sitesearch.search(
+                TOPOLOGY, q.get("q", [""])[0],
+                limit=max(1, min(int(q.get("limit", ["25"])[0]), 50))))
 
         if url.path == "/api/workorder":
             # Printable sheet for a route the browser is already showing, or

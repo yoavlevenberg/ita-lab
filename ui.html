@@ -372,6 +372,27 @@
             font-size:11.5px; color:var(--muted)}
   .rackhead span{flex:1}
   button.danger.sm{font-size:10.5px; padding:3px 9px}
+  .search{position:relative; flex:1; min-width:190px; max-width:340px}
+  .search input{width:100%; background:var(--panel2); border:1px solid var(--border);
+                color:var(--text); border-radius:8px; padding:6px 10px; font-size:12px;
+                font-family:inherit}
+  .search input:focus{outline:none; border-color:#2d5c8f; background:#16202c}
+  .sresults{position:absolute; top:calc(100% + 5px); inset-inline-start:0; width:min(460px,92vw);
+            max-height:60vh; overflow-y:auto; z-index:60; background:var(--panel);
+            border:1px solid var(--border); border-radius:9px; padding:4px;
+            box-shadow:0 14px 40px rgba(0,0,0,.55)}
+  .sresults .hint{font-size:11px; color:var(--muted); padding:6px 9px}
+  .sresults .hint b{color:#ffb84d}
+  .sr{display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:7px;
+      cursor:pointer; font-size:12px}
+  .sr:hover, .sr.on{background:#1b2431}
+  .sr .k{font-size:9.5px; padding:1px 6px; border-radius:9px; border:1px solid var(--border);
+         color:var(--muted); flex:none; min-width:44px; text-align:center}
+  .sr .t{flex:1; min-width:0}
+  .sr .t b{display:block; font-weight:600; font-family:Consolas,monospace}
+  .sr .t span{display:block; color:var(--muted); font-size:10.5px;
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .sr .w{font-size:10px; color:var(--muted); flex:none}
   label.tgl{display:flex; align-items:center; gap:6px; font-size:11.5px;
             color:var(--muted); cursor:pointer; white-space:nowrap}
   label.tgl input{accent-color:#1f6feb; margin:0}
@@ -462,6 +483,11 @@
     <option value="A">דומיין A (שדרה S)</option>
     <option value="B">דומיין B (שדרה N)</option>
   </select>
+  <div class="search" id="searchWrap">
+    <input id="searchBox" autocomplete="off" spellcheck="false"
+           placeholder="חפש: סיריאל · מזהה פורט · מסד · פוד · CIR-0123 · שם רכיב">
+    <div class="sresults" id="searchResults" hidden></div>
+  </div>
   <label class="tgl" title="לחבר את שני הפורטים ישירות בקפיצה אחת — כבל גישור בתוך הארון, או גיד אחד בטראנק שמחבר את שני הארונות. אם אין כבל ישיר ביניהם, תקבל הודעה במקום מסלול ארוך.">
     <input type="checkbox" id="directMode"><span>חיבור ישיר (קפיצה אחת)</span>
   </label>
@@ -984,6 +1010,104 @@ function portGroup(title, ports){
 function locate(portId){
   const p = T.ports[portId], d = T.devices[p.device];
   return `${p.rack}-U${d.u_start}-P${p.index} (${d.name})`;
+}
+
+// ----------------------------------------------------------- searching ---
+// 640 cabinets and 120,256 ports: clicking down through the map is fine for
+// exploring and useless when you already hold the string you are looking for.
+let searchHits = [], searchAt = -1, searchTimer = null;
+
+const KIND_LABEL_HE = { port:"פורט", device:"רכיב", rack:"מסד", pod:"פוד", circuit:"חיבור" };
+
+$("searchBox").oninput = () => {
+  clearTimeout(searchTimer);
+  // typed faster than the round trip, so wait for a pause rather than firing
+  // a request per keystroke
+  searchTimer = setTimeout(runSearch, 160);
+};
+
+$("searchBox").onkeydown = e => {
+  if (e.key === "Escape"){ closeSearch(); $("searchBox").blur(); return; }
+  if (!searchHits.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault();
+    searchAt = (searchAt + (e.key === "ArrowDown" ? 1 : -1) + searchHits.length) % searchHits.length;
+    paintSearch();
+  } else if (e.key === "Enter"){
+    e.preventDefault();
+    gotoHit(searchAt < 0 ? 0 : searchAt);
+  }
+};
+
+document.addEventListener("click", e => {
+  if (!$("searchWrap").contains(e.target)) closeSearch();
+});
+
+function closeSearch(){
+  $("searchResults").hidden = true;
+  searchHits = []; searchAt = -1;
+}
+
+function runSearch(){
+  const q = $("searchBox").value.trim();
+  if (q.length < 1) return closeSearch();
+  fetch("/api/search?limit=25&q=" + encodeURIComponent(q))
+    .then(r => r.json()).then(res => {
+      if ($("searchBox").value.trim() !== q) return;   // a later query won
+      searchHits = res.results || [];
+      searchAt = searchHits.length ? 0 : -1;
+      const box = $("searchResults");
+      if (!searchHits.length){
+        box.innerHTML = `<div class="hint">לא נמצא כלום עבור <b>${escapeHtml(q)}</b></div>`;
+      } else {
+        box.innerHTML =
+          (res.correction ? `<div class="hint">לא נמצאה התאמה מדויקת — מציג תוצאות עבור
+             <b>${escapeHtml(res.correction)}</b></div>` : "") +
+          searchHits.map((h, i) => `
+            <div class="sr${i === searchAt ? " on" : ""}" data-i="${i}">
+              <span class="k">${KIND_LABEL_HE[h.kind] || h.kind}</span>
+              <span class="t"><b>${escapeHtml(h.title)}</b><span>${escapeHtml(h.sub)}</span></span>
+              <span class="w">${escapeHtml(h.why)}</span>
+            </div>`).join("") +
+          (res.truncated ? `<div class="hint">מוצגות 25 הראשונות — צמצם את החיפוש</div>` : "");
+        box.querySelectorAll(".sr").forEach(n =>
+          n.onclick = () => gotoHit(Number(n.dataset.i)));
+      }
+      box.hidden = false;
+    }).catch(() => closeSearch());
+}
+
+function paintSearch(){
+  $("searchResults").querySelectorAll(".sr").forEach((n, i) =>
+    n.classList.toggle("on", i === searchAt));
+  const on = $("searchResults").querySelector(".sr.on");
+  if (on) on.scrollIntoView({block:"nearest"});
+}
+
+// Walk the interface down to whatever was found, the same way a person would:
+// pod, then cabinet, then device, then the port itself.
+function gotoHit(i){
+  const h = searchHits[i];
+  if (!h) return;
+  closeSearch();
+  $("searchBox").blur();
+
+  if (h.circuit && h.kind === "circuit"){
+    if (h.rack){ selectPod(h.pod); selectRack(h.rack); }
+    if (h.port) sel.focusPort = h.port;
+    showExistingCircuit(h.circuit);
+    if (h.port) selectDevice(T.ports[h.port].device);
+    return;
+  }
+  if (h.pod) selectPod(h.pod);
+  if (h.rack) selectRack(h.rack);
+  if (h.device) selectDevice(h.device);
+  if (h.port){
+    sel.focusPort = h.port;
+    const p = T.ports[h.port];
+    if (p && p.status === "used" && p.circuit) showExistingCircuit(p.circuit);
+    renderDevice();
+  }
 }
 
 // ------------------------------------------------------------ selection ---
