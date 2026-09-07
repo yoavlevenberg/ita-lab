@@ -1,0 +1,12 @@
+{
+  "name": "ita-lab",
+  "displayName": "ITA Lab",
+  "version": "0.1.0",
+  "description": "Keeps work on the ITA Lab route planner inside its rules: one third-party dependency, a topology file that is real data, and constants that are product decisions rather than tuning knobs.",
+  "author": {
+    "name": "yoavlevenberg",
+    "url": "https://github.com/yoavlevenberg"
+  },
+  "repository": "https://github.com/yoavlevenberg/ita-lab",
+  "keywords": ["ita", "routing", "data-center", "topology", "closed-network"]
+}

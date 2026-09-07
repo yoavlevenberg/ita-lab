@@ -1,0 +1,17 @@
+{
+  "name": "ita-lab-tools",
+  "owner": {
+    "name": "yoavlevenberg",
+    "url": "https://github.com/yoavlevenberg"
+  },
+  "description": "Tooling that travels with the ITA Lab repository.",
+  "plugins": [
+    {
+      "name": "ita-lab",
+      "source": "./plugins/ita-lab",
+      "description": "Guards the closed-network rule, the topology file, and the product decisions baked into the routing engine.",
+      "keywords": ["ita", "routing", "data-center", "topology", "closed-network"],
+      "category": "development"
+    }
+  ]
+}
