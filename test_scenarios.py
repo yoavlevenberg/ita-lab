@@ -710,6 +710,17 @@ def _model_cleanup(T):
           rep["totals"]["used"] == by_hand,
           f"{rep['totals']['used']} vs {by_hand}")
 
+    # -- E4: cli.py's help and its error messages still described the v2 map
+    #    (A-S05, "same for pod B"). An entry point that documents a model which
+    #    does not exist is worse than no entry point — the first thing a reader
+    #    tries fails, and they do not know whether they or the tool is wrong.
+    import pathlib as _ple4, re as _ree4
+    _cli_src = (_ple4.Path(__file__).parent / "cli.py").read_text(encoding="utf-8")
+    _shown = set(_ree4.findall(r"\b[A-D]\d?-[SN]\d{2}\b", _cli_src))
+    _unreal = sorted(r for r in _shown if r not in T["racks"])
+    check("E4: every cabinet id cli.py shows a user exists on the map",
+          not _unreal, f"not on the map: {_unreal}")
+
 
 def main():
     T = load_topology()

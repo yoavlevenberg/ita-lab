@@ -183,7 +183,7 @@ Intents: `clear_constraints`, `avoid`, `prefer`, `list_constraints`,
 | `server.py` | שרת מקומי + API |
 | `ui.html` | ממשק: מפת חווה 4×8 → פוד → מסד → רכיב → פורט, פאנל bulk, צ'אט |
 | `cli.py` | גישה משורת פקודה |
-| `test_scenarios.py` | **301/301 בדיקות עוברות** |
+| `test_scenarios.py` | **302/302 בדיקות עוברות** |
 
 ### API
 
