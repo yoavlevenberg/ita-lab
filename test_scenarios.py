@@ -686,6 +686,31 @@ def _hardening(T):
               "entit" in str(e).lower(), str(e)[:90])
 
 
+def _model_cleanup(T):
+    """FIXES.md D4 — duplicated state the strand model exists to eliminate."""
+    import pathengine as _pe4
+
+    # ct["used"] was len(ct["strands"]) written down a second time, maintained
+    # by hand in four places and persisted into the 31MB map. Nothing read it:
+    # capacity._trunk_rows and pathengine._build_graph both compute from the
+    # strand list. A test protects the code that exists — not the code the ITA
+    # integration will add against a counter it assumes is authoritative.
+    fresh = _pe4.load_topology()
+    strays = [(e["id"], media) for e in fresh["edges"]
+              for media, ct in e["cable_types"].items() if "used" in ct]
+    check("D4: no trunk carries a hand-maintained 'used' counter",
+          not strays, f"{len(strays)} still do, e.g. {strays[:2]}")
+
+    # and the occupancy figures the interface shows must be unchanged
+    import capacity as _cap4
+    rep = _cap4.report(fresh)
+    by_hand = sum(len(ct.get("strands") or {})
+                  for e in fresh["edges"] for ct in e["cable_types"].values())
+    check("D4: reported trunk usage still equals the strands actually held",
+          rep["totals"]["used"] == by_hand,
+          f"{rep['totals']['used']} vs {by_hand}")
+
+
 def main():
     T = load_topology()
 
@@ -695,14 +720,14 @@ def main():
         for sid in c["segment_ids"]:
             crossings[(sid, c["cable_type"])] += 1
     mismatch = sum(1 for e in T["edges"] for ct, d in e["cable_types"].items()
-                   if d["used"] != crossings.get((e["id"], ct), 0))
+                   if len(d.get("strands") or {}) != crossings.get((e["id"], ct), 0))
     check("trunk usage matches the circuits crossing each trunk", mismatch == 0, f"{mismatch} mismatches")
 
     # ---------- trunk strands are real, individually-owned ports ----------
-    strand_mismatch = sum(1 for e in T["edges"] for ct, d in e["cable_types"].items()
-                          if len(d.get("strands") or {}) != d["used"])
-    check("every trunk's occupied-strand list matches its used count",
-          strand_mismatch == 0, f"{strand_mismatch} mismatches")
+    stale_counter = [f"{e['id']}/{ct}" for e in T["edges"]
+                     for ct, d in e["cable_types"].items() if "used" in d]
+    check("no trunk keeps a second, hand-maintained copy of its occupancy",
+          not stale_counter, str(stale_counter[:3]))
 
     overflow = [f"{e['id']}/{ct}" for e in T["edges"] for ct, d in e["cable_types"].items()
                 if any(not (1 <= int(i) <= d["capacity"]) for i in (d.get("strands") or {}))]
@@ -851,7 +876,6 @@ def main():
             # a trunk is full when every numbered strand is patched, not when
             # a counter says so — occupy them all explicitly
             ct["strands"] = {str(i): "CIR-TEST" for i in range(1, ct["capacity"] + 1)}
-            ct["used"] = ct["capacity"]
     s6, d9 = free_port(T2, "A1-S06", "fiber"), free_port(T2, "A1-S09", "fiber")
     try:
         resolve_path(s6, d9, domain="A", topology=T2)
@@ -2067,9 +2091,9 @@ def main():
               (next(e for e in work["edges"] if e["id"] == s["edge_id"])
                ["cable_types"][s["cable_type"]].get("strands") or {})
               for s in held["strands"]))
-    check("a released trunk's used count matches its remaining strands",
-          all(ct["used"] == len(ct.get("strands") or {})
-              for e in work["edges"] for ct in e["cable_types"].values()))
+    check("releasing does not reintroduce a hand-maintained used counter",
+          not any("used" in ct
+                  for e in work["edges"] for ct in e["cable_types"].values()))
     check("the circuit itself is gone", victim not in work["circuits"])
 
     try:
@@ -2126,9 +2150,9 @@ def main():
           and work["ports"][tr["open_end"]]["role"] == "open_end")
     check("the circuit admits it is unfinished",
           cut["partial"] and cut["b_port"] is None)
-    check("trunk used counts still match after truncating",
-          all(ct["used"] == len(ct.get("strands") or {})
-              for e in work["edges"] for ct in e["cable_types"].values()))
+    check("truncating does not reintroduce a hand-maintained used counter",
+          not any("used" in ct
+                  for e in work["edges"] for ct in e["cable_types"].values()))
 
     # putting it back exactly must be indistinguishable from never having cut it
     extend_route(work, long_cid, was["b_port"])
@@ -2196,6 +2220,9 @@ def main():
 
     # ---------- hardening the sheet reader (FIXES.md C1, C2) ----------
     _hardening(T)
+
+    # ---------- duplicated model state (FIXES.md D4) ----------
+    _model_cleanup(T)
 
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,

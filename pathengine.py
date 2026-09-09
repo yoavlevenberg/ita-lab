@@ -72,7 +72,24 @@ def load_topology(path=TOPOLOGY_PATH):
     with open(path, encoding="utf-8") as f:
         topology = json.load(f)
     seed_circuit_seq(topology)
+    _drop_derived_used(topology)
     return topology
+
+
+def _drop_derived_used(topology):
+    """Strip the old ct["used"] counter from a map written before it was
+    removed, so the next save persists the map without it.
+
+    It was len(ct["strands"]) written down a second time and maintained by hand
+    in four places. Nothing ever read it — capacity._trunk_rows and
+    _build_graph both count the strand list — so it was a second copy of the
+    truth, kept in the file, that could only ever drift. A test protects the
+    code that exists; it would not protect ITA integration code written later
+    against a counter it assumed was authoritative.
+    """
+    for edge in topology.get("edges") or ():
+        for ct in (edge.get("cable_types") or {}).values():
+            ct.pop("used", None)
 
 
 def seed_circuit_seq(topology):
@@ -771,7 +788,6 @@ def decommission_route(topology, circuit_id, force=False):
         if strands.get(str(s["strand_index"])) != circuit_id:
             continue                      # someone else's; force must not steal it
         del strands[str(s["strand_index"])]
-        ct["used"] = len(strands)
         freed_strands.append(f"{s['edge_id']}#{s['strand_index']}")
 
     for pid in owned_ports:
@@ -851,7 +867,6 @@ def truncate_route(topology, circuit_id):
 
     # ---- release just that leg ----
     del ct["strands"][str(last["strand_index"])]
-    ct["used"] = len(ct["strands"])
 
     p = topology["ports"][b_port]
     p["status"], p["circuit"], p["role"], p["peer"] = "free", None, None, None
@@ -920,7 +935,6 @@ def extend_route(topology, circuit_id, dst_port_id):
     for seg in tail["segments"]:
         ct = edges[seg["edge_id"]]["cable_types"][circuit["cable_type"]]
         ct.setdefault("strands", {})[str(seg["strand_index"])] = circuit_id
-        ct["used"] = len(ct["strands"])
         circuit["strands"].append({
             "edge_id": seg["edge_id"], "cable_type": circuit["cable_type"],
             "strand_index": seg["strand_index"],
@@ -973,7 +987,6 @@ def commit_route(topology, route, circuit_id):
         ct = edge["cable_types"][route["cable_type"]]
         strands = ct.setdefault("strands", {})
         strands[str(seg["strand_index"])] = circuit_id
-        ct["used"] = len(strands)          # kept in sync so capacity bars stay cheap
         strand_log.append({
             "edge_id": edge["id"], "cable_type": route["cable_type"],
             "strand_index": seg["strand_index"],

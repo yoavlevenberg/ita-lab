@@ -247,9 +247,9 @@ def make_edge(edge_id, a, b, domain, fiber, copper, length_m):
     # a port at each end — see strand_port_id() in pathengine.
     cable_types = {}
     if fiber:
-        cable_types["fiber"] = {"capacity": fiber, "used": 0, "strands": {}}
+        cable_types["fiber"] = {"capacity": fiber, "strands": {}}
     if copper:
-        cable_types["copper"] = {"capacity": copper, "used": 0, "strands": {}}
+        cable_types["copper"] = {"capacity": copper, "strands": {}}
     return {"id": edge_id, "from": a, "to": b, "domain": domain,
             "cable_types": cable_types, "length_m": round(length_m, 1)}
 
