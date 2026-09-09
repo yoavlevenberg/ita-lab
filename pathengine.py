@@ -213,19 +213,53 @@ def _build_graph(topology, cable_type, domain=None):
     return g
 
 
+def devices_by_rack(topology):
+    """rack id -> its devices, grouped once per map and cached on it.
+
+    Two hot paths used to answer a question about ONE cabinet by walking the
+    whole site: _pick_transit_port over all 120,256 ports (once per transit
+    hop), and placement.occupancy over all 6,312 devices (about a thousand
+    times to place a single box). Both are a dict lookup from here.
+
+    Invalidated on the device count, which is the only thing that can change
+    the grouping: devices are added by materialise() and never removed, and
+    moving one is not an operation this tool has. The cache lives under a
+    leading underscore and save_topology() strips those, so a derived index
+    can never reach the file and be read back as a stale second truth.
+    """
+    n = len(topology["devices"])
+    cached = topology.get("_rack_devices")
+    if cached is None or cached["n"] != n:
+        by_rack = {}
+        for dev in topology["devices"].values():
+            by_rack.setdefault(dev["rack"], []).append(dev)
+        cached = {"n": n, "by_rack": by_rack}
+        topology["_rack_devices"] = cached
+    return cached["by_rack"]
+
+
 def _pick_transit_port(topology, rack_id, cable_type, exclude):
     """Choose a concrete free port on an intermediate rack so the technician
-    gets a real cross-connect position, not just 'somewhere on the EOR'."""
+    gets a real cross-connect position, not just 'somewhere on the EOR'.
+
+    Reached through the cabinet's own devices rather than by sweeping the map:
+    a port id is <device>:<index>, so this costs the ~190 ports the cabinet has
+    instead of every port on the site. The result is unchanged — candidates are
+    sorted before one is taken, so the order they were found in never mattered.
+    """
+    ports = topology["ports"]
     candidates = []
-    for port_id, p in topology["ports"].items():
-        if (p["rack"] == rack_id and p["type"] == cable_type
-                and p["status"] == "free" and port_id not in exclude):
-            dev_type = topology["devices"][p["device"]]["type"]
-            try:
-                rank = _TRANSIT_DEVICE_PREFERENCE.index(dev_type)
-            except ValueError:
-                rank = len(_TRANSIT_DEVICE_PREFERENCE)
-            candidates.append((rank, p["device"], p["index"], port_id))
+    for dev in devices_by_rack(topology).get(rack_id, ()):
+        try:
+            rank = _TRANSIT_DEVICE_PREFERENCE.index(dev["type"])
+        except ValueError:
+            rank = len(_TRANSIT_DEVICE_PREFERENCE)
+        for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1):
+            port_id = f"{dev['id']}:{i}"
+            p = ports.get(port_id)
+            if (p is not None and p["type"] == cable_type
+                    and p["status"] == "free" and port_id not in exclude):
+                candidates.append((rank, p["device"], p["index"], port_id))
     if not candidates:
         raise RouteError(f"No free {cable_type} port left on {rack_id} to cross-connect through.")
     candidates.sort()

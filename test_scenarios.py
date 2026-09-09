@@ -467,6 +467,45 @@ def _phase3_perf(T):
             ts.append((_t3.perf_counter() - a) * 1000)
         return sorted(ts)[len(ts) // 2]
 
+    def _slice(padding=0):
+        """A hand-built map of two cabinets, optionally padded with kit in a
+        third nobody asks about.
+
+        Deliberately NOT the 120k-port fixture: these checks are about whether
+        an answer costs the size of one cabinet or the size of the whole site,
+        and a slice shows that far more sharply than a map where 20,000 extra
+        ports are a 17% bump. It is also the honest shape of the question —
+        that fixture is scratch data the real ITA export replaces, so a test
+        must not be tuned to its dimensions.
+        """
+        topo = {"racks": {}, "devices": {}, "ports": {}, "pods": {}, "edges": [],
+                "circuits": {}, "meta": {}}
+        for rid in ("R1", "R2"):
+            topo["racks"][rid] = {"id": rid, "pod": "P1", "row": "S",
+                                  "is_eor": False, "is_mda": False}
+        for rid, dev, kind, n in (("R1", "R1:PP-01", "fiber_patch_panel", 24),
+                                  ("R1", "R1:SW-01", "switch", 8),
+                                  ("R2", "R2:PP-01", "fiber_patch_panel", 24)):
+            topo["devices"][dev] = {"id": dev, "rack": rid, "type": kind,
+                                    "u_start": 42, "u_size": 1,
+                                    "fiber_ports": n, "copper_ports": 0}
+            for i in range(1, n + 1):
+                pid = f"{dev}:{i}"
+                topo["ports"][pid] = {"id": pid, "rack": rid, "device": dev,
+                                      "index": i, "type": "fiber", "status": "free"}
+        if padding:
+            topo["racks"]["R9"] = {"id": "R9", "pod": "P1", "row": "N",
+                                   "is_eor": False, "is_mda": False}
+            pad = "R9:PAD-01"
+            topo["devices"][pad] = {"id": pad, "rack": "R9", "type": "server",
+                                    "u_start": 42, "u_size": 1,
+                                    "fiber_ports": padding, "copper_ports": 0}
+            for i in range(1, padding + 1):
+                pid = f"{pad}:{i}"
+                topo["ports"][pid] = {"id": pid, "rack": "R9", "device": pad,
+                                      "index": i, "type": "fiber", "status": "free"}
+        return topo
+
     # -- B3: placement scanned all devices once per candidate cabinet, ~1,000
     #        times for a single new device.
     #
@@ -481,18 +520,67 @@ def _phase3_perf(T):
     check("B3: the ranking itself is unchanged — still the nearest cabinet first",
           ranked and ranked[0]["rack"] == "A1-S05", str(ranked[:1]))
 
-    grown = _copy3.deepcopy(T)
-    placement.occupancy(grown, "A1-S05")                    # warm
-    before = _median_ms(lambda: placement.occupancy(grown, "A1-S05"), n=5)
-    for i in range(20_000):                                 # 4x the whole map
-        grown["devices"][f"__pad__{i}"] = {
-            "id": f"__pad__{i}", "rack": "D8-N09", "u_start": 1, "u_size": 1,
+    thin, fat = _slice(), _slice()
+    for i in range(30_000):                    # kit in a cabinet nobody asks about
+        fat["devices"][f"R9:PAD-{i}"] = {
+            "id": f"R9:PAD-{i}", "rack": "R9", "u_start": 42, "u_size": 1,
             "type": "server", "fiber_ports": 0, "copper_ports": 0}
-    placement.occupancy(grown, "A1-S05")                    # absorb the rebuild
-    after = _median_ms(lambda: placement.occupancy(grown, "A1-S05"), n=5)
-    check("B3: asking about one cabinet does not scan every device on the map",
-          after < max(before * 3, 0.5),
-          f"{before:.3f}ms -> {after:.3f}ms after 20,000 devices landed elsewhere")
+    check("B3: the slice reports the same occupancy either way",
+          placement.occupancy(thin, "R1") == placement.occupancy(fat, "R1"))
+    placement.occupancy(thin, "R1"); placement.occupancy(fat, "R1")      # warm
+    b3_thin = _median_ms(lambda: placement.occupancy(thin, "R1"), n=7)
+    b3_fat = _median_ms(lambda: placement.occupancy(fat, "R1"), n=7)
+    check("B3: asking about one cabinet costs the cabinet, not the whole site",
+          b3_fat < max(b3_thin * 4, 0.5),
+          f"{b3_thin:.4f}ms on 3 devices -> {b3_fat:.4f}ms on 30,003")
+
+    # -- B2: _pick_transit_port walked all 120,256 ports to find a free one on
+    #        ONE cabinet, once per transit hop. Same shape as B3, same test:
+    #        the answer must not get slower when ports appear elsewhere. -----
+    import pathengine as _pe3
+
+    def _scan_pick(topology, rack_id, cable_type, exclude=()):
+        """The old full-sweep, kept here as the reference the index must match."""
+        cands = []
+        for pid, p in topology["ports"].items():
+            if (p["rack"] == rack_id and p["type"] == cable_type
+                    and p["status"] == "free" and pid not in exclude):
+                dev_type = topology["devices"][p["device"]]["type"]
+                try:
+                    rank = _pe3._TRANSIT_DEVICE_PREFERENCE.index(dev_type)
+                except ValueError:
+                    rank = len(_pe3._TRANSIT_DEVICE_PREFERENCE)
+                cands.append((rank, p["device"], p["index"], pid))
+        cands.sort()
+        return cands[0][3] if cands else None
+
+    mismatched = []
+    for rid in ("A1-S01", "A1-N10", "A2-S01", "D5-N06", "D6-N10"):
+        for media in ("fiber", "copper"):
+            want = _scan_pick(T, rid, media)
+            if want is None:
+                continue
+            if _pe3._pick_transit_port(T, rid, media, set()) != want:
+                mismatched.append((rid, media))
+    check("B2: the indexed transit-port choice matches the full sweep exactly",
+          not mismatched, str(mismatched))
+
+    # and it must still honour `exclude` and still refuse when nothing is free
+    _first = _pe3._pick_transit_port(T, "A2-S01", "fiber", set())
+    check("B2: excluding the first choice yields a different port",
+          _pe3._pick_transit_port(T, "A2-S01", "fiber", {_first}) != _first)
+
+    small, big = _slice(), _slice(padding=60_000)
+    check("B2: the slice answers the same as the full sweep",
+          _pe3._pick_transit_port(small, "R1", "fiber", set())
+          == _scan_pick(small, "R1", "fiber"))
+    _pe3._pick_transit_port(small, "R1", "fiber", set())      # warm
+    _pe3._pick_transit_port(big, "R1", "fiber", set())        # warm
+    b2_small = _median_ms(lambda: _pe3._pick_transit_port(small, "R1", "fiber", set()), n=7)
+    b2_big = _median_ms(lambda: _pe3._pick_transit_port(big, "R1", "fiber", set()), n=7)
+    check("B2: picking a transit port costs the cabinet, not the whole site",
+          b2_big < max(b2_small * 4, 0.5),
+          f"{b2_small:.4f}ms on 56 ports -> {b2_big:.4f}ms on 60,056")
 
     # occupancy must still be exactly the set of U a cabinet's devices hold
     for rid in ("A1-S05", "D5-N06", "A2-S01"):

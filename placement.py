@@ -35,6 +35,7 @@ something the site does not do.
 from collections import defaultdict
 
 import zones
+from pathengine import devices_by_rack
 
 RACK_U = 42
 
@@ -66,30 +67,6 @@ class PlacementError(Exception):
 # --------------------------------------------------------------------------
 # free space
 # --------------------------------------------------------------------------
-
-def devices_by_rack(topology):
-    """rack id -> its devices, built once per map and cached on it.
-
-    occupancy() used to walk all 6,312 devices to answer for ONE cabinet, and
-    rank_positions() asks about ~500 cabinets twice each — 6.4 million
-    iterations to place a single box. Reading it from here is a dict lookup.
-
-    Invalidated on the device count, which is the only thing that can change
-    the grouping: devices are added by materialise() and never removed, and
-    moving one is not an operation this tool has. The cache lives under a
-    leading underscore, and save_topology() strips those, so it can never be
-    written to the map.
-    """
-    n = len(topology["devices"])
-    cached = topology.get("_rack_devices")
-    if cached is None or cached["n"] != n:
-        by_rack = defaultdict(list)
-        for dev in topology["devices"].values():
-            by_rack[dev["rack"]].append(dev)
-        cached = {"n": n, "by_rack": by_rack}
-        topology["_rack_devices"] = cached
-    return cached["by_rack"]
-
 
 def occupancy(topology, rack_id):
     """Set of U numbers already taken in a cabinet.
