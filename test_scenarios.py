@@ -215,6 +215,121 @@ def _phase1_fixes(T):
           "data/*.tmp" in _gitignore or "*.tmp" in _gitignore)
 
 
+def _phase2_fixes(T):
+    """FIXES.md phase 2 — server.py had zero test coverage (E1) and its read
+    handlers raced a concurrent write (A3). Every check here failed first."""
+    import contextlib as _cl2, copy as _c2, json as _j2, threading as _th2
+    import time as _time2
+    import urllib.request as _rq, urllib.error as _er
+    from http.server import ThreadingHTTPServer
+    import server
+    import store as _storage
+
+    class _NoDiskStore(_storage.JsonFileStore):
+        def flush(self, topology):            # every change stays in memory only
+            self._dirty = False
+
+    @_cl2.contextmanager
+    def _serve():
+        saved_topo, saved_store = server.TOPOLOGY, server.STORE
+        server.TOPOLOGY = _c2.deepcopy(saved_topo)
+        server.STORE = _NoDiskStore(path=saved_store.path)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        th = _th2.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            yield f"http://127.0.0.1:{srv.server_address[1]}"
+        finally:
+            srv.shutdown()
+            th.join(timeout=3)
+            server.TOPOLOGY, server.STORE = saved_topo, saved_store
+
+    def _hit(base, path, body=None):
+        if body is None:
+            req = _rq.Request(base + path)
+        else:
+            req = _rq.Request(base + path, data=_j2.dumps(body).encode(),
+                              headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with _rq.urlopen(req, timeout=20) as r:
+                return r.status, r.read()
+        except _er.HTTPError as e:
+            return e.code, e.read()
+
+    # -- E1: every endpoint answers, and none of them 500s -------------------
+    with _serve() as base:
+        a_rack = next(iter(server.TOPOLOGY["racks"]))
+        a_cid = next(iter(server.TOPOLOGY["circuits"]))
+        gets = [
+            ("/", {200}), ("/api/topology", {200}), ("/api/topology?full=1", {200}),
+            ("/api/stats", {200}), (f"/api/rack?id={a_rack}", {200}),
+            ("/api/rack?id=NOPE", {404}), ("/api/zones", {200}),
+            ("/api/capacity", {200}), ("/api/search?q=A1", {200}),
+            (f"/api/circuit?id={a_cid}", {200}), ("/api/circuit?id=CIR-0000", {404}),
+            ("/api/sample?kind=clean", {200}), ("/api/sample?kind=mixed", {404}),
+            ("/api/nope", {404}),
+        ]
+        bad = [(p, c) for p, ok in gets
+               for c in [_hit(base, p)[0]] if c == 500 or c not in ok]
+        check("E1: every GET endpoint answers, none 500s", not bad, str(bad))
+
+        posts = [
+            ("/api/route", {}, {400}), ("/api/route", {"src": "x", "dst": "y"}, {200}),
+            ("/api/execute", {}, {400}), ("/api/execute", {"route_key": "R00000"}, {409}),
+            ("/api/decommission", {}, {400, 404}), ("/api/truncate", {}, {400}),
+            ("/api/bulk/row", {"plan_id": "PLAN-0000", "row": 1}, {400, 404}),
+        ]
+        badp = [(p, c) for p, b, ok in posts
+                for c in [_hit(base, p, b)[0]] if c == 500 or c not in ok]
+        check("E1: every POST endpoint answers a bad request without a 500", not badp, str(badp))
+
+        src = next(p for p in server.TOPOLOGY["ports"].values()
+                   if p["rack"] == "A1-S05" and p["type"] == "fiber" and p["status"] == "free")["id"]
+        dst = next(p for p in server.TOPOLOGY["ports"].values()
+                   if p["rack"] == "D5-N06" and p["type"] == "fiber" and p["status"] == "free")["id"]
+        _, body = _hit(base, "/api/route", {"src": src, "dst": dst, "count": 1})
+        opts = _j2.loads(body).get("options", [])
+        code2, body2 = _hit(base, "/api/execute", {"route_key": opts[0]["route_key"]})
+        check("E1: a route proposed over HTTP can then be executed by its key",
+              code2 == 200 and _j2.loads(body2).get("status") == "ok",
+              f"{code2} {body2[:120]}")
+
+    # -- A3: a read handler must not crash while a writer mutates the map ----
+    with _serve() as base:
+        shared = server.TOPOLOGY
+        stop = _th2.Event()
+        failed = []
+
+        def _reader():
+            while not stop.is_set():
+                if _hit(base, "/api/stats")[0] != 200:
+                    failed.append(1)
+
+        def _writer():
+            # a real write holds WRITE_LOCK while it grows topology["ports"];
+            # the bug was the reader not taking the same lock
+            i = 0
+            while not stop.is_set():
+                with server.WRITE_LOCK:
+                    ks = [f"__race__{i}_{j}" for j in range(500)]
+                    for k in ks:
+                        shared["ports"][k] = {"rack": "A1-S05", "type": "fiber", "status": "free"}
+                    for k in ks:
+                        del shared["ports"][k]
+                i += 1
+
+        ts = [_th2.Thread(target=_reader) for _ in range(3)] + \
+             [_th2.Thread(target=_writer) for _ in range(2)]
+        for t in ts:
+            t.start()
+        _time2.sleep(2.0)
+        stop.set()
+        for t in ts:
+            t.join(timeout=5)
+        check("A3: /api/stats never 500s while a writer grows the map",
+              not failed, f"{len(failed)} failed reads")
+
+
 def main():
     T = load_topology()
 
@@ -1717,12 +1832,26 @@ def main():
     # ---------- phase 1 bug fixes (FIXES.md A1,A2,A4,A6,A7,A8,C3,C5) ----------
     _phase1_fixes(T)
 
+    # ---------- phase 2 safety net (FIXES.md E1, A3, E5) ----------
+    _phase2_fixes(T)
+
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,
     # which is exactly what let this rule break twice while 172 checks passed.
     # These generate sheets and assert a relationship between the two sides.
     # A longer sweep lives in test_agreement.py; this is the standing guard.
     test_agreement.run(T, check, sheets=250, plans=6)
+
+    # ---------- documentation must state the real test count (FIXES.md E5) ----
+    # CONTEXT.md is the handoff doc for the next session; a stale count there
+    # already sent an external review chasing a feature that shipped weeks ago.
+    import pathlib as _pl_e5
+    _expected_count = len(results) + 1          # +1 for this check itself
+    _stale = [p for p in ("README.md", "CONTEXT.md")
+              if str(_expected_count) not in
+              (_pl_e5.Path(__file__).parent / p).read_text(encoding="utf-8")]
+    check(f"E5: README and CONTEXT state the real test count ({_expected_count})",
+          not _stale, f"stale in: {_stale}")
 
     print()
     passed = sum(results)

@@ -113,9 +113,15 @@ TOPOLOGY = STORE.load()
 # read-modify-write across the shared topology: pick the next circuit id, take
 # the strands, then rewrite the file. Two commits interleaving there could hand
 # out the same id or write a half-updated map, so the whole sequence is done
-# under one lock. Reads and route PROPOSALS stay outside it — they don't mutate,
-# and revalidate_route re-checks under the lock before anything is written.
-WRITE_LOCK = threading.Lock()
+# under one lock.
+#
+# Reads take it too: a GET that walks topology["ports"] / ["circuits"] /
+# ["devices"] while a commit adds a key to one of them raises "dictionary
+# changed size during iteration". Route PROPOSALS (POST /api/route) are the
+# one thing that stays outside — they do not mutate, and only read edges/racks,
+# which never grow during a request. RLock so a future locked read that calls
+# another locked path does not deadlock.
+WRITE_LOCK = threading.RLock()
 
 # Plans live server-side between plan and execute, so the browser never has to
 # ship whole route objects back and never gets to rewrite one on the way.
@@ -308,6 +314,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._guard(self._post)
 
     def _get(self):
+        # every read walks a map structure a concurrent write can grow, so a
+        # GET takes the same lock a write does — see the WRITE_LOCK note above.
+        # This serialises GETs against each other too; fine for a single-user
+        # localhost tool, worth revisiting if it ever serves a team.
+        with WRITE_LOCK:
+            return self._get_dispatch()
+
+    def _get_dispatch(self):
         url = urlparse(self.path)
 
         if url.path in ("/", "/index.html"):
