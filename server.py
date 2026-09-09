@@ -73,6 +73,7 @@ import copy
 import io
 import json
 import os
+import sys
 import threading
 import traceback
 import uuid
@@ -115,12 +116,19 @@ TOPOLOGY = STORE.load()
 # out the same id or write a half-updated map, so the whole sequence is done
 # under one lock.
 #
-# Reads take it too: a GET that walks topology["ports"] / ["circuits"] /
-# ["devices"] while a commit adds a key to one of them raises "dictionary
-# changed size during iteration". Route PROPOSALS (POST /api/route) are the
-# one thing that stays outside — they do not mutate, and only read edges/racks,
-# which never grow during a request. RLock so a future locked read that calls
-# another locked path does not deadlock.
+# THE RULE: anything that touches the live map holds this lock — reads
+# included. A reader that walks topology["ports"] / ["circuits"] / ["devices"]
+# while a commit adds a key to one of them raises "dictionary changed size
+# during iteration", and the browser gets a 500. That is not a write-only
+# hazard, so this is not a write-only lock. Locking only the writers, or only
+# the GET handlers, leaves the same crash reachable through whichever reader
+# was missed — /api/route, /api/assist and the bulk preflight each iterate a
+# growable dict and each needed it.
+#
+# The one way to work outside the lock is to take a private copy under it
+# first, which is what the bulk planner does: deepcopy inside, plan outside.
+#
+# RLock, so a locked read that calls another locked path cannot deadlock.
 WRITE_LOCK = threading.RLock()
 
 # Plans live server-side between plan and execute, so the browser never has to
@@ -199,7 +207,7 @@ def _cache_route(route):
     global _ROUTE_SEQ
     _ROUTE_SEQ += 1
     key = f"R{_ROUTE_SEQ:05d}"
-    while len(ROUTES) >= MAX_CACHED_ROUTES:
+    while ROUTES and len(ROUTES) >= MAX_CACHED_ROUTES:
         ROUTES.pop(next(iter(ROUTES)), None)
     ROUTES[key] = route
     return key
@@ -296,7 +304,9 @@ class Handler(BaseHTTPRequestHandler):
             return fn(*args)
         except Exception as e:
             ref = uuid.uuid4().hex[:8]
-            print(f"[error {ref}]")
+            # same stream as the traceback, or the two interleave apart and the
+            # reference the client was given cannot be matched to its stack
+            print(f"[error {ref}]", file=sys.stderr)
             traceback.print_exc()
             if PRODUCTION:
                 body = {"error": f"internal error (ref {ref})"}
@@ -465,24 +475,29 @@ class Handler(BaseHTTPRequestHandler):
             if not src or not dst:
                 return self._send(400, {"error": "src and dst are required"})
 
-            try:
-                if req.get("direct"):
-                    # "is there a single cable I can patch here" is a different
-                    # question from "how do I get there", and a six-hop answer
-                    # to it is wrong rather than merely long
-                    options = [pathengine.direct_route(TOPOLOGY, src, dst)]
-                else:
-                    options = pathengine.resolve_route_options(
-                        src, dst, domain=domain, count=count, topology=TOPOLOGY)
-            except pathengine.RouteError as e:
-                return self._send(200, {"status": "failed", "reason": str(e)})
+            # Proposing reads the live map, and _pick_transit_port walks
+            # topology["ports"] — which installing a device grows. Without the
+            # lock that is the same "dictionary changed size during iteration"
+            # crash the GET handlers had, reached through a different door.
+            with WRITE_LOCK:
+                try:
+                    if req.get("direct"):
+                        # "is there a single cable I can patch here" is a different
+                        # question from "how do I get there", and a six-hop answer
+                        # to it is wrong rather than merely long
+                        options = [pathengine.direct_route(TOPOLOGY, src, dst)]
+                    else:
+                        options = pathengine.resolve_route_options(
+                            src, dst, domain=domain, count=count, topology=TOPOLOGY)
+                except pathengine.RouteError as e:
+                    return self._send(200, {"status": "failed", "reason": str(e)})
 
-            for route in options:
-                route["work_order"] = workorder.render(route)
-                route["route_key"] = _cache_route(route)
-                # ready-to-draw stops: the browser holds one cabinet's ports at
-                # a time, and a route crosses several
-                route["jump"] = bulkplan._jump_chain(TOPOLOGY, route)
+                for route in options:
+                    route["work_order"] = workorder.render(route)
+                    route["route_key"] = _cache_route(route)
+                    # ready-to-draw stops: the browser holds one cabinet's ports at
+                    # a time, and a route crosses several
+                    route["jump"] = bulkplan._jump_chain(TOPOLOGY, route)
             return self._send(200, {"status": "ok", "options": options})
 
         if url.path == "/api/execute":
@@ -556,9 +571,12 @@ class Handler(BaseHTTPRequestHandler):
             "review": req.get("review"),
             "device_review": req.get("device_review"),
         }
-        out = assistant.respond(req.get("message", ""), plan=context,
-                                topology=TOPOLOGY,
-                                constraints=req.get("constraints"))
+        # answering reads the live map (capacity, rack status, locate), so it
+        # takes the lock like every other reader — see the WRITE_LOCK note
+        with WRITE_LOCK:
+            out = assistant.respond(req.get("message", ""), plan=context,
+                                    topology=TOPOLOGY,
+                                    constraints=req.get("constraints"))
         return self._send(200, out)
 
     # ------------------------------------------------------------- bulk ---
@@ -597,9 +615,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # Preflight first: a sheet with typos comes back as one list of things
         # to fix, instead of a half-planned run the user has to unpick.
-        review = bulkplan.validate(TOPOLOGY, demands, new_devices)
-        device_review = (bulkplan.validate_devices(TOPOLOGY, new_devices, demands)
-                         if new_devices else None)
+        #
+        # Under the lock for the same reason the snapshot below is: the review
+        # walks topology["devices"] (placement.occupancy, serials.index), which
+        # installing a device grows.
+        with WRITE_LOCK:
+            review = bulkplan.validate(TOPOLOGY, demands, new_devices)
+            device_review = (bulkplan.validate_devices(TOPOLOGY, new_devices, demands)
+                             if new_devices else None)
         if q.get("validate_only", ["0"])[0] in ("1", "true", "on"):
             has_tab = bulkplan._find_sheet(io.BytesIO(blob),
                                            bulkplan.DEVICES_SHEET_NAMES) is not None

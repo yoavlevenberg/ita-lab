@@ -86,6 +86,48 @@ def _phase1_fixes(T):
     check("A7: a released circuit id is never handed out again",
           c2 != c1, f"{c1} was recycled")
 
+    # The case the check above misses: on a map that has never allocated an id
+    # through the counter, a LAZY seed would run on the first allocation — which
+    # can come after a release — read a maximum the released circuit is no
+    # longer in, and hand its id back. So the counter is seeded at load instead,
+    # and every map therefore arrives already carrying its high-water mark.
+    import pathengine as _pe7
+    fresh = _pe7.load_topology()
+    top_num = max(int(c.split("-", 1)[1]) for c in fresh["circuits"]
+                  if c.startswith("CIR-"))
+    check("A7: a freshly loaded map already carries its circuit-id high-water mark",
+          fresh["meta"].get("circuit_seq") == top_num,
+          f"circuit_seq={fresh['meta'].get('circuit_seq')} top={top_num}")
+
+    top_cid = f"CIR-{top_num:04d}"
+    decommission_route(fresh, top_cid)
+    check("A7: releasing the top circuit of a just-loaded map does not recycle it",
+          next_circuit_id(fresh) != top_cid, f"{top_cid} was recycled")
+
+    # and the counter must never hand out an id the map already holds
+    w7c = _copy.deepcopy(T)
+    w7c.setdefault("meta", {})["circuit_seq"] = 0        # stale/corrupt counter
+    check("A7: a stale counter never yields an id that already exists",
+          next_circuit_id(w7c) not in w7c["circuits"])
+
+    # -- commit_route must refuse to write over a circuit that already exists.
+    #    The old max()+1 id scheme could not collide by construction; a stored
+    #    counter can, and an overwrite silently orphans the old circuit's
+    #    strands and ports while the record describes a different path.
+    w7d = _copy.deepcopy(T)
+    r7d = resolve_route_options(free_port(w7d, "A1-S03", "fiber"),
+                                free_port(w7d, "B3-N07", "fiber"),
+                                count=1, topology=w7d)[0]
+    taken = next(iter(w7d["circuits"]))
+    snapshot = _copy.deepcopy(w7d["circuits"][taken])
+    try:
+        commit_route(w7d, r7d, taken)
+        check("A7: committing onto an existing circuit id is refused",
+              False, f"overwrote {taken}")
+    except ValueError:
+        check("A7: committing onto an existing circuit id is refused",
+              w7d["circuits"][taken] == snapshot, "circuit was modified anyway")
+
     # -- A4: a negative or absurd port count must be refused, not materialised -
     a4_specs = [
         {"row": 2, "serial": "9900000021", "type": "switch", "raw_type": "switch",
@@ -256,6 +298,16 @@ def _phase2_fixes(T):
         except _er.HTTPError as e:
             return e.code, e.read()
 
+    def _hit_raw(base, path, blob):
+        """A raw body, for the endpoints that take an .xlsx rather than JSON."""
+        req = _rq.Request(base + path, data=blob, method="POST",
+                          headers={"Content-Type": "application/octet-stream"})
+        try:
+            with _rq.urlopen(req, timeout=180) as r:
+                return r.status, r.read()
+        except _er.HTTPError as e:
+            return e.code, e.read()
+
     # -- E1: every endpoint answers, and none of them 500s -------------------
     with _serve() as base:
         a_rack = next(iter(server.TOPOLOGY["racks"]))
@@ -328,6 +380,76 @@ def _phase2_fixes(T):
             t.join(timeout=5)
         check("A3: /api/stats never 500s while a writer grows the map",
               not failed, f"{len(failed)} failed reads")
+
+    # -- A3 (the half the first fix missed): locking the GET handlers is not
+    #    enough. POST /api/route deliberately runs OUTSIDE the lock, and
+    #    _pick_transit_port iterates topology["ports"] — which a device
+    #    installation grows. Same RuntimeError, different door. --------------
+    with _serve() as base:
+        shared = server.TOPOLOGY
+        src3 = next(p for p in shared["ports"].values()
+                    if p["rack"] == "A1-S05" and p["type"] == "fiber"
+                    and p["status"] == "free")["id"]
+        dst3 = next(p for p in shared["ports"].values()
+                    if p["rack"] == "D5-N06" and p["type"] == "fiber"
+                    and p["status"] == "free")["id"]
+        stop3 = _th2.Event()
+        failed3 = []
+
+        def _planner():
+            while not stop3.is_set():
+                if _hit(base, "/api/route",
+                        {"src": src3, "dst": dst3, "count": 1})[0] != 200:
+                    failed3.append(1)
+
+        def _installer():
+            # what materialise() does: add port keys, under the lock a write holds
+            i = 0
+            while not stop3.is_set():
+                with server.WRITE_LOCK:
+                    ks = [f"__dev__{i}_{j}" for j in range(600)]
+                    for k in ks:
+                        shared["ports"][k] = {"id": k, "rack": "A1-S05", "device": "x",
+                                              "index": 1, "type": "fiber", "status": "free"}
+                    for k in ks:
+                        del shared["ports"][k]
+                i += 1
+
+        ts3 = [_th2.Thread(target=_planner) for _ in range(3)] + \
+              [_th2.Thread(target=_installer) for _ in range(2)]
+        for t in ts3:
+            t.start()
+        _time2.sleep(3.0)
+        stop3.set()
+        for t in ts3:
+            t.join(timeout=6)
+        check("A3: /api/route never 500s while a writer grows the map",
+              not failed3, f"{len(failed3)} failed route proposals")
+
+    # -- E1 (widened): the real bulk pipeline over HTTP — plan, open a row for
+    #    alternatives, choose one, then execute. This is the path that commits
+    #    and re-commits PLAN-xxxx ids, so it is what a commit_route guard can
+    #    break; the endpoint smoke tests above never reach it. --------------
+    import io as _io1, make_sample_sheet as _mss1
+    with _serve() as base:
+        _buf = _io1.BytesIO()
+        _mss1.write_xlsx(_buf, {"P2P": _mss1.build_clean(server.TOPOLOGY)})
+        _, pb = _hit_raw(base, "/api/bulk/plan", _buf.getvalue())
+        _plan = _j2.loads(pb)
+        _rows = [r["row"] for r in _plan.get("results", []) if r.get("status") == "ok"]
+        _, rb = _hit(base, "/api/bulk/row", {"plan_id": _plan["plan_id"],
+                                             "row": _rows[0], "count": 2})
+        _, cb = _hit(base, "/api/bulk/choose", {"plan_id": _plan["plan_id"],
+                                                "row": _rows[0], "option": 1})
+        _, eb = _hit(base, "/api/bulk/execute", {"plan_id": _plan["plan_id"]})
+        _out = _j2.loads(eb)
+        check("E1: the whole bulk pipeline runs over HTTP — plan, row, choose, execute",
+              _plan.get("status") == "ok" and _j2.loads(rb).get("status") == "ok"
+              and _j2.loads(cb).get("status") == "ok"
+              and len(_out.get("committed", [])) == len(_rows)
+              and not _out.get("failed"),
+              f"planned={len(_rows)} committed={len(_out.get('committed', []))} "
+              f"failed={_out.get('failed')}")
 
 
 def main():

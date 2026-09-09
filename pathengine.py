@@ -70,7 +70,26 @@ class RouteError(Exception):
 
 def load_topology(path=TOPOLOGY_PATH):
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        topology = json.load(f)
+    seed_circuit_seq(topology)
+    return topology
+
+
+def seed_circuit_seq(topology):
+    """Establish the circuit-id high-water mark, at load, before anything runs.
+
+    It has to happen HERE and not lazily inside next_circuit_id(): a map that
+    has never allocated an id through the counter — which is every map as it
+    comes off disk — would otherwise seed the counter on the first allocation,
+    and that first allocation can easily come AFTER a release. Seeding from the
+    map as it stands then reads a maximum the released circuit is no longer in,
+    and hands its id straight back to a different circuit.
+    """
+    meta = topology.setdefault("meta", {})
+    nums = [int(cid.split("-", 1)[1]) for cid in (topology.get("circuits") or {})
+            if cid.startswith("CIR-") and cid.split("-", 1)[1].isdigit()]
+    meta["circuit_seq"] = max([meta.get("circuit_seq") or 0] + nums)
+    return meta["circuit_seq"]
 
 
 def save_topology(topology, path=TOPOLOGY_PATH):
@@ -592,16 +611,22 @@ def next_circuit_id(topology):
     Work Orders, on cable labels in the field, in email. Releasing the
     highest-numbered circuit and deriving the next id from what is left hands
     that exact id to a different circuit, silently invalidating all of them.
+
+    The counter is seeded by seed_circuit_seq() at load. The skip-if-taken loop
+    below is the belt to that braces: a counter that somehow arrives stale — a
+    hand-edited map, a bad merge of topology.json between two machines — must
+    still never name a circuit that already exists, because commit_route would
+    overwrite it. Normally the loop runs exactly once.
     """
     meta = topology.setdefault("meta", {})
-    n = meta.get("circuit_seq")
-    if n is None:                      # one-time migration from an existing map
-        nums = [int(cid.split("-", 1)[1]) for cid in topology.get("circuits", {})
-                if cid.startswith("CIR-") and cid.split("-", 1)[1].isdigit()]
-        n = max(nums) if nums else 0
-    n += 1
-    meta["circuit_seq"] = n
-    return f"CIR-{n:04d}"
+    circuits = topology.get("circuits") or {}
+    n = meta.get("circuit_seq") or 0
+    while True:
+        n += 1
+        cid = f"CIR-{n:04d}"
+        if cid not in circuits:
+            meta["circuit_seq"] = n
+            return cid
 
 
 def revalidate_route(topology, route):
@@ -891,7 +916,17 @@ def extend_route(topology, circuit_id, dst_port_id):
 
 def commit_route(topology, route, circuit_id):
     """Apply an approved route: consume the ports, charge the trunks, and
-    record the circuit. In production this is where the ITA write-back goes."""
+    record the circuit. In production this is where the ITA write-back goes.
+
+    Refuses an id the map already holds, BEFORE touching anything: the old
+    max(existing)+1 scheme could not collide by construction, a stored counter
+    can, and overwriting the record would leave the previous circuit's strands
+    and ports still marked as its while the record described a different path.
+    """
+    if circuit_id in (topology.get("circuits") or {}):
+        raise ValueError(
+            f"{circuit_id} already exists on the map — refusing to overwrite it. "
+            f"Release it first if that is really what you meant.")
     edges = {e["id"]: e for e in topology["edges"]}
     strand_log = []
     for seg in route["segments"]:
