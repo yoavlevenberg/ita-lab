@@ -21,16 +21,63 @@ colour would describe something that never happens. Every zone therefore
 contains only pods that can actually receive a device.
 """
 
+import json
+from pathlib import Path
+
 import fuzzy
 
-# Pod membership, as given by the site.
-NAMED_ZONES = {
-    "green": ("A3", "A4", "A5", "B3", "C3", "D3", "D4", "D5"),
-    "blue": ("A1", "B1", "B2", "C1", "C2", "D1"),
-    "white": ("A7", "B7", "C7", "D7"),
-}
 DEFAULT_ZONE = "yellow"          # whatever is left over, MDA pods excepted
 NEUTRAL = None                   # what an MDA pod's zone is
+
+# Which pods make up a colour is an operational decision — tenancy, security,
+# environment — taken by whoever runs the site, not by whoever wrote this. It
+# lives in configuration so that moving one pod from green to blue is an edit to
+# a file, not an edit to code plus a deploy.
+ZONES_PATH = Path(__file__).parent / "data" / "zones.json"
+
+
+class ZoneError(Exception):
+    """An unrecognised zone name, or one with nowhere to put anything."""
+
+
+def load_named_zones(path=None):
+    """Read pod membership from configuration, and refuse a broken file.
+
+    Validated rather than trusted, because a zone is the hardest boundary in the
+    system: if a typo here silently produced an empty or overlapping zone, the
+    planner would go on placing equipment and the boundary would simply not be
+    enforced. A hard boundary must fail loudly, never quietly widen — the same
+    rule resolve() follows for an unrecognised colour name.
+    """
+    path = Path(path or ZONES_PATH)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ZoneError(f"{path} is missing — it says which pods make up each "
+                        f"colour, and nothing can be placed by zone without it")
+    except ValueError as e:
+        raise ZoneError(f"{path} is not readable JSON ({e})")
+    if not isinstance(raw, dict) or not raw:
+        raise ZoneError(f"{path} should be an object of colour -> list of pods")
+
+    seen = {}
+    out = {}
+    for name, pods in raw.items():
+        if name == DEFAULT_ZONE:
+            raise ZoneError(f"'{DEFAULT_ZONE}' is whatever is left over and must "
+                            f"not be listed in {path}")
+        if not isinstance(pods, list) or not all(isinstance(p, str) for p in pods):
+            raise ZoneError(f"zone '{name}' in {path} should be a list of pod ids")
+        for pod in pods:
+            if pod in seen:
+                raise ZoneError(f"pod {pod} is claimed by both '{seen[pod]}' and "
+                                f"'{name}' in {path} — a pod belongs to one colour")
+            seen[pod] = name
+        out[name] = tuple(pods)
+    return out
+
+
+NAMED_ZONES = load_named_zones()
 
 # What people actually type in the sheet. Beyond the obvious spellings this
 # carries two kinds of known variant, which are listed rather than left to the
@@ -55,11 +102,6 @@ COLOURS = {
 }
 
 ALL = tuple(NAMED_ZONES) + (DEFAULT_ZONE,)
-
-
-class ZoneError(Exception):
-    """An unrecognised zone name, or one with nowhere to put anything."""
-
 
 _NAMES = "green (ירוק), blue (כחול), white (לבן), yellow (צהוב)"
 

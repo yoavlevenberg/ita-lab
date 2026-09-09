@@ -721,6 +721,38 @@ def _model_cleanup(T):
     check("E4: every cabinet id cli.py shows a user exists on the map",
           not _unreal, f"not on the map: {_unreal}")
 
+    # -- D5: which colour a pod belongs to is an operational decision (tenancy,
+    #    security, environment). It lived in source, so moving one pod from
+    #    green to blue meant editing code and redeploying — a blocker once the
+    #    tool is run by an infrastructure team rather than by its author. -----
+    import json as _jz, tempfile as _tfz, zones as _zn
+    _zpath = _ple4.Path(__file__).parent / "data" / "zones.json"
+    check("D5: zone membership is configuration on disk, not source",
+          _zpath.exists(), f"{_zpath} is missing")
+    if _zpath.exists():
+        _on_disk = {k: tuple(v) for k, v in
+                    _jz.loads(_zpath.read_text(encoding="utf-8")).items()}
+        check("D5: what the module uses is what the file says",
+              _zn.NAMED_ZONES == _on_disk,
+              f"{_zn.NAMED_ZONES} vs {_on_disk}")
+
+    # moving a pod between colours must take effect without touching code
+    _d = _tfz.mkdtemp()
+    _alt = _ple4.Path(_d) / "zones.json"
+    _alt.write_text(_jz.dumps({"green": ["A3"], "blue": ["A4"]}), encoding="utf-8")
+    check("D5: a different file yields different membership, no code change",
+          _zn.load_named_zones(_alt) == {"green": ("A3",), "blue": ("A4",)},
+          str(_zn.load_named_zones(_alt)))
+
+    # a hard boundary must not go soft on a bad config — it has to be refused
+    _bad = _ple4.Path(_d) / "clash.json"
+    _bad.write_text(_jz.dumps({"green": ["A3", "A4"], "blue": ["A4"]}), encoding="utf-8")
+    try:
+        _zn.load_named_zones(_bad)
+        check("D5: a pod claimed by two colours is refused", False, "accepted")
+    except _zn.ZoneError as e:
+        check("D5: a pod claimed by two colours is refused", "A4" in str(e), str(e)[:80])
+
 
 def main():
     T = load_topology()
