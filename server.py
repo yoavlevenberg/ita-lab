@@ -153,14 +153,14 @@ def _next_plan_id():
     return f"PLAN-{_PLAN_SEQ:04d}"
 
 
-# Bumped by anything that changes the live map. A plan's working copy is built
-# from the map, so it is only trustworthy while this has not moved.
-MAP_VERSION = 0
-
-
-def _map_changed():
-    global MAP_VERSION
-    MAP_VERSION += 1
+# A plan's working copy is built from the live map, so it is only trustworthy
+# while the map has not moved. Asked of the store rather than counted here: the
+# store is the only layer that knows a change happened, and a second counter
+# kept alongside it can disagree with it. It did — a batch that raised part-way
+# had already written what it managed, but the bump ran only after the batch
+# returned, so a stale working copy stayed "current" against a map that moved.
+def _map_version():
+    return STORE.revision
 
 
 _STATE_SEQ = 0
@@ -519,7 +519,6 @@ class Handler(BaseHTTPRequestHandler):
 
                 circuit_id = pathengine.next_circuit_id(TOPOLOGY)
                 circuit = STORE.commit_route(TOPOLOGY, route, circuit_id)
-                _map_changed()
             work_order = workorder.render(route, circuit_id=circuit_id)
             return self._send(200, {"status": "ok", "circuit": circuit, "work_order": work_order})
 
@@ -744,7 +743,7 @@ class Handler(BaseHTTPRequestHandler):
         # Dropped whenever the live map moves underneath it: an alternative
         # computed against a stale map is worse than a slow one.
         cached = plan.get("_state")
-        if cached is not None and cached["version"] == MAP_VERSION:
+        if cached is not None and cached["version"] == _map_version():
             cached["seq"] = _next_state_seq()      # touched, so keep it longer
             return cached["map"]
 
@@ -767,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, pathengine.RouteError):
                 pass
 
-        plan["_state"] = {"version": MAP_VERSION, "map": base,
+        plan["_state"] = {"version": _map_version(), "map": base,
                           "seq": _next_state_seq()}
         _trim_plan_states(keep=plan)
         # returned from the local, not re-read from the plan: a bug in trimming
@@ -812,8 +811,6 @@ class Handler(BaseHTTPRequestHandler):
                             TOPOLOGY, cid, force=bool(req.get("force"))))
                     except pathengine.DecommissionError as e:
                         refused.append({"circuit_id": cid, "reason": str(e)})
-            if released:
-                _map_changed()
 
         # a plan whose circuits are gone must not still offer to reopen them
         for plan in PLANS.values():
@@ -854,7 +851,6 @@ class Handler(BaseHTTPRequestHandler):
                 rec = STORE.truncate_route(TOPOLOGY, cid)
             except pathengine.DecommissionError as e:
                 return self._send(409, {"error": str(e)})
-            _map_changed()
         return self._send(200, {"status": "ok", **rec,
                                 "circuit": TOPOLOGY["circuits"][cid]})
 
@@ -875,7 +871,6 @@ class Handler(BaseHTTPRequestHandler):
                 circuit = STORE.extend_route(TOPOLOGY, cid, dst)
             except (pathengine.RouteError, KeyError) as e:
                 return self._send(409, {"error": str(e)})
-            _map_changed()
         return self._send(200, {"status": "ok", "circuit": circuit,
                                 "work_order": workorder.render(
                                     _route_of_circuit(cid), circuit_id=cid)})
@@ -1091,8 +1086,6 @@ class Handler(BaseHTTPRequestHandler):
                     # remember which circuit it became: reopening the row later
                     # must show what was installed, not a proposal
                     r["circuit_id"] = committed_rows[r["row"]]
-            if outcome["committed"] or racked["installed"]:
-                _map_changed()      # the batch above already wrote it back
         return self._send(200, {"status": "ok", **outcome})
 
     def log_message(self, fmt, *args):

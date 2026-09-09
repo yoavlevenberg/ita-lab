@@ -33,6 +33,43 @@ class XlsxError(Exception):
     """The file isn't a readable .xlsx, or has no usable sheet."""
 
 
+# A demand sheet is kilobytes. The server caps the upload at 8MB, but that caps
+# the COMPRESSED size — zipfile will happily expand a member without limit, and
+# 0.5MB of zeros comes back as 500MB. So the declared size is checked before
+# anything is decompressed.
+MAX_PART = 64 * 1024 * 1024
+
+
+def _read_part(z, name):
+    info = z.getinfo(name)          # KeyError for a missing part, as z.read has
+    if info.file_size > MAX_PART:
+        raise XlsxError(
+            f"'{name}' expands to {info.file_size // 1024 // 1024} MB — that is "
+            f"not a demand sheet, and it is refused before it is unpacked")
+    return z.read(name)
+
+
+def _parse_part(z, name):
+    """Read one XML part of the workbook, defensively.
+
+    ElementTree DOES expand internal entities, so a spreadsheet that declares
+    ten nested levels of them reaches billions of characters and takes the
+    process down. A real spreadsheet has no reason to declare any, so a file
+    that does is refused rather than parsed — which is the same protection
+    defusedxml would give, without adding a dependency to a closed network.
+    """
+    blob = _read_part(z, name)
+    if b"<!DOCTYPE" in blob[:1024].lstrip() or b"<!ENTITY" in blob[:8192]:
+        raise XlsxError(
+            f"'{name}' declares XML entities — a spreadsheet does not need "
+            f"them, and the file is refused as a precaution")
+    try:
+        return ET.fromstring(blob)
+    except ET.ParseError as e:
+        raise XlsxError(f"'{name}' is not readable XML ({e}) — the file looks "
+                        f"corrupt rather than merely wrong") from e
+
+
 def _col_index(letters):
     """'A' -> 0, 'B' -> 1, ... 'AA' -> 26."""
     n = 0
@@ -49,7 +86,7 @@ def _text_of(node):
 
 def _shared_strings(z):
     try:
-        root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        root = _parse_part(z, "xl/sharedStrings.xml")
     except KeyError:
         return []
     return [_text_of(si) for si in root.findall(f"{NS}si")]
@@ -63,8 +100,8 @@ def _sheet_paths(z):
     and a file with several tabs needs them matched by name.
     """
     try:
-        wb = ET.fromstring(z.read("xl/workbook.xml"))
-        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        wb = _parse_part(z, "xl/workbook.xml")
+        rels = _parse_part(z, "xl/_rels/workbook.xml.rels")
     except KeyError as e:
         raise XlsxError(f"not a valid .xlsx (missing {e})")
 
@@ -161,7 +198,7 @@ def read_rows(path_or_file, sheet=None):
                 raise XlsxError(f"no sheet named '{sheet}' — this workbook has: "
                                 + ", ".join(paths))
             part = match
-        doc = ET.fromstring(z.read(part))
+        doc = _parse_part(z, part)
 
         rows, width = [], 0
         for n, row in enumerate(doc.iter(f"{NS}row"), start=1):

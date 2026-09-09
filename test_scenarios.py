@@ -426,6 +426,32 @@ def _phase2_fixes(T):
         check("A3: /api/route never 500s while a writer grows the map",
               not failed3, f"{len(failed3)} failed route proposals")
 
+    # -- code-review: a batch that fails part-way still writes what it did (its
+    #    finally flushes), so the token the plan cache trusts has to move too.
+    #    It used to be bumped by the caller on the success path only, which
+    #    left a cached working map being reused against a map that had moved.
+    with _serve() as base:
+        live = server.TOPOLOGY
+        r_mv = resolve_route_options(
+            next(p for p in live["ports"].values()
+                 if p["rack"] == "A1-S05" and p["type"] == "fiber"
+                 and p["status"] == "free")["id"],
+            next(p for p in live["ports"].values()
+                 if p["rack"] == "D5-N06" and p["type"] == "fiber"
+                 and p["status"] == "free")["id"],
+            count=1, topology=live)[0]
+        import pathengine as _pe_mv
+        before_v = server._map_version()
+        try:
+            with server.STORE.batch(live):
+                server.STORE.commit_route(live, r_mv, _pe_mv.next_circuit_id(live))
+                raise RuntimeError("the device install blew up half way through")
+        except RuntimeError:
+            pass
+        check("code-review: a batch that fails part-way still moves the map version",
+              server._map_version() != before_v,
+              "a stale plan working-copy would be reused against a changed map")
+
     # -- E1 (widened): the real bulk pipeline over HTTP — plan, open a row for
     #    alternatives, choose one, then execute. This is the path that commits
     #    and re-commits PLAN-xxxx ids, so it is what a commit_route guard can
@@ -590,6 +616,74 @@ def _phase3_perf(T):
                 want |= set(range(dev["u_start"] - dev["u_size"] + 1, dev["u_start"] + 1))
         check(f"B3: occupancy of {rid} matches a full scan of every device",
               placement.occupancy(T, rid) == want)
+
+
+def _hardening(T):
+    """FIXES.md C1, C2 — the .xlsx reader is parsing code we wrote ourselves,
+    and a demand sheet is a file that arrives by email."""
+    import io as _ioh, zipfile as _zh
+    import make_sample_sheet as _mssh
+    import xlsxreader as _xr
+
+    def _rebuild(parts):
+        out = _ioh.BytesIO()
+        with _zh.ZipFile(out, "w", _zh.ZIP_DEFLATED) as z:
+            for name, blob in parts.items():
+                z.writestr(name, blob)
+        out.seek(0)
+        return out
+
+    base = _ioh.BytesIO()
+    _mssh.write_xlsx(base, {"P2P": _mssh.build_clean(T)})
+    with _zh.ZipFile(_ioh.BytesIO(base.getvalue())) as z:
+        parts = {n: z.read(n) for n in z.namelist()}
+    sheet_part = next(n for n in parts if n.startswith("xl/worksheets/"))
+
+    # the untouched file must still read, or the checks below prove nothing
+    base.seek(0)
+    check("C1/C2: the sample sheet still reads before anything is tampered with",
+          len(_xr.read_rows(base)) > 0)
+
+    # -- C1: MAX_UPLOAD bounds the COMPRESSED size; z.read() then expands with
+    #        no limit at all. 0.5MB of zeros became 500MB in the review. ------
+    padded = dict(parts)
+    padded[sheet_part] = b"\0" * 200_000          # compresses to almost nothing
+    was_max = getattr(_xr, "MAX_PART", None)
+    _xr.MAX_PART = 50_000                          # so the test costs bytes, not GB
+    try:
+        try:
+            _xr.read_rows(_rebuild(padded))
+            check("C1: a part that expands past the limit is refused", False,
+                  "it was decompressed anyway")
+        except _xr.XlsxError as e:
+            check("C1: a part that expands past the limit is refused",
+                  "MB" in str(e) or "large" in str(e).lower(), str(e)[:90])
+    finally:
+        if was_max is None:
+            del _xr.MAX_PART
+        else:
+            _xr.MAX_PART = was_max
+
+    # -- C2: ElementTree DOES expand internal entities; ten nested levels reach
+    #        billions of characters and take the process down. ---------------
+    bomb = dict(parts)
+    bomb[sheet_part] = (
+        b'<?xml version="1.0"?>\n'
+        b'<!DOCTYPE worksheet [\n'
+        b'  <!ENTITY a "aaaaaaaaaa">\n'
+        b'  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">\n'
+        b'  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">\n'
+        b']>\n'
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>&c;</t></is></c></row>'
+        b'</sheetData></worksheet>')
+    try:
+        _xr.read_rows(_rebuild(bomb))
+        check("C2: a sheet that declares XML entities is refused", False,
+              "the entities were expanded")
+    except _xr.XlsxError as e:
+        check("C2: a sheet that declares XML entities is refused",
+              "entit" in str(e).lower(), str(e)[:90])
 
 
 def main():
@@ -2099,6 +2193,9 @@ def main():
 
     # ---------- phase 3 performance (FIXES.md B1, B2, B3) ----------
     _phase3_perf(T)
+
+    # ---------- hardening the sheet reader (FIXES.md C1, C2) ----------
+    _hardening(T)
 
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,

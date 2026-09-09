@@ -52,6 +52,14 @@ class Store:
 
     name = "abstract"
 
+    # Bumped once per applied change. It lives here because this is the only
+    # layer that knows a change happened at all: callers used to keep their own
+    # "the map moved" counter and bump it after a batch returned, which meant a
+    # batch that raised part-way — having already written what it did manage —
+    # left that counter behind, and a cached working copy of the map went on
+    # being trusted against a map that had moved underneath it.
+    revision = 0
+
     # ---- reading -----------------------------------------------------------
     def load(self):
         raise NotImplementedError
@@ -131,6 +139,7 @@ class JsonFileStore(Store):
     # -- writing back --------------------------------------------------------
     def _changed(self, topology):
         self._dirty = True
+        self.revision += 1      # before the flush: the map has already moved
         if self._depth == 0:
             self.flush(topology)
 
