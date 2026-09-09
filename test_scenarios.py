@@ -721,6 +721,38 @@ def _model_cleanup(T):
     check("E4: every cabinet id cli.py shows a user exists on the map",
           not _unreal, f"not on the map: {_unreal}")
 
+    # -- A5: LABEL and SERIAL come straight out of the spreadsheet. 53 places in
+    #    the interface escape what they interpolate and four did not, which is an
+    #    inconsistency rather than a decision. Asserted against the source, the
+    #    same way cli.py's cabinet ids are — there is no JS harness here. ------
+    _ui = (_ple4.Path(__file__).parent / "ui.html").read_text(encoding="utf-8")
+    _unsafe = [(n, ln.strip()[:66]) for n, ln in enumerate(_ui.splitlines(), 1)
+               if _ree4.search(r"\$\{d\.(label|id)\b", ln) and "escapeHtml" not in ln]
+    check("A5: no sheet-supplied device field reaches HTML unescaped",
+          not _unsafe, str(_unsafe[:4]))
+
+    # and the serial itself has to be a serial. serials.normalise() falls back to
+    # str(text).strip() when its pattern misses, so anything at all was accepted
+    # — including the SN-NEWLEAF01 that appears as an example in the README.
+    _a5_specs = [
+        {"row": 2, "serial": 'A"><b>x', "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "quote"},
+        {"row": 3, "serial": "SN-NEWLEAF01", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "prefixed"},
+    ]
+    _a5 = {i["row"]: i["kind"]
+           for i in bulkplan.validate_devices(T, _a5_specs, [])["issues"]}
+    check("A5: a serial that is not a plain number is refused",
+          _a5 == {2: "bad_serial", 3: "bad_serial"}, str(_a5))
+
+    # a real serial must of course still pass
+    _ok5 = bulkplan.validate_devices(T, [
+        {"row": 2, "serial": "9900000051", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "fine"}], [])
+    check("A5: a ten-digit serial is still accepted",
+          not any(i["kind"] == "bad_serial" for i in _ok5["issues"]),
+          str([i["kind"] for i in _ok5["issues"]]))
+
     # -- D5: which colour a pod belongs to is an operational decision (tenancy,
     #    security, environment). It lived in source, so moving one pod from
     #    green to blue meant editing code and redeploying — a blocker once the

@@ -991,8 +991,8 @@ function renderRack(){
     const used = ports.filter(p => p.status === "used").length;
     body += `<div class="dev ${d.type} ${sel.device === d.id ? "sel" : ""}"
                   style="top:${(U - d.u_start) * H + 1}px;height:${d.u_size * H - 2}px"
-                  data-dev="${d.id}" title="${d.label}">
-               <span class="nm">${d.name}</span>
+                  data-dev="${escapeHtml(d.id)}" title="${escapeHtml(d.label || "")}">
+               <span class="nm">${escapeHtml(d.name)}</span>
                <span class="po">${used}/${ports.length}</span>
              </div>`;
   }
@@ -1029,11 +1029,11 @@ function renderDevice(){
   const cu  = ports.filter(p => p.type === "copper");
   const used = ports.filter(p => p.status === "used");
 
-  $("devTitle").innerHTML = `רכיב <span class="mono" style="color:var(--text)">${d.name}</span>`;
+  $("devTitle").innerHTML = `רכיב <span class="mono" style="color:var(--text)">${escapeHtml(d.name)}</span>`;
 
   let html = `<div class="dmeta">
       <div><span class="k">סוג רכיב</span> ${TYPE_HE[d.type] || d.type}</div>
-      <div><span class="k">דגם / תיאור</span> ${d.label}</div>
+      <div><span class="k">דגם / תיאור</span> ${escapeHtml(d.label || "")}</div>
       <div><span class="k">מיקום</span> <span class="mono">${d.rack}</span> · U${d.u_start}${d.u_size > 1 ? "–U" + (d.u_start - d.u_size + 1) : ""} (${d.u_size}U)</div>
       <div><span class="k">פורטים</span> ${ports.length} סה"כ · ${used.length} תפוסים · ${ports.length - used.length} פנויים</div>
     </div>`;
