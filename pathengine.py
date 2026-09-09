@@ -109,7 +109,12 @@ def save_topology(topology, path=TOPOLOGY_PATH):
     # small pieces and costs four times as much for a map this size; the string
     # form keeps the write as cheap as the unsafe version it replaces, so
     # safety here costs nothing.
-    blob = json.dumps(topology, indent=1, ensure_ascii=False)
+    # Derived indexes are cached on the map under a leading underscore (see
+    # placement.devices_by_rack). They are rebuilt on demand and must never be
+    # written: on disk they are dead weight, and read back they are a second
+    # copy of the truth that nothing keeps in step.
+    blob = json.dumps({k: v for k, v in topology.items() if not k.startswith("_")},
+                      indent=1, ensure_ascii=False)
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(blob)

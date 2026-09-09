@@ -452,6 +452,58 @@ def _phase2_fixes(T):
               f"failed={_out.get('failed')}")
 
 
+def _phase3_perf(T):
+    """FIXES.md phase 3 — the scans that grow with the map. Locking the readers
+    (A3) made these worse than the review found them: a slow read now holds the
+    lock, so it blocks writers too."""
+    import copy as _copy3
+    import time as _t3
+
+    def _median_ms(fn, n=3):
+        ts = []
+        for _ in range(n):
+            a = _t3.perf_counter()
+            fn()
+            ts.append((_t3.perf_counter() - a) * 1000)
+        return sorted(ts)[len(ts) // 2]
+
+    # -- B3: placement scanned all devices once per candidate cabinet, ~1,000
+    #        times for a single new device.
+    #
+    #        Asserted as a COMPLEXITY property, not a millisecond count: this
+    #        map is a scratch dataset that gets replaced by the real ITA export,
+    #        so a wall-clock threshold tuned to 6,312 devices would be measuring
+    #        the fixture rather than the code. Growing cabinets we never ask
+    #        about must not slow down the cabinet we do ask about. ----------
+    spec = {"row": 2, "serial": "9900000041", "type": "switch", "raw_type": "switch",
+            "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "perf"}
+    ranked = placement.rank_positions(T, spec, ["A1-S05"], limit=3)
+    check("B3: the ranking itself is unchanged — still the nearest cabinet first",
+          ranked and ranked[0]["rack"] == "A1-S05", str(ranked[:1]))
+
+    grown = _copy3.deepcopy(T)
+    placement.occupancy(grown, "A1-S05")                    # warm
+    before = _median_ms(lambda: placement.occupancy(grown, "A1-S05"), n=5)
+    for i in range(20_000):                                 # 4x the whole map
+        grown["devices"][f"__pad__{i}"] = {
+            "id": f"__pad__{i}", "rack": "D8-N09", "u_start": 1, "u_size": 1,
+            "type": "server", "fiber_ports": 0, "copper_ports": 0}
+    placement.occupancy(grown, "A1-S05")                    # absorb the rebuild
+    after = _median_ms(lambda: placement.occupancy(grown, "A1-S05"), n=5)
+    check("B3: asking about one cabinet does not scan every device on the map",
+          after < max(before * 3, 0.5),
+          f"{before:.3f}ms -> {after:.3f}ms after 20,000 devices landed elsewhere")
+
+    # occupancy must still be exactly the set of U a cabinet's devices hold
+    for rid in ("A1-S05", "D5-N06", "A2-S01"):
+        want = set()
+        for dev in T["devices"].values():
+            if dev["rack"] == rid:
+                want |= set(range(dev["u_start"] - dev["u_size"] + 1, dev["u_start"] + 1))
+        check(f"B3: occupancy of {rid} matches a full scan of every device",
+              placement.occupancy(T, rid) == want)
+
+
 def main():
     T = load_topology()
 
@@ -1956,6 +2008,9 @@ def main():
 
     # ---------- phase 2 safety net (FIXES.md E1, A3, E5) ----------
     _phase2_fixes(T)
+
+    # ---------- phase 3 performance (FIXES.md B1, B2, B3) ----------
+    _phase3_perf(T)
 
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,
