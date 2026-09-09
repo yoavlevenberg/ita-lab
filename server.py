@@ -72,8 +72,10 @@ import contextlib
 import copy
 import io
 import json
+import os
 import threading
 import traceback
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -94,6 +96,11 @@ import zones
 
 HERE = Path(__file__).parent
 PORT = 8800
+
+# In development the browser gets the full exception text — it is the fastest
+# way to see what a probe hit. Set ITA_ENV=production and the client gets only a
+# reference id; the traceback still goes to the server log.
+PRODUCTION = os.environ.get("ITA_ENV", "").lower() == "production"
 MAX_UPLOAD = 8 * 1024 * 1024        # a demand sheet is kilobytes; refuse anything wild
 
 # Where the map comes from and where changes go back to. Swapping this one
@@ -119,6 +126,18 @@ WRITE_LOCK = threading.Lock()
 PLANS = {}
 MAX_PLANS = 20            # whole plans kept addressable
 MAX_PLAN_STATES = 3       # working maps kept — these are the 32MB ones
+
+# Monotonic, NOT len(PLANS) + 1: PLANS is capped, so once it is full len() stops
+# growing and every later plan is handed the same id — a tab left open on the
+# old id then executes whatever sheet now sits under it.
+_PLAN_SEQ = 0
+
+
+def _next_plan_id():
+    global _PLAN_SEQ
+    _PLAN_SEQ += 1
+    return f"PLAN-{_PLAN_SEQ:04d}"
+
 
 # Bumped by anything that changes the live map. A plan's working copy is built
 # from the map, so it is only trustworthy while this has not moved.
@@ -164,15 +183,36 @@ def _remember_plan(plan_id, plan):
 # a long session would otherwise accumulate every proposal ever made.
 ROUTES = {}
 MAX_CACHED_ROUTES = 200
+_ROUTE_SEQ = 0
 
 
 def _cache_route(route):
-    key = f"R{len(ROUTES) + 1:05d}"
-    if len(ROUTES) >= MAX_CACHED_ROUTES:
-        for old in list(ROUTES)[:len(ROUTES) - MAX_CACHED_ROUTES + 1]:
-            ROUTES.pop(old, None)
+    # Monotonic, NOT len(ROUTES) + 1: once ROUTES is full len() stops growing and
+    # the key freezes, so every later proposal overwrites the same slot and an
+    # older route card would print whatever route now sits under its key.
+    global _ROUTE_SEQ
+    _ROUTE_SEQ += 1
+    key = f"R{_ROUTE_SEQ:05d}"
+    while len(ROUTES) >= MAX_CACHED_ROUTES:
+        ROUTES.pop(next(iter(ROUTES)), None)
     ROUTES[key] = route
     return key
+
+
+def _resolve_execute_route(req):
+    """Execute is given a route_key, not a route. The route object stays in
+    ROUTES server-side, the same rule the bulk path already follows — the
+    browser cannot rewrite one on the way back, and a stale/edited object
+    cannot be committed. Returns (route, None) or (None, (code, body)).
+    """
+    key = req.get("route_key")
+    if not key:
+        return None, (400, {"error": "route_key is required"})
+    route = ROUTES.get(key)
+    if route is None:
+        return None, (409, {"error": "this proposed route is no longer held "
+                                     "on the server — recompute it and try again"})
+    return route, None
 
 
 def _route_of_circuit(circuit_id):
@@ -208,6 +248,7 @@ def _route_of_circuit(circuit_id):
     far = circuit.get("b_port") or circuit.get("open_end")
     return {
         "cable_type": ct_name, "domain": circuit["domain"],
+        "created_at": circuit.get("created_at"),
         "src_port": circuit["a_port"], "dst_port": far,
         "src_location": pathengine.describe_port(TOPOLOGY, circuit["a_port"]),
         "dst_location": (pathengine.describe_port(TOPOLOGY, far) if far
@@ -248,9 +289,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return fn(*args)
         except Exception as e:
+            ref = uuid.uuid4().hex[:8]
+            print(f"[error {ref}]")
             traceback.print_exc()
+            if PRODUCTION:
+                body = {"error": f"internal error (ref {ref})"}
+            else:
+                body = {"error": f"{type(e).__name__}: {e}", "ref": ref}
             try:
-                self._send(500, {"error": f"{type(e).__name__}: {e}"})
+                self._send(500, body)
             except Exception:
                 pass          # client already gone; nothing useful left to do
 
@@ -431,9 +478,9 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 return self._send(400, {"error": "invalid JSON"})
 
-            route = req.get("route")
-            if not route:
-                return self._send(400, {"error": "route is required"})
+            route, err = _resolve_execute_route(req)
+            if err:
+                return self._send(*err)
 
             with WRITE_LOCK:
                 try:
@@ -559,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                                constraints=constraints)
         result["new_devices"] = new_devices
 
-        plan_id = f"PLAN-{len(PLANS) + 1:04d}"
+        plan_id = _next_plan_id()
         _remember_plan(plan_id, result)
         # the routes themselves stay server-side; the browser gets the summary
         # it needs to render the table and decide whether to commit

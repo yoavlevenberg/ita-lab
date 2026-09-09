@@ -48,6 +48,173 @@ def free_port(topology, rack, cable_type):
     raise RuntimeError(f"no free {cable_type} port on {rack}")
 
 
+def _phase1_fixes(T):
+    """FIXES.md phase 1 — every check here failed before its fix landed."""
+    import copy as _copy
+
+    # -- A1: plan ids must stay distinct once PLANS hits its cap --------------
+    import server
+    server.PLANS.clear()
+    plan_ids = []
+    for i in range(server.MAX_PLANS + 10):
+        pid = server._next_plan_id()
+        server._remember_plan(pid, {"n": i})
+        plan_ids.append(pid)
+    check("A1: plan ids stay distinct past the PLANS cap",
+          len(set(plan_ids)) == len(plan_ids),
+          f"{len(plan_ids) - len(set(plan_ids))} collisions")
+
+    # -- A2: cached route keys are never reissued (an old route card must not
+    #        print a different route than the one it was made for) -----------
+    server.ROUTES.clear()
+    route_keys = [server._cache_route({"marker": i})
+                  for i in range(server.MAX_CACHED_ROUTES + 50)]
+    check("A2: every cached route gets its own key, keys are never reissued",
+          len(set(route_keys)) == len(route_keys),
+          f"{len(route_keys) - len(set(route_keys))} reused keys")
+
+    # -- A7: a circuit id is an audit record — never reissue one after release -
+    from pathengine import commit_route, decommission_route, next_circuit_id
+    w7 = _copy.deepcopy(T)
+    r7 = resolve_route_options(free_port(w7, "A1-S05", "fiber"),
+                               free_port(w7, "D5-N06", "fiber"),
+                               count=1, topology=w7)[0]
+    c1 = next_circuit_id(w7)
+    commit_route(w7, r7, c1)
+    decommission_route(w7, c1)
+    c2 = next_circuit_id(w7)
+    check("A7: a released circuit id is never handed out again",
+          c2 != c1, f"{c1} was recycled")
+
+    # -- A4: a negative or absurd port count must be refused, not materialised -
+    a4_specs = [
+        {"row": 2, "serial": "9900000021", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": -10, "copper_ports": 20, "label": "neg"},
+        {"row": 3, "serial": "9900000022", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 99999, "copper_ports": 0, "label": "huge"},
+    ]
+    a4 = bulkplan.validate_devices(T, a4_specs, [])
+    a4_kinds = {i["row"]: i["kind"] for i in a4["issues"]}
+    check("A4: a negative or absurd port count is refused",
+          a4_kinds == {2: "bad_port_count", 3: "bad_port_count"}, str(a4_kinds))
+
+    # -- A8: regenerating over a map that holds executed circuits is refused --
+    import json as _j8, tempfile as _tf8, os as _os8
+    from generate_topology import _refuse_if_populated, TARGET_CIRCUITS
+    _d8 = _tf8.mkdtemp()
+    _seed = _os8.path.join(_d8, "seed.json")
+    _extra = _os8.path.join(_d8, "extra.json")
+    with open(_seed, "w") as fh:
+        _j8.dump({"circuits": {f"CIR-{i:04d}": {} for i in range(1, TARGET_CIRCUITS + 1)}}, fh)
+    with open(_extra, "w") as fh:
+        _j8.dump({"circuits": {f"CIR-{i:04d}": {} for i in range(1, TARGET_CIRCUITS + 6)}}, fh)
+    _seed_ok = _extra_refused = _missing_ok = True
+    try:
+        _refuse_if_populated(_seed)
+    except SystemExit:
+        _seed_ok = False
+    try:
+        _refuse_if_populated(_extra)
+        _extra_refused = False
+    except SystemExit:
+        pass
+    try:
+        _refuse_if_populated(_os8.path.join(_d8, "nope.json"))
+    except SystemExit:
+        _missing_ok = False
+    check("A8: rebuild is refused only when the map holds circuits beyond the seed",
+          _seed_ok and _extra_refused and _missing_ok,
+          f"seed_ok={_seed_ok} extra_refused={_extra_refused} missing_ok={_missing_ok}")
+
+    # -- C3: _guard must not ship exception detail to the client in production -
+    import json as _j3
+
+    class _FakeHandler:
+        def __init__(self):
+            self.sent = None
+
+        def _send(self, code, payload, content_type=""):
+            self.sent = (code, payload)
+
+    def _boom():
+        raise ValueError(r"internal detail C:\Users\yoav\ITA\secret.json:42")
+
+    _was_prod = server.PRODUCTION
+    import io as _io3, contextlib as _cl3
+    try:
+        with _cl3.redirect_stderr(_io3.StringIO()), _cl3.redirect_stdout(_io3.StringIO()):
+            server.PRODUCTION = True
+            fh_prod = _FakeHandler()
+            server.Handler._guard(fh_prod, _boom)
+            server.PRODUCTION = False
+            fh_dev = _FakeHandler()
+            server.Handler._guard(fh_dev, _boom)
+    finally:
+        server.PRODUCTION = _was_prod
+
+    prod_body = _j3.dumps(fh_prod.sent[1])
+    dev_body = _j3.dumps(fh_dev.sent[1])
+    check("C3: production error responses carry a ref, not the exception text",
+          fh_prod.sent[0] == 500 and "secret.json" not in prod_body
+          and "ref" in prod_body.lower()
+          and "secret.json" in dev_body,
+          f"prod={prod_body[:120]}")
+
+    # -- C5: a committed circuit knows when it was created; a reprinted Work
+    #        Order shows THAT date, not the moment it was reprinted ----------
+    w5 = _copy.deepcopy(T)
+    r5 = resolve_route_options(free_port(w5, "A1-S05", "fiber"),
+                               free_port(w5, "D5-N06", "fiber"),
+                               count=1, topology=w5)[0]
+    circ5 = commit_route(w5, r5, next_circuit_id(w5))
+    check("C5: a committed circuit records created_at as a UTC timestamp",
+          isinstance(circ5.get("created_at"), str) and "T" in circ5["created_at"],
+          str(circ5.get("created_at")))
+
+    import workorder as _wo5
+    r5_reprint = dict(r5, created_at="2020-01-02T03:04:05+00:00")
+    txt = _wo5.render(r5_reprint, circuit_id="CIR-9999")
+    html = wo_html.render(r5_reprint, circuit_id="CIR-9999")
+    check("C5: a reprinted Work Order carries the circuit's own creation date",
+          "2020-01-02" in txt and "2020-01-02" in html)
+    # and a fresh proposal (no created_at) must still render
+    _wo5.render(r5, circuit_id=None)
+    wo_html.render(r5, circuit_id=None)
+    check("C5: a proposal with no created_at still renders", True)
+
+    # -- A6: /api/execute takes a route_key and looks the route up server-side;
+    #        it never commits a route object handed to it by the browser -----
+    server.ROUTES.clear()
+    good_key = server._cache_route({"cable_type": "fiber", "marker": "x"})
+    got_route, got_err = server._resolve_execute_route({"route_key": good_key})
+    _, err_unknown = server._resolve_execute_route({"route_key": "R09999"})
+    _, err_absent = server._resolve_execute_route({"route": {"cable_type": "fiber"}})
+    check("A6: execute resolves a cached route_key, and refuses an unknown or "
+          "absent one",
+          got_route is not None and got_err is None
+          and err_unknown[0] == 409 and err_absent[0] == 400)
+
+    # -- code-review: a failed map write must not leave a .tmp file on disk --
+    import pathengine as _pe6, os as _os6, pathlib as _pl6
+    _tmpdir6 = _tf8.mkdtemp()
+    _target6 = _os8.path.join(_tmpdir6, "map.json")
+    _orig_fsync = _pe6.os.fsync
+    _pe6.os.fsync = lambda fd: (_ for _ in ()).throw(OSError("simulated disk full"))
+    _write_raised = False
+    try:
+        _pe6.save_topology({"circuits": {}}, _target6)
+    except OSError:
+        _write_raised = True
+    finally:
+        _pe6.os.fsync = _orig_fsync
+    _leftover = [f for f in _os6.listdir(_tmpdir6) if f.endswith(".tmp")]
+    check("code-review: a failed map write leaves no .tmp file behind",
+          _write_raised and not _leftover, f"leftover={_leftover}")
+    _gitignore = (_pl6.Path(__file__).parent / ".gitignore").read_text(encoding="utf-8")
+    check("code-review: .gitignore covers the atomic-write temp file",
+          "data/*.tmp" in _gitignore or "*.tmp" in _gitignore)
+
+
 def main():
     T = load_topology()
 
@@ -1390,7 +1557,11 @@ def main():
     from pathengine import decommission_route, DecommissionError, next_circuit_id
 
     def _fingerprint(t):
-        return _hashlib.sha256(_json.dumps(t, sort_keys=True, default=str).encode()).hexdigest()
+        # "meta" holds the monotonic circuit counter, which by design advances on
+        # every id allocation and never rolls back on release — so it is excluded
+        # here, where the question is whether the physical map round-trips.
+        physical = {k: v for k, v in t.items() if k != "meta"}
+        return _hashlib.sha256(_json.dumps(physical, sort_keys=True, default=str).encode()).hexdigest()
 
     round_trips, checked = 0, 0
     for a_rack, b_rack, media in (("A1-S05", "D5-N06", "fiber"),
@@ -1542,6 +1713,9 @@ def main():
         check("and can be routed to a different destination", bool(again))
     except RouteError as e:
         check("and can be routed to a different destination", False, str(e))
+
+    # ---------- phase 1 bug fixes (FIXES.md A1,A2,A4,A6,A7,A8,C3,C5) ----------
+    _phase1_fixes(T)
 
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,

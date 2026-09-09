@@ -1459,7 +1459,7 @@ function executeOption(i){
   btn.disabled = true; btn.textContent = "מבצע…";
   fetch("/api/execute", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ route })
+    body: JSON.stringify({ route_key: route.route_key })
   }).then(r => r.json()).then(res => {
     if (res.error){
       btn.disabled = false; btn.textContent = "בצע התקנה";

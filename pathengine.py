@@ -32,8 +32,10 @@ only `load_topology()` and `commit_route()` need a second implementation —
 the constraint logic below stays exactly as it is.
 """
 
+import contextlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import networkx as nx
@@ -89,11 +91,18 @@ def save_topology(topology, path=TOPOLOGY_PATH):
     # form keeps the write as cheap as the unsafe version it replaces, so
     # safety here costs nothing.
     blob = json.dumps(topology, indent=1, ensure_ascii=False)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(blob)
-        fh.flush()
-        os.fsync(fh.fileno())      # on the disk, not sitting in a buffer
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())  # on the disk, not sitting in a buffer
+        os.replace(tmp, path)
+    except BaseException:
+        # a half-written temp file helps nobody, and data/*.tmp is not far from
+        # being committed on a project run from several machines
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -577,10 +586,22 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
 
 
 def next_circuit_id(topology):
-    """Next free CIR-#### id, continuing from whatever's already seeded."""
-    nums = [int(cid.split("-", 1)[1]) for cid in topology.get("circuits", {})
-            if cid.startswith("CIR-") and cid.split("-", 1)[1].isdigit()]
-    return f"CIR-{(max(nums) + 1) if nums else 1:04d}"
+    """Next CIR-#### id, from a monotonic counter kept on the map itself.
+
+    NOT max(existing) + 1: a circuit id is an audit record — it is on printed
+    Work Orders, on cable labels in the field, in email. Releasing the
+    highest-numbered circuit and deriving the next id from what is left hands
+    that exact id to a different circuit, silently invalidating all of them.
+    """
+    meta = topology.setdefault("meta", {})
+    n = meta.get("circuit_seq")
+    if n is None:                      # one-time migration from an existing map
+        nums = [int(cid.split("-", 1)[1]) for cid in topology.get("circuits", {})
+                if cid.startswith("CIR-") and cid.split("-", 1)[1].isdigit()]
+        n = max(nums) if nums else 0
+    n += 1
+    meta["circuit_seq"] = n
+    return f"CIR-{n:04d}"
 
 
 def revalidate_route(topology, route):
@@ -902,6 +923,9 @@ def commit_route(topology, route, circuit_id):
 
     topology.setdefault("circuits", {})[circuit_id] = {
         "id": circuit_id,
+        # when the connection went in — a Work Order reprinted months later must
+        # bear this date, not the day it was reprinted
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "cable_type": route["cable_type"],
         "domain": route["domain"],
         "a_port": route["src_port"],

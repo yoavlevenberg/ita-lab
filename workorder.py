@@ -24,6 +24,9 @@ def render(route, order_id=None, circuit_id=None):
     L.append("=" * 68)
     L.append(f"Cable type    : {route['cable_type'].upper()}")
     L.append(f"Redundancy    : domain {route['domain']}")
+    if route.get("created_at"):
+        # an executed circuit reprinted later must show when it went in, not now
+        L.append(f"Circuit created: {route['created_at']}")
     L.append(f"Total length  : ~{route['total_length_m']} m")
     L.append(f"From          : {route['src_location']}")
     L.append(f"To            : {route['dst_location']}")

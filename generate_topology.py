@@ -78,6 +78,8 @@ REDUNDANCY (A/B), now hierarchical
 Numbers below (CONFIG) are assumptions, same as v2 — easy to change.
 """
 
+import argparse
+import json
 import random
 from pathlib import Path
 
@@ -417,6 +419,9 @@ def _random_free_port(topology, rack, cable_type):
 def build():
     topology = build_skeleton()
     n = seed_circuits(topology)
+    # the monotonic circuit counter next_circuit_id() reads; seeding uses fixed
+    # CIR-0001..CIR-{n} ids, so a fresh map starts counting from n
+    topology.setdefault("meta", {})["circuit_seq"] = n
     save_topology(topology, OUT_PATH)
 
     used_ports = sum(1 for p in topology["ports"].values() if p["status"] == "used")
@@ -431,5 +436,35 @@ def build():
     print(f"  circuits: {n} pre-existing connections")
 
 
+def _refuse_if_populated(path=OUT_PATH):
+    """Stop a rebuild that would silently delete real work.
+
+    CONTEXT.md warns in prose that running this script wipes any executed-but-
+    unpushed circuits. Prose is not a safeguard on a project run from several
+    machines. If the map on disk holds more than the seeded circuits, refuse
+    unless the caller passed --force.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return
+    extra = len(existing.get("circuits", {})) - TARGET_CIRCUITS
+    if extra > 0:
+        raise SystemExit(
+            f"{path} holds {extra} circuit(s) beyond the seeded {TARGET_CIRCUITS}. "
+            f"Rebuilding would delete them. Re-run with --force if that is what "
+            f"you want.")
+
+
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Build the synthetic ITA map.")
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite an existing map even if it has circuits "
+                         "beyond the seeded set")
+    args = ap.parse_args()
+    if not args.force:
+        _refuse_if_populated()
     build()

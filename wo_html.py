@@ -93,6 +93,10 @@ def _steps(route):
 
 def render(route, order_id=None, circuit_id=None):
     order_id = order_id or f"WO-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    # For an executed circuit, the meaningful date is when it went in — reprinting
+    # it must not restamp it with today. A proposal has no such date yet.
+    doc_date = route.get("created_at") or datetime.now().strftime('%Y-%m-%d %H:%M')
+    doc_label = "Circuit created" if route.get("created_at") else "Printed"
     status = (f'<span class="badge executed">EXECUTED &mdash; {e(circuit_id)}</span>'
               if circuit_id else
               '<span class="badge proposed">PROPOSED &mdash; needs approval</span>')
@@ -157,7 +161,7 @@ def render(route, order_id=None, circuit_id=None):
     <div class="sub">ITA Lab &mdash; standalone prototype, not connected to live ITA</div>
     <div style="margin-top:9px">{status}</div>
   </div>
-  <div class="id"><b>{e(order_id)}</b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+  <div class="id"><b>{e(order_id)}</b>{e(doc_label)}: {e(str(doc_date))}</div>
 </header>
 {warn}
 

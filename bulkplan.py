@@ -411,6 +411,12 @@ def free_port_on_device(topology, device_id, cable_type, exclude=()):
 
 VALID_TYPES = ("switch", "server", "fiber_patch_panel", "copper_patch_panel")
 
+# A sheet says how many ports a new device has. The old check only rejected a
+# non-positive SUM, so FIBER=-10 COPPER=20 passed and materialise() then built
+# ports at negative indices; and FIBER=48000 (a typo for 48) inflated the map by
+# tens of thousands of port dicts. Both are refused up front now.
+MAX_PORTS_PER_DEVICE = 512
+
 
 def validate_devices(topology, new_devices, demands=()):
     """Check the Devices tab before anything is sited.
@@ -447,6 +453,23 @@ def validate_devices(topology, new_devices, demands=()):
         if not 1 <= d["u_size"] <= placement.RACK_U:
             fault(d, "bad_u_size",
                   f"U_SIZE must be between 1 and {placement.RACK_U} (got '{d['u_size']}')")
+            continue
+        bad_count = False
+        for _f in ("fiber_ports", "copper_ports"):
+            n = d[_f]
+            if n < 0:
+                fault(d, "bad_port_count",
+                      f"{_f.split('_')[0].upper()} cannot be negative (got {n})")
+                bad_count = True
+                break
+            if n > MAX_PORTS_PER_DEVICE:
+                fault(d, "bad_port_count",
+                      f"{_f.split('_')[0].upper()} = {n} — more than "
+                      f"{MAX_PORTS_PER_DEVICE} ports on one device is almost "
+                      f"certainly a typo")
+                bad_count = True
+                break
+        if bad_count:
             continue
         if d["fiber_ports"] + d["copper_ports"] <= 0:
             fault(d, "no_ports",
