@@ -127,9 +127,15 @@ def save_topology(topology, path=TOPOLOGY_PATH):
     # form keeps the write as cheap as the unsafe version it replaces, so
     # safety here costs nothing.
     # Derived indexes are cached on the map under a leading underscore (see
-    # placement.devices_by_rack). They are rebuilt on demand and must never be
-    # written: on disk they are dead weight, and read back they are a second
-    # copy of the truth that nothing keeps in step.
+    # devices_by_rack). They are rebuilt on demand and must never be written: on
+    # disk they are dead weight, and read back they are a second copy of the
+    # truth that nothing keeps in step.
+    #
+    # KEEP indent=1. A review suggested dropping it to save "about a quarter of
+    # the write time"; measured, it saves 7ms of 277 — the cost is walking 120k
+    # objects, not emitting the bytes — while turning a git-tracked file that is
+    # synced between machines from 1.5 million lines into one. That trades
+    # nothing for a diff no one can read and a conflict no one can resolve.
     blob = json.dumps({k: v for k, v in topology.items() if not k.startswith("_")},
                       indent=1, ensure_ascii=False)
     try:
