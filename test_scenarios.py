@@ -786,6 +786,147 @@ def _model_cleanup(T):
         check("D5: a pod claimed by two colours is refused", "A4" in str(e), str(e)[:80])
 
 
+def _transfer_tooling(T):
+    """The air-gap transfer: the networkx fallback, and unpack.py's refusals.
+
+    unpack.py runs where there is no git and no way to send anything back, on a
+    directory holding work that exists nowhere else. Every check here is about
+    something it must NOT do."""
+    import contextlib as _clt, hashlib as _hlt, io as _iolt, json as _jlt
+    import pathlib as _plt, re as _relt, shutil as _shlt, tempfile as _tflt
+    import unpack as _up
+
+    root = _plt.Path(__file__).parent
+
+    # -- the vendored networkx is only reachable if pathengine sets it up, so
+    #    no other module may import networkx directly. generate_topology gets it
+    #    transitively through `from pathengine import ...`; a module that
+    #    imported it on its own would fail on a machine that has none, and only
+    #    on the far side, where it cannot be fixed. -----------------------
+    importers = []
+    for p in sorted(root.glob("*.py")):
+        if p.name in ("test_scenarios.py", "make_transfer.py"):
+            continue
+        if _relt.search(r"^\s*(import networkx|from networkx)",
+                        p.read_text(encoding="utf-8"), _relt.M):
+            importers.append(p.name)
+    check("transfer: pathengine is the only module that imports networkx",
+          importers == ["pathengine.py"], str(importers))
+
+    _pe_src = (root / "pathengine.py").read_text(encoding="utf-8")
+    check("transfer: that import falls back to the vendored copy",
+          "_vendor" in _pe_src and "except ImportError" in _pe_src)
+
+    # -- the closed network tops out at Python 3.10, and there is no way to try
+    #    the code there before it is sent. ast can be told to parse against an
+    #    older grammar, which turns "will this even load over there" from a
+    #    question into a check. Covers syntax, not stdlib APIs — hence the grep
+    #    for 3.11+ additions that lives alongside this in the notes. ---------
+    import ast as _ast
+    TARGET = (3, 10)
+    too_new = []
+    for p in sorted(root.glob("*.py")):
+        try:
+            _ast.parse(p.read_text(encoding="utf-8"), filename=p.name,
+                       feature_version=TARGET)
+        except SyntaxError as e:
+            too_new.append(f"{p.name}:{e.lineno} {e.msg}")
+    check(f"transfer: every module still parses as Python {TARGET[0]}.{TARGET[1]}",
+          not too_new, str(too_new[:3]))
+
+    # networkx 3.1 is what gets vendored precisely because it spans 3.8+; the
+    # 3.6 on this machine declares >=3.11 and would not import over there.
+    _mt_src = (root / "make_transfer.py").read_text(encoding="utf-8")
+    check("transfer: make_transfer documents why the vendored version is pinned low",
+          "3.11" in _mt_src and "3.8" in _mt_src)
+
+    # -- a synthetic payload, so these run in milliseconds and do not need a
+    #    real carrier built --------------------------------------------------
+    def _stage_with(files, break_one=None, drop_one=None):
+        stage = _plt.Path(_tflt.mkdtemp())
+        manifest = {}
+        for name, body in files.items():
+            f = stage / name
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(body, encoding="utf-8")
+            manifest[name] = _hlt.sha256(body.encode()).hexdigest()
+        if break_one:                      # arrives damaged: digest will not match
+            (stage / break_one).write_text("TAMPERED", encoding="utf-8")
+        if drop_one:                       # never arrived at all
+            (stage / drop_one).unlink()
+        (stage / "MANIFEST.json").write_text(_jlt.dumps(manifest), encoding="utf-8")
+        return stage
+
+    PAYLOAD = {"engine.py": "print('v2')",
+               "data/zones.default.json": '{"green": ["A3"]}'}
+
+    def _run(stage, target, **kw):
+        """apply() with its reporting silenced, returning whether it refused."""
+        was = _up.STAGE
+        _up.STAGE = stage
+        try:
+            with _clt.redirect_stdout(_iolt.StringIO()):
+                _up.apply(target, **kw)
+            return False
+        except SystemExit:
+            return True
+        finally:
+            _up.STAGE = was
+
+    # -- a damaged payload must write NOTHING. It used to report "nothing was
+    #    written" after writing every file up to the damaged one, which on the
+    #    far side is a half-updated project and no way back. ------------------
+    tgt = _plt.Path(_tflt.mkdtemp())
+    refused = _run(_stage_with(PAYLOAD, break_one="engine.py"), tgt)
+    check("transfer: a damaged payload is refused AND writes nothing",
+          refused and not list(tgt.rglob("*")),
+          f"refused={refused} wrote={[p.name for p in tgt.rglob('*')]}")
+
+    tgt = _plt.Path(_tflt.mkdtemp())
+    refused = _run(_stage_with(PAYLOAD, drop_one="engine.py"), tgt)
+    check("transfer: a payload missing a file is refused AND writes nothing",
+          refused and not list(tgt.rglob("*")))
+
+    # -- data/ is theirs. topology.json is the executed work; zones.json is the
+    #    real site's colour map. Neither may be touched by an update. ---------
+    tgt = _plt.Path(_tflt.mkdtemp())
+    (tgt / "data").mkdir()
+    (tgt / "data" / "topology.json").write_text("REAL WORK", encoding="utf-8")
+    (tgt / "data" / "zones.json").write_text('{"green": ["ZZ9"]}', encoding="utf-8")
+    _run(_stage_with({**PAYLOAD, "data/topology.json": "shipped"}), tgt)
+    check("transfer: an update never overwrites executed work in data/",
+          (tgt / "data" / "topology.json").read_text(encoding="utf-8") == "REAL WORK")
+    check("transfer: an update never overwrites a tuned zones.json",
+          (tgt / "data" / "zones.json").read_text(encoding="utf-8") == '{"green": ["ZZ9"]}')
+
+    # -- but a first install must seed the zone map, or nothing starts --------
+    tgt = _plt.Path(_tflt.mkdtemp())
+    _run(_stage_with(PAYLOAD), tgt)
+    seeded = tgt / "data" / "zones.json"
+    check("transfer: a first install seeds zones.json from the shipped default",
+          seeded.exists() and seeded.read_text(encoding="utf-8") == '{"green": ["A3"]}'
+          and not (tgt / "data" / "zones.default.json").exists(),
+          f"exists={seeded.exists()}")
+
+    # -- an overwritten file has to be recoverable, and a dry run must not
+    #    write at all ---------------------------------------------------------
+    tgt = _plt.Path(_tflt.mkdtemp())
+    (tgt / "engine.py").write_text("print('their local edit')", encoding="utf-8")
+    _run(_stage_with(PAYLOAD), tgt, dry_run=True)
+    check("transfer: --dry-run changes nothing",
+          (tgt / "engine.py").read_text(encoding="utf-8") == "print('their local edit')")
+
+    _run(_stage_with(PAYLOAD), tgt)
+    backups = list(tgt.glob("_backup_*/engine.py"))
+    check("transfer: an overwritten file is kept in a backup",
+          (tgt / "engine.py").read_text(encoding="utf-8") == "print('v2')"
+          and len(backups) == 1
+          and backups[0].read_text(encoding="utf-8") == "print('their local edit')",
+          f"backups={backups}")
+
+    _shlt.rmtree(tgt, ignore_errors=True)
+
+
 def main():
     T = load_topology()
 
@@ -2298,6 +2439,9 @@ def main():
 
     # ---------- duplicated model state (FIXES.md D4) ----------
     _model_cleanup(T)
+
+    # ---------- the air-gap transfer tooling ----------
+    _transfer_tooling(T)
 
     # ---------- the review must predict the plan (a property, not examples) ----
     # Every other check here is one hand-written row and one expected message,
