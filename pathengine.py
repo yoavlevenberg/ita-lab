@@ -35,10 +35,23 @@ the constraint logic below stays exactly as it is.
 import contextlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import networkx as nx
+try:
+    import networkx as nx
+except ImportError:                    # pragma: no cover - only on the far side
+    # A transfer to the closed network may carry networkx in _vendor/, because
+    # there is no pip there and no way to fetch one.
+    #
+    # It is reached ONLY if the real import fails. Dropping the package straight
+    # into the project directory instead would shadow whatever is installed —
+    # so a machine with a perfectly good networkx would silently get ours, which
+    # is older, and on a newer Python might be the one that does not run. Use
+    # theirs when it works; fall back to ours when there is nothing else.
+    sys.path.append(str(Path(__file__).parent / "_vendor"))
+    import networkx as nx
 
 TOPOLOGY_PATH = Path(__file__).parent / "data" / "topology.json"
 

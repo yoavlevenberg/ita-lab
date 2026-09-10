@@ -95,23 +95,34 @@ def _tracked():
     return sorted(n for n in keep if n != "make_transfer.py")
 
 
-def _networkx_files():
-    """networkx as a plain package directory, not a wheel.
+def _networkx_from_wheel(wheel):
+    """Vendor networkx out of a wheel, into _vendor/ rather than alongside us.
 
-    It is pure Python with no unconditional dependencies (numpy and scipy are
-    declared only as extras), so dropping the package beside pathengine.py makes
-    `import networkx` work with no pip, no install and no permissions — which is
-    what matters on a locked machine.
+    Into _vendor/ because pathengine only falls back to it when the real import
+    fails. Unpacking it into the project directory instead would shadow whatever
+    is installed on that machine, so a far side with a perfectly good networkx
+    would silently get ours — older, and on a newer Python possibly the one that
+    does not run at all.
 
-    The version must match the far side's Python, not this machine's: networkx
-    3.6 needs Python 3.11+, and importing it on 3.9 fails outright.
+    Take the wheel rather than this machine's install, because the version has
+    to suit THEIR Python, not ours: 3.6 needs 3.11+, while 3.1 covers 3.8 and up
+    and still has every one of the five calls the engine makes. It is pure
+    Python with no unconditional dependencies, so it needs no pip and no
+    permissions once it is simply sitting there.
+
+    networkx's own tests do not travel. They are half the package, and we are
+    not testing networkx on the far side — we are testing the engine, which has
+    its own 309 checks.
     """
-    import networkx
-    root = Path(networkx.__file__).parent
-    files = []
-    for p in sorted(root.rglob("*.py")):
-        files.append((f"networkx/{p.relative_to(root).as_posix()}", p))
-    return networkx.__version__, files
+    files, version = [], Path(wheel).name.split("-")[1]
+    with zipfile.ZipFile(wheel) as z:
+        for name in sorted(z.namelist()):
+            if not name.startswith("networkx/") or not name.endswith(".py"):
+                continue
+            if "/tests/" in name:
+                continue
+            files.append((f"_vendor/{name}", z.read(name)))
+    return version, files
 
 
 def build(include_networkx=False):
@@ -121,9 +132,8 @@ def build(include_networkx=False):
 
     nx_version = None
     if include_networkx:
-        nx_version, nx_files = _networkx_files()
-        for name, path in nx_files:
-            members.append((name, path.read_bytes()))
+        nx_version, nx_files = _networkx_from_wheel(include_networkx)
+        members.extend(nx_files)
 
     # The manifest rides INSIDE the payload, so unpack.py can verify what it
     # unpacked without having to parse the workbook a second time.
@@ -153,7 +163,8 @@ def build(include_networkx=False):
         [""],
         [f"payload sha256 : {digest}"],
         [f"files          : {len(members)}"],
-        [f"networkx       : {nx_version or 'not included - must already be installed'}"],
+        [f"networkx       : {('bundled ' + nx_version + ' in _vendor/, used only if none is installed')
+                             if nx_version else 'not included - must already be installed'}"],
         [""],
         ["STEP 1 - recover the files into _stage (paste as one line):"],
         [BOOTSTRAP],
@@ -212,8 +223,9 @@ BOOTSTRAP = (
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
-    ap.add_argument("--networkx", action="store_true",
-                    help="bundle networkx as a plain package directory, for a "
-                         "far side that does not already have it")
+    ap.add_argument("--networkx", metavar="WHEEL",
+                    help="vendor networkx from this wheel into _vendor/, for a "
+                         "far side that may not have one. Use 3.1: it covers "
+                         "Python 3.8+ where 3.6 needs 3.11+")
     args = ap.parse_args()
     build(include_networkx=args.networkx)
