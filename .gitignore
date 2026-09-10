@@ -11,3 +11,8 @@ data/sample_demand*.xlsx
 # atomic-write scratch file from pathengine.save_topology; a crashed write can
 # leave one behind, and it must never be committed
 data/*.tmp
+
+# built by make_transfer.py; a build product, rebuilt on demand
+ITA_transfer.xlsx
+_stage/
+_backup_*/
