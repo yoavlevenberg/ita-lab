@@ -90,9 +90,19 @@ def _tracked():
                                  f"apply a transfer without it")
             keep.append(essential)
 
-    # make_transfer.py itself is not sent: carriers are only ever built on this
-    # side, and shipping it would just be one more file to keep in step.
-    return sorted(n for n in keep if n != "make_transfer.py")
+    # make_transfer.py travels too, even though carriers are only ever built on
+    # this side and it is useless over there.
+    #
+    # It was excluded at first, for tidiness. That broke the acceptance gate on
+    # arrival: test_scenarios reads this file, so the 320 checks — the one thing
+    # that proves the transfer worked — died on a FileNotFoundError the moment
+    # they were run on the far side.
+    #
+    # The rule that replaces the tidiness: ANYTHING THE SUITE READS MUST SHIP.
+    # The gate has to run identically on both sides or it is not a gate, and
+    # skipping a check there instead would make the count disagree with the
+    # documentation, which E5 checks — failing just as loudly, one step later.
+    return sorted(keep)
 
 
 def _networkx_from_wheel(wheel):
