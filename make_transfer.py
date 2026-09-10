@@ -48,6 +48,13 @@ import make_sample_sheet
 HERE = Path(__file__).parent
 OUT = HERE / "ITA_transfer.xlsx"
 
+# The networkx wheel is committed, so a carrier can be built on any machine that
+# has the repository — including whichever one happens to sit next to the
+# transfer portal. It is a stable input, unlike the carrier itself, which is a
+# product rebuilt on every change and therefore stays out of git. Same split as
+# topology.json: ship what generates, not what is generated.
+VENDOR = HERE / "vendor"
+
 # 4,000 of the 32,767 characters a cell allows. Deliberately far below the
 # limit: a sanitiser that rebuilds the workbook is far more likely to truncate
 # something sitting at the boundary than something obviously ordinary.
@@ -56,8 +63,11 @@ CHUNK = 4000
 # Never travels. topology.json is regenerated; the png is a screenshot; the
 # caches and outputs are build products.
 NEVER = {"data/topology.json"}
-NEVER_SUFFIX = (".png", ".pyc")
-NEVER_DIR = ("__pycache__/", "output/", "_stage/", "_backup")
+NEVER_SUFFIX = (".png", ".pyc", ".whl")
+# vendor/ holds the networkx wheel this script reads. It stays on this side: the
+# far side gets networkx already unpacked into _vendor/, so sending the wheel as
+# well would add 2MB to every carrier to deliver the same thing twice.
+NEVER_DIR = ("__pycache__/", "output/", "_stage/", "_backup", "vendor/")
 
 # Ships under a different name so unpack.py can tell "the default we shipped"
 # from "the file they have been editing".
@@ -233,9 +243,24 @@ BOOTSTRAP = (
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
-    ap.add_argument("--networkx", metavar="WHEEL",
-                    help="vendor networkx from this wheel into _vendor/, for a "
-                         "far side that may not have one. Use 3.1: it covers "
-                         "Python 3.8+ where 3.6 needs 3.11+")
+    ap.add_argument("--networkx", metavar="WHEEL", nargs="?", default="auto",
+                    help="wheel to vendor into _vendor/ (default: the one in "
+                         "vendor/). 3.1 is what is committed: it covers Python "
+                         "3.8+, where 3.6 needs 3.11+ and the closed network "
+                         "has 3.10")
+    ap.add_argument("--no-networkx", action="store_true",
+                    help="build without it, for a far side known to have one")
     args = ap.parse_args()
-    build(include_networkx=args.networkx)
+
+    wheel = None
+    if not args.no_networkx:
+        wheel = args.networkx
+        if wheel == "auto":
+            found = sorted(VENDOR.glob("networkx-*.whl"))
+            if not found:
+                raise SystemExit(
+                    f"no networkx wheel in {VENDOR}. Either restore it "
+                    f"(pip download networkx==3.1 --no-deps --dest vendor) or "
+                    f"build with --no-networkx if the far side already has one.")
+            wheel = found[0]
+    build(include_networkx=wheel)
