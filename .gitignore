@@ -16,3 +16,4 @@ data/*.tmp
 ITA_transfer.xlsx
 _stage/
 _backup_*/
+TRANSFER_INSTRUCTIONS.txt
