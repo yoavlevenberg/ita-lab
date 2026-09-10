@@ -39,6 +39,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import subprocess
 import zipfile
 from datetime import datetime
@@ -146,6 +147,28 @@ def _networkx_from_wheel(wheel):
     return version, files
 
 
+def _expected_checks():
+    """How many checks the suite should report, read from README.md.
+
+    NOT written here as a literal. The count changes whenever a test is added,
+    and a stale number in the carrier is worse than a stale one in a document:
+    it is read on the closed network by someone who cannot verify it, and it
+    tells them either to accept a wrong result or to distrust a right one.
+
+    README.md is the safe source because test_scenarios' own E5 check fails if
+    it ever disagrees with reality — so this cannot drift without the suite
+    going red here first.
+    """
+    text = (HERE / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"test_scenarios\.py`?\s*(?:→|->)\s*(\d+)/(\d+)", text)
+    if not m or m.group(1) != m.group(2):
+        raise SystemExit(
+            "could not read the expected check count out of README.md — the "
+            "carrier's instructions would be guessing. Fix the heading there "
+            "(it should read like 'python test_scenarios.py → 320/320').")
+    return m.group(1)
+
+
 def build(include_networkx=False):
     members = []                      # (name_in_payload, bytes)
     for name in _tracked():
@@ -179,6 +202,7 @@ def build(include_networkx=False):
     # rebuild that reorders the strings cannot scramble the stream.
     payload_rows = [["PART_AND_DATA"]] + [[f"{i:04d}:{c}"] for i, c in enumerate(chunks)]
 
+    checks = _expected_checks()
     readme_rows = [
         ["ITA Lab - source transfer"],
         [f"built {datetime.now().strftime('%Y-%m-%d %H:%M')}   |   {len(members)} files"],
@@ -209,7 +233,7 @@ def build(include_networkx=False):
         [""],
         ["STEP 5 - the acceptance gate. This is the proof it all arrived:"],
         ["python test_scenarios.py"],
-        ["   expect the LAST line to read exactly:  320/320 checks passed"],
+        [f"   expect the LAST line to read exactly:  {checks}/{checks} checks passed"],
         ["python test_agreement.py"],
         ["   expect: every line starts with [PASS]"],
         [""],
@@ -230,7 +254,7 @@ def build(include_networkx=False):
         ["STEP 4 or 5 says 'No module named networkx':"],
         ["   _vendor did not arrive. Check that _stage/_vendor/networkx exists."],
         [""],
-        ["STEP 5 gives any number other than 320/320:"],
+        [f"STEP 5 gives any number other than {checks}/{checks}:"],
         ["   photograph the failing lines. Do not use it until that is resolved."],
         [""],
         ["----------------------------------------------------------------"],

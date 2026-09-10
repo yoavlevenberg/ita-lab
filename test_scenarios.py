@@ -2454,6 +2454,16 @@ def main():
     # CONTEXT.md is the handoff doc for the next session; a stale count there
     # already sent an external review chasing a feature that shipped weeks ago.
     import pathlib as _pl_e5
+
+    # The carrier tells the far side which number to expect from this very
+    # suite, and it is read by someone who cannot check it against anything.
+    # make_transfer derives it from README.md rather than writing a literal;
+    # this proves that derivation still lands on the truth.
+    import make_transfer as _mt_e5
+    check("the carrier tells the far side the real check count",
+          _mt_e5._expected_checks() == str(len(results) + 2),   # this check + E5
+          f"carrier says {_mt_e5._expected_checks()}, suite has {len(results) + 2}")
+
     _expected_count = len(results) + 1          # +1 for this check itself
     _stale = [p for p in ("README.md", "CONTEXT.md")
               if str(_expected_count) not in
