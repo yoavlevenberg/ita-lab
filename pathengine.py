@@ -50,8 +50,21 @@ except ImportError:                    # pragma: no cover - only on the far side
     # so a machine with a perfectly good networkx would silently get ours, which
     # is older, and on a newer Python might be the one that does not run. Use
     # theirs when it works; fall back to ours when there is nothing else.
-    sys.path.append(str(Path(__file__).parent / "_vendor"))
-    import networkx as nx
+    _vendored = Path(__file__).parent / "_vendor"
+    sys.path.append(str(_vendored))
+    try:
+        import networkx as nx
+    except ImportError:
+        # The bare "No module named 'networkx'" is true and useless to someone
+        # on the closed network, who cannot install anything and cannot look
+        # anything up. Say which of the two things went wrong and what to do.
+        raise ImportError(
+            f"networkx is not installed here, and no vendored copy was found "
+            f"at {_vendored}. On the closed network that means _vendor/ did "
+            f"not arrive: re-apply the transfer with "
+            f"'python _stage/unpack.py --target .', and check that "
+            f"_stage/_vendor/networkx exists. Elsewhere, 'pip install "
+            f"networkx' is the fix.") from None
 
 TOPOLOGY_PATH = Path(__file__).parent / "data" / "topology.json"
 

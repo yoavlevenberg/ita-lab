@@ -23,15 +23,16 @@ WHAT TRAVELS, AND WHAT DOES NOT
 -------------------------------
 Source only. data/topology.json is 32MB and does NOT travel: generate_topology
 rebuilds it from seed 42 on the far side in about a minute. Shipping the
-generator instead of the generated data is what turns this from a 32MB problem
-into 66 spreadsheet cells.
+generator instead of the generated data is what keeps a 32MB project down to a
+workbook you could email.
 
 data/zones.json travels as data/zones.default.json, so applying a later carrier
 can never overwrite a zone map that has been tuned to the real site. See
 unpack.py, which is the half of this that has to be careful.
 
-    python make_transfer.py                     code only
-    python make_transfer.py --networkx          bundle networkx too
+    python make_transfer.py                  bundle networkx from vendor/
+    python make_transfer.py --no-networkx    the far side already has one
+    python make_transfer.py --networkx W.whl use a specific wheel
 """
 
 import argparse
@@ -133,8 +134,8 @@ def _networkx_from_wheel(wheel):
     permissions once it is simply sitting there.
 
     networkx's own tests do not travel. They are half the package, and we are
-    not testing networkx on the far side — we are testing the engine, which has
-    its own 309 checks.
+    not testing networkx on the far side — we are testing the engine, which
+    brings its own suite.
     """
     files, version = [], Path(wheel).name.split("-")[1]
     with zipfile.ZipFile(wheel) as z:
