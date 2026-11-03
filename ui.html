@@ -1358,6 +1358,7 @@ function showRouteOptions(options, requestedCount){
   focusOption(0);
 
   const forced = !!$("domainSel").value;
+  const direct = options.length === 1 && options[0].direct;
   if (direct){
     $("drawerTitle").innerHTML = options[0].intra_rack
       ? `חיבור ישיר — כבל גישור בתוך הארון <span class="pill">ללא טראנק</span>`
@@ -1367,7 +1368,6 @@ function showRouteOptions(options, requestedCount){
     ? `${options.length} מסלולים מוצעים — לחיצה על "הצג במפה" מדגישה כל אחד בנפרד`
     : "מסלול מוצע" + (forced ? " (דומיין נכפה ידנית)" : "");
   $("drawerBody").innerHTML = options.map((route, i) => renderOptionCard(route, i)).join("");
-  const direct = options.length === 1 && options[0].direct;
   $("btnMoreOptions").style.display =
       (!forced && !direct && options.length >= requestedCount) ? "" : "none";
   $("btnMoreOptions").disabled = false;

@@ -731,6 +731,35 @@ def _model_cleanup(T):
     check("A5: no sheet-supplied device field reaches HTML unescaped",
           not _unsafe, str(_unsafe[:4]))
 
+    # -- a const/let read above its own declaration throws a ReferenceError
+    #    (temporal dead zone) on EVERY call. showRouteOptions did exactly that
+    #    with `direct`, so no new route could be shown at all — and nothing here
+    #    noticed, because the suite never runs the page. Same source-level
+    #    approach as A5: inside each top-level function, a name declared at body
+    #    level must not appear on an earlier line (property access `.x`, object
+    #    keys `x:`, plain strings and // comments are not reads of the variable;
+    #    template literals are kept, since ${x} inside one is a real read). ----
+    _tdz, _fn, _body = [], None, []
+    for _ln in _ui.splitlines():
+        _ln = _ree4.sub(r'"[^"]*"|\'[^\']*\'', '""', _ln).split("//")[0]
+        _m = _ree4.match(r"function (\w+)\(", _ln)
+        if _m:
+            _fn, _body = _m.group(1), []
+            continue
+        if _fn and _ln.startswith("}"):
+            for _i, _l in enumerate(_body):
+                _d = _ree4.match(r"  (?:const|let) (\w+)\s*=", _l)
+                if not _d:
+                    continue
+                _use = _ree4.compile(r"(?<![.\w])" + _d.group(1) + r"\b(?!\s*:)")
+                if any(_use.search(_b) for _b in _body[:_i]):
+                    _tdz.append(f"{_fn}: {_d.group(1)}")
+            _fn = None
+        elif _fn:
+            _body.append(_ln)
+    check("ui: no function reads a const/let above its declaration",
+          not _tdz, str(_tdz[:4]))
+
     # and the serial itself has to be a serial. serials.normalise() falls back to
     # str(text).strip() when its pattern misses, so anything at all was accepted
     # — including the SN-NEWLEAF01 that appears as an example in the README.
