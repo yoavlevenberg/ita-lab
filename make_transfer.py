@@ -86,8 +86,21 @@ def _tracked():
     payload that silently lacked it because someone had not committed yet would
     only be discovered across the gap, where it cannot be fixed.
     """
-    out = subprocess.run(["git", "ls-files"], cwd=HERE,
-                         capture_output=True, text=True, check=True).stdout
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=HERE,
+                             capture_output=True, text=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # Downloading the repository as a ZIP from GitHub strips .git, and this
+        # then dies on a raw CalledProcessError that says nothing useful. Which
+        # files belong to the project is a question only git can answer here —
+        # walking the directory instead would sweep up caches, backups and
+        # whatever else happens to be lying around — so say so plainly.
+        raise SystemExit(
+            f"cannot list the project's files: `git ls-files` failed here "
+            f"({type(e).__name__}).\n"
+            f"This usually means the folder came from a GitHub ZIP download, "
+            f"which leaves out .git. Clone it instead:\n"
+            f"    git clone https://github.com/yoavlevenberg/ita-lab.git") from None
     keep = []
     for name in out.split():
         if name in NEVER or name.endswith(NEVER_SUFFIX):
