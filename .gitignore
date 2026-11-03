@@ -17,3 +17,7 @@ ITA_transfer.xlsx
 _stage/
 _backup_*/
 TRANSFER_INSTRUCTIONS.txt
+
+# written by ita_probe.py on the closed network; holds real ITA data, so it
+# must never be committed or travel back
+probe_out/

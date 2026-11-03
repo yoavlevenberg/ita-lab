@@ -264,6 +264,30 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
 - **`unpack.py` לא נוגע ב‑`data/`** בלי `--force-data`, ומאמת את כל הקבצה
   לפני שהוא כותב בייט. בהעברה השנייה יש שם עבודה שאין לה עותק אחר ואין git.
 
+## חיבור ל-ITA האמיתי — מה ידוע (נכון ל-2026-11-03)
+
+נבדק ידנית מול שרת ה-ITA ברשת הסגורה (דף ה-Swagger שלו, `/api/current/docs/index.html`).
+
+- **ה-API המתועד הוא `v8.1`** (Swagger 2.0, הקובץ המלא: `final.json`). יש בו
+  `/assets` (חדרים, שורות, ארונות, ציוד — `PatchPanel`, `network`, `server`...,
+  כולל `unitPosition`/`unitHeight`), `/assets/{id}/devices`, `/genomes`,
+  `/equipment-browser/report`. **אין בו פורטים ואין חיבורים.** `routing` הוא רק
+  הגדרות; `Path` הוא נתיב ניווט בעץ; `DeviceLinkVO` הוא קישור להתקן ניטור.
+- **החיבורים נמצאים ב-endpoint פנימי לא מתועד:**
+  `/api/networks/internal/rest/network-paths`. בלי פרמטר הוא עונה 400
+  `getPortConfigurationsWithConnectionsAndPath.arg0 must not be null` — כלומר
+  קיים, ומחזיר תצורת פורטים **עם החיבורים והמסלול** למזהה נכס אחד. שם הפרמטר
+  עוד לא ידוע (בפורום: `asset_id`). פנימי = Schneider יכולים לשנות אותו בגרסה.
+- לכן התוכנית: **מבנה פיזי מה-API הרשמי, חיבורים מה-endpoint הפנימי.** אם
+  הפנימי לא יעבוד — ייצוא דוחות לאקסל (xlsxreader כבר קיים).
+- **כמעט שום דבר לא יוצא מהרשת הסגורה, וצילום מסך הוא ערוץ לא מבוקר.**
+  לכן `ita_probe.py` רץ שם, לומד את ה-API מהשרת עצמו, ומדפיס **רק שמות שדות,
+  סוגים וכמויות** — שהמשתמש מקליד חזרה. הוא שולח רק GET (חוץ מ-POST התחברות
+  שהוא עצמו מצא ב-spec) — נאכף ב-`Probe._request`, לא בהבטחה. נתונים גולמיים
+  נשמרים ב-`probe_out/` (ב-gitignore) ונשארים שם.
+- אופן ההתחברות ל-API לא ידוע — הכלי מגלה אותו מ-`securityDefinitions` ומנתיבי
+  POST עם token/login. `test_probe.py` בודק אותו מול שרת מדומה (12 בדיקות).
+
 ## סטטוס נכון ל-2026-08-26
 
 - Git repo, remote: `github.com/yoavlevenberg/ita-lab.git`, ענף **master**
