@@ -817,13 +817,15 @@ def _transfer_tooling(T):
     check("transfer: that import falls back to the vendored copy",
           "_vendor" in _pe_src and "except ImportError" in _pe_src)
 
-    # -- the closed network tops out at Python 3.10, and there is no way to try
-    #    the code there before it is sent. ast can be told to parse against an
+    # -- the closed network runs Python 3.8.1, and there is no way to try the
+    #    code there before it is sent. ast can be told to parse against an
     #    older grammar, which turns "will this even load over there" from a
-    #    question into a check. Covers syntax, not stdlib APIs — hence the grep
-    #    for 3.11+ additions that lives alongside this in the notes. ---------
+    #    question into a check. Best effort only: it covers syntax, not stdlib
+    #    APIs, and it still uses THIS interpreter's tokenizer, so it missed a
+    #    multi-line f-string (3.12+) that a real 3.8 rejected. Before a carrier
+    #    leaves, run this suite under a real 3.8 as well — see CONTEXT.md. ---
     import ast as _ast
-    TARGET = (3, 10)
+    TARGET = (3, 8)
     too_new = []
     for p in sorted(root.glob("*.py")):
         try:

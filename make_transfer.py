@@ -217,11 +217,12 @@ def build(include_networkx=False):
     payload_rows = [["PART_AND_DATA"]] + [[f"{i:04d}:{c}"] for i, c in enumerate(chunks)]
 
     checks = _expected_checks()
+    nx_note = ("bundled " + nx_version + ", used only if none is installed"
+               if nx_version else "NOT included - must already be installed")
     readme_rows = [
         ["ITA Lab - source transfer"],
         [f"built {datetime.now().strftime('%Y-%m-%d %H:%M')}   |   {len(members)} files"],
-        [f"networkx: {('bundled ' + nx_version + ', used only if none is installed')
-                      if nx_version else 'NOT included - must already be installed'}"],
+        [f"networkx: {nx_note}"],
         [f"payload sha256 {digest}"],
         [""],
         ["TIP - do not retype the long line in STEP 2. Click that cell, copy the"],
@@ -323,7 +324,7 @@ if __name__ == "__main__":
                     help="wheel to vendor into _vendor/ (default: the one in "
                          "vendor/). 3.1 is what is committed: it covers Python "
                          "3.8+, where 3.6 needs 3.11+ and the closed network "
-                         "has 3.10")
+                         "has 3.8")
     ap.add_argument("--no-networkx", action="store_true",
                     help="build without it, for a far side known to have one")
     args = ap.parse_args()
