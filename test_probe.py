@@ -50,6 +50,8 @@ TREE = {
     "pp-1": {"id": "pp-1", "type": "patchpanel", "name": SECRET},
     "srv-1": {"id": "srv-1", "type": "server", "name": SECRET},
 }
+# not the first candidate, so the probe has to find it
+REAL_NETWORK_PATHS = "/api/v8.1/networks/internal/rest/network-paths"
 PATHS = [{"portName": SECRET, "connections": [{"target": SECRET, "cableType": "FIBER"}]}]
 
 
@@ -103,7 +105,7 @@ def make_server(state, login="json", docs="open"):
                 aid = path.rsplit("/", 1)[1]
                 state["include"].append(query)
                 return self._send(200, TREE[aid]) if aid in TREE else self._send(404, {})
-            if path == ita_probe.NETWORK_PATHS:
+            if path == REAL_NETWORK_PATHS:
                 if query.startswith("assetId="):
                     state["asked"].append(query.split("=", 1)[1])
                     return self._send(200, PATHS)
@@ -160,6 +162,9 @@ def main():
           any(q == "include=children" for q in state["include"]), state["include"])
     check("it walks the tree down to the patch panel and asks about THAT one",
           state["asked"] == ["pp-1"], state["asked"])
+    check("it finds which candidate path is the endpoint",
+          "PATH   : /api/networks/internal/rest/network-paths -> HTTP 404" in out
+          and f"PATH   : {REAL_NETWORK_PATHS} -> HTTP 400" in out, out)
     check("it finds the parameter name the server actually answers to",
           "parameter 'assetId' -> HTTP 200" in out, out)
     check("it reports field names and types",

@@ -53,7 +53,13 @@ from collections import Counter
 from pathlib import Path
 
 OUT = Path(__file__).parent / "probe_out"
-NETWORK_PATHS = "/api/networks/internal/rest/network-paths"
+# Where the internal endpoint lives is not certain: the 400 was seen once
+# (2026-11-03), but on 2026-11-04 the first of these gave 404 in Chrome. The
+# right one answers a bare GET with 400 "...must not be null".
+NETWORK_PATH_CANDIDATES = ("/api/networks/internal/rest/network-paths",
+                           "/api/v8.1/networks/internal/rest/network-paths",
+                           "/api/current/networks/internal/rest/network-paths",
+                           "/networks/internal/rest/network-paths")
 # tried in this order; the server's 400 names no parameter, only "arg0"
 PARAM_NAMES = ("asset_id", "assetId", "asset", "id", "assetIds", "asset_ids",
                "sourceAssetId")    # the last from an internal AI's guess, 2026-11-04
@@ -252,16 +258,27 @@ class Probe:
         return fallback, types
 
     # -- 4. the endpoint we actually need ------------------------------------
-    def network_paths(self, asset_id):
+    def locate_network_paths(self):
+        """Which candidate path is the endpoint: the one whose bare GET
+        complains about the missing argument. Returns (path or None, notes)."""
+        notes = []
+        for path in NETWORK_PATH_CANDIDATES:
+            st, raw = self.get(path)
+            notes.append(f"{path} -> {self.last}")
+            if st == 400 and b"must not be null" in raw:
+                return path, notes
+        return None, notes
+
+    def network_paths(self, path, asset_id):
         """Try each likely parameter name. A 400 that still says the argument
-        is null means the name was wrong; anything else means it was heard."""
+        is null, or a 404, means the name was wrong; anything else means it
+        was heard."""
         tried = []
         for name in PARAM_NAMES:
             q = urllib.parse.urlencode({name: asset_id})
-            st, raw = self.get(f"{NETWORK_PATHS}?{q}")
-            text = raw.decode("utf-8", "replace")
+            st, raw = self.get(f"{path}?{q}")
             tried.append((name, st))
-            if st == 400 and "must not be null" in text:
+            if st == 404 or (st == 400 and b"must not be null" in raw):
                 continue
             return name, st, raw, tried
         return None, None, None, tried
@@ -519,10 +536,18 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         _save(report)
         return 1
 
-    name, st, raw, tried = probe.network_paths(asset)
+    path, notes = probe.locate_network_paths()
+    for n in notes:
+        say(f"PATH   : {n}")
+    if not path:
+        say("NETWORK: no candidate path answered 'must not be null' —")
+        say("         find the real one with F12 > Network in ITA's own UI")
+        _save(report)
+        return 1
+    name, st, raw, tried = probe.network_paths(path, asset)
     if name is None:
         say("NETWORK: the server ignored every parameter name: "
-            + ", ".join(n for n, _ in tried))
+            + ", ".join(f"{n}={c}" for n, c in tried))
         _save(report)
         return 1
     say(f"NETWORK: parameter '{name}' -> HTTP {st}")

@@ -286,7 +286,7 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   שהוא עצמו מצא ב-spec) — נאכף ב-`Probe._request`, לא בהבטחה. נתונים גולמיים
   נשמרים ב-`probe_out/` (ב-gitignore) ונשארים שם.
 - אופן ההתחברות ל-API לא ידוע — הכלי מגלה אותו מ-`securityDefinitions` ומנתיבי
-  POST עם token/login. `test_probe.py` בודק אותו מול שרת מדומה (20 בדיקות).
+  POST עם token/login. `test_probe.py` בודק אותו מול שרת מדומה (21 בדיקות).
 - ריצה ראשונה (2026-11-04): `SPEC not found`, אבל Chrome פותח את final.json.
   החשד: ה-docs מאחורי התחברות ש-Chrome כבר מחזיק. לכן נוספו `--spec final.json`
   (שמירה מ-Chrome ב-Ctrl+S) ושורות `TRY` שמפרטות מה כל ניסיון קיבל, בלי כתובת השרת.
@@ -305,6 +305,10 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   שדות נוספים: children, deviceLinks, shape, positionTopleftX/Y, orientation, cageId,
   width, depth, barcode, partNumber, weight, height, powerConsumer, customerRelation, stage.
   **חסר:** מספר/רשימת פורטים (fiber/copper) וחיבורים. לא ידוע עדיין: מה בתוך `deviceLinks`.
+- **2026-11-04: `/api/networks/internal/rest/network-paths?<name>=<uuid>` החזיר 404 ב-Chrome**
+  לכל שמות הפרמטרים, כלומר הנתיב המדויק לא ידוע (ה-400 מ-11-03 הגיע מקידומת אחרת).
+  הכלי מנסה עכשיו כמה קידומות (`NETWORK_PATH_CANDIDATES`) ובוחר את זו שעונה 400
+  `must not be null`. הדרך הוודאית: F12 > Network בממשק ITA עצמו, במסך הפורטים של רכיב.
 
 ## סטטוס נכון ל-2026-11-03
 
