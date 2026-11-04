@@ -302,6 +302,43 @@ def structure(manifest):
     return lines
 
 
+_ID_LIKE = re.compile(r"^[0-9a-f-]{8,}$|^\d+$", re.I)
+
+
+def field_names(folder, manifest, kinds=("rack", "server-room", "room", "row")):
+    """Which fields the records of racks and rooms carry — NAMES only, never a
+    value. ITA draws each site as a floor plan with the cabinets placed on it
+    (2026-11-05, from the user), so a rack record may hold its position; this
+    is how to find the field without showing a single name or number from the
+    site. A key that looks like an id is not printed."""
+    tree = manifest["tree"]
+    lines = []
+    for kind in kinds:
+        ids = [a for a, t in tree.items() if str(t["type"]).lower() == kind][:20]
+        seen = Counter()
+        for aid in ids:
+            try:
+                rec = json.loads((folder / "assets" / f"{_safe(aid)}.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+
+            def walk(obj, prefix, depth):
+                for k, v in obj.items():
+                    if _ID_LIKE.match(str(k)):
+                        k = "<id>"
+                    name = f"{prefix}{k}"
+                    if isinstance(v, dict) and depth < 2:
+                        walk(v, name + ".", depth + 1)
+                    else:
+                        tag = ("#" if isinstance(v, (int, float)) and not isinstance(v, bool)
+                               else "[]" if isinstance(v, list) else "")
+                        seen[name + tag] += 1
+            walk(rec if isinstance(rec, dict) else {}, "", 0)
+        if seen:
+            lines.append(f"{kind} ({len(ids)} read): " + ", ".join(sorted(seen)))
+    return lines
+
+
 def _safe(aid):
     return re.sub(r"[^\w.-]", "_", str(aid))
 
@@ -408,6 +445,11 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         say(f"PROBLEM: {p} (x{n})")
     for line in structure(m):
         say(f"STRUCT : {line}")
+    # field names only (# = a number, [] = a list) — looking for where ITA keeps
+    # a cabinet's place on its floor plan
+    folder = sync.out if m["complete"] else sync.out.with_name(sync.out.name + ".partial")
+    for line in field_names(folder, m):
+        say(f"FIELDS : {line}")
     say("")
     say(f"Saved under ita_cache/ ({m['assets']} asset files). It stays on this machine.")
     say("Type out the lines above.")

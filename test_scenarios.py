@@ -478,6 +478,32 @@ def _phase2_fixes(T):
               f"planned={len(_rows)} committed={len(_out.get('committed', []))} "
               f"failed={_out.get('failed')}")
 
+    # -- the row shows one route at a time (2026-11-05), and "choose" names the
+    #    route shown by its strands: its number can be off by one when the plan's
+    #    own route was put first. Planned only, never executed. ---------------
+    with _serve() as base:
+        _buf = _io1.BytesIO()
+        _mss1.write_xlsx(_buf, {"P2P": _mss1.build_clean(server.TOPOLOGY)})
+        _, pb = _hit_raw(base, "/api/bulk/plan", _buf.getvalue())
+        _plan = _j2.loads(pb)
+        _row = next(r["row"] for r in _plan["results"] if r.get("status") == "ok")
+        _fp = lambda o: [[s["edge_id"], s["strand_index"]] for s in o["segments"]]
+        _, r1 = _hit(base, "/api/bulk/row", {"plan_id": _plan["plan_id"], "row": _row, "count": 1})
+        _, r3 = _hit(base, "/api/bulk/row", {"plan_id": _plan["plan_id"], "row": _row, "count": 3})
+        d1, d3 = _j2.loads(r1), _j2.loads(r3)
+        check("row detail: asking for one more keeps the routes already shown, in order",
+              [_fp(o) for o in d3["options"][:len(d1["options"])]] == [_fp(o) for o in d1["options"]],
+              (len(d1["options"]), len(d3["options"])))
+        _want = next(o for i, o in enumerate(d3["options"]) if i != d3["chosen"])
+        _, cb = _hit(base, "/api/bulk/choose", {"plan_id": _plan["plan_id"], "row": _row,
+                                                "option": d3["options"].index(_want),
+                                                "fingerprint": _fp(_want)})
+        _, ra = _hit(base, "/api/bulk/row", {"plan_id": _plan["plan_id"], "row": _row, "count": 3})
+        da = _j2.loads(ra)
+        check("choose by the route shown: the plan now holds exactly that route",
+              _j2.loads(cb).get("status") == "ok"
+              and _fp(da["options"][da["chosen"]]) == _fp(_want), (_j2.loads(cb), da.get("chosen")))
+
 
 def _phase3_perf(T):
     """FIXES.md phase 3 — the scans that grow with the map. Locking the readers

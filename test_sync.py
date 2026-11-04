@@ -51,6 +51,10 @@ TREE = {a["id"]: a for a in [
     asset("srv1", "server", SECRET),
     asset("pp2", "patch-panel", SECRET),
 ]}
+# where ITA might keep a cabinet's place on its floor plan (field name made up),
+# and a block keyed by ids, whose keys must not reach the screen either
+TREE["rack1"]["floorPlacement"] = {"x": 12.5, "y": 3, "rotation": 90}
+TREE["rack1"]["links"] = {"3f2a9c1e-77aa-4b1c-9d00-aa11bb22cc33": SECRET}
 
 
 def end(aid, port):
@@ -176,6 +180,12 @@ def main():
               "racks not inside a row: 1 of 4" in out, out)
         check("the tree's shape is shown in type names",
               "location > server-room > row > rack" in out, out)
+        fields = next((l for l in out.splitlines() if l.startswith("FIELDS : rack ")), "")
+        check("the field names a rack record carries are listed (numbers marked #)",
+              "floorPlacement.x#" in fields and "floorPlacement.rotation#" in fields
+              and "children[]" in fields and "name" in fields, out)
+        check("...names only: no value, and no key that is an id",
+              "12.5" not in fields and "3f2a9c1e" not in fields and "links.<id>" in fields, fields)
         check("no name, serial, address or id reaches the screen",
               SECRET not in out and "R-ONE" not in out and "rack1" not in out
               and "127.0.0.1" not in out, out)

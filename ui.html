@@ -2242,18 +2242,47 @@ let rowDetail = {};
 
 function renderRowDetail(row){
   const d = rowDetail[row];
-  if (!d) return `<div class="rd-load">טוען פירוט מסלול…</div>`;
-  if (d.error) return `<div class="rd-load" style="color:#ff9d97">${escapeHtml(d.error)}</div>`;
+  if (d && d.error) return `<div class="rd-load" style="color:#ff9d97">${escapeHtml(d.error)}</div>`;
+  // fetchRowDetail marks the row busy before anything has arrived
+  if (!d || !d.options) return `<div class="rd-load">טוען פירוט מסלול…</div>`;
 
-  const head = d.locked
-    ? `<div class="rd-head">המסלול שהותקן בפועל — אין עוד מה לבחור</div>`
-    : `<div class="rd-head">
-         <span>${d.options.length} ${d.options.length === 1 ? "אפשרות" : "אפשרויות"} לשורה הזו · הנבחרת מסומנת</span>
-         ${d.more ? `<button class="ghost" onclick="moreRowOptions(${row})"
-              ${d.busy ? "disabled" : ""}>עוד אפשרות</button>` : ""}
-       </div>`;
+  if (d.locked)
+    return `<div class="rd-head">המסלול שהותקן בפועל — אין עוד מה לבחור</div>`
+         + renderRowOption(row, d.options[0], 0, d);
 
-  return head + d.options.map((o, i) => renderRowOption(row, o, i, d)).join("");
+  // One route at a time, as in a single port-to-port lookup (2026-11-05):
+  // "give another route" steps forward, "back" returns to one already shown.
+  const pos = Math.max(0, Math.min(d.pos == null ? d.chosen || 0 : d.pos, d.options.length - 1));
+  const atEnd = pos >= d.options.length - 1;
+  const noMore = atEnd && (!d.more || d.exhausted);
+  const head = `<div class="rd-head">
+       <span>דרך ${pos + 1} מתוך ${d.options.length} שהוצגו${pos === d.chosen ? " · זו שתבוצע" : ""}</span>
+       <span style="flex:1"></span>
+       ${pos > 0 ? `<button class="ghost" onclick="prevRowOption(${row})"
+            ${d.busy ? "disabled" : ""}>→ חזור לדרך הקודמת</button>` : ""}
+       <button class="ghost" onclick="nextRowOption(${row})"
+            ${d.busy || noMore ? "disabled" : ""}>${noMore ? "אין דרך נוספת" : "תן דרך אחרת ←"}</button>
+     </div>`;
+  return head + renderRowOption(row, d.options[pos], pos, d);
+}
+
+function nextRowOption(row){
+  const d = rowDetail[row];
+  if (!d || !d.options) return;
+  const pos = d.pos == null ? d.chosen || 0 : d.pos;
+  if (pos < d.options.length - 1){
+    d.pos = pos + 1; focusRowOption(row, d.pos); return renderBulk();
+  }
+  d.pos = d.options.length;            // the one about to be fetched
+  fetchRowDetail(row, d.options.length + 1);
+  renderBulk();
+}
+
+function prevRowOption(row){
+  const d = rowDetail[row];
+  if (!d) return;
+  const pos = d.pos == null ? d.chosen || 0 : d.pos;
+  if (pos > 0){ d.pos = pos - 1; focusRowOption(row, d.pos); renderBulk(); }
 }
 
 function renderRowOption(row, route, i, d){
@@ -2262,14 +2291,14 @@ function renderRowOption(row, route, i, d){
   const word = route.cable_type === "fiber" ? "סיב" : "זוג";
 
   const pick = d.locked ? "" : isChosen
-    ? `<span class="rd-chosen">✓ זו האפשרות שתבוצע</span>`
+    ? `<span class="rd-chosen">✓ זו הדרך שתבוצע</span>`
     : `<button class="primary" onclick="chooseRowOption(${row},${i})"
-         ${d.busy ? "disabled" : ""}>בחר את האפשרות הזו</button>`;
+         ${d.busy ? "disabled" : ""}>בחר את הדרך הזו</button>`;
 
   return `
     <div class="opt-card${isChosen ? " chosen" : ""}">
       <div class="opt-head">
-        <h3 style="font-size:13px;margin:0">אפשרות ${i + 1}</h3>
+        <h3 style="font-size:13px;margin:0">דרך ${i + 1}</h3>
         ${domainPill(route.domain)}
         <button class="ghost" onclick="focusRowOption(${row},${i})">הצג במפה</button>
         ${pick}
@@ -2313,16 +2342,23 @@ function fetchRowDetail(row, count){
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ plan_id: bulkPlan.plan_id, row, count: count || 2 })
   }).then(r => r.json()).then(res => {
-    rowDetail[row] = res.status === "ok" ? res
-                   : { error: res.reason || res.error || "לא ניתן לחשב מסלול לשורה הזו" };
+    const before = rowDetail[row] || {};
+    if (res.status === "ok"){
+      // keep the place the planner is at; a first open starts on the plan's choice
+      res.pos = before.pos == null ? res.chosen : before.pos;
+      // asked for one more and none came: say so, stay on the last one
+      res.exhausted = !!before.options && !res.more;
+      res.pos = Math.min(res.pos, res.options.length - 1);
+      rowDetail[row] = res;
+      if (before.options) focusRowOption(row, res.pos);
+    } else if (before.options){
+      rowDetail[row] = {...before, busy: false, exhausted: true,
+                        pos: before.options.length - 1};
+    } else {
+      rowDetail[row] = { error: res.reason || res.error || "לא ניתן לחשב מסלול לשורה הזו" };
+    }
     renderBulk();
   }).catch(e => { rowDetail[row] = { error: String(e) }; renderBulk(); });
-}
-
-function moreRowOptions(row){
-  const d = rowDetail[row];
-  fetchRowDetail(row, (d && d.options ? d.options.length : 2) + 1);
-  renderBulk();
 }
 
 function focusRowOption(row, i){
@@ -2337,7 +2373,9 @@ function chooseRowOption(row, i){
   rowDetail[row].busy = true; renderBulk();
   fetch("/api/bulk/choose", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ plan_id: bulkPlan.plan_id, row, option: i })
+    body: JSON.stringify({ plan_id: bulkPlan.plan_id, row, option: i,
+      // the route shown, by its strands — its number alone can be off by one
+      fingerprint: rowDetail[row].options[i].segments.map(s => [s.edge_id, s.strand_index]) })
   }).then(r => r.json()).then(res => {
     if (res.status !== "ok"){
       rowDetail[row].busy = false; renderBulk();
@@ -2365,7 +2403,7 @@ function toggleJump(row){
   if (!r || r.status === "failed") return;
   shownJump = shownJump === row ? null : row;
   // the detail is fetched on first open only — reopening a row is free
-  if (shownJump !== null && !rowDetail[row]) fetchRowDetail(row, 2);
+  if (shownJump !== null && !rowDetail[row]) fetchRowDetail(row, 1);
   // highlight the same route on the farm map behind the panel, exactly as a
   // single SHOW ROUTE does
   if (shownJump === null){

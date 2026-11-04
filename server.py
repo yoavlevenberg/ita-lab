@@ -1044,9 +1044,21 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 options = pathengine.resolve_route_options(
                     result["route"]["src_port"], result["route"]["dst_port"],
-                    count=max(pick + 1, 2), topology=work)
+                    count=max(pick + 2, 2), topology=work)
             except pathengine.RouteError as e:
                 return self._send(200, {"status": "failed", "reason": str(e)})
+            # The page names the route by its strands. Its option number alone
+            # can point at a different one: /api/bulk/row puts the plan's own
+            # route first when the router no longer ranks it on top, which
+            # shifts every number after it by one.
+            want = req.get("fingerprint")
+            if want is not None:
+                want = [[str(e), int(i)] for e, i in want]
+                pick = next((k for k, o in enumerate(options)
+                             if [[s["edge_id"], s["strand_index"]] for s in o["segments"]]
+                             == want), -1)
+            else:
+                options = options[:max(pick + 1, 2)]
             if not 0 <= pick < len(options):
                 return self._send(409, {"error": "that option is no longer available — "
                                                  "reopen the row"})

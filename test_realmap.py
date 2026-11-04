@@ -156,6 +156,10 @@ def ui_checks():
           "fetchRouteOptions(1)" in ui and 'id="btnPrevOption"' in ui
           and "renderOptionCard(options[optPos], optPos)" in show
           and "options.map(" not in show, "")
+    rows = ui[ui.index("function renderRowDetail("):ui.index("function renderRowOption(")]
+    check("ui: an Excel row shows one route at a time too, and choose names it by its strands",
+          "renderRowOption(row, d.options[pos], pos, d)" in rows and "d.options.map(" not in rows
+          and "fingerprint:" in ui and "fetchRowDetail(row, 1)" in ui, "")
     check("ui: no 'domain null' on a map without A/B legs",
           not re.search(r'>domain \$\{(?:route|c|e|meta)\.domain\}<', ui), "")
 
