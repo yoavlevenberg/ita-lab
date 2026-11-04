@@ -271,6 +271,8 @@ cli.py                  גישה משורת פקודה לאותו מנוע
 test_scenarios.py       322 בדיקות
 ita_probe.py            בדיקת ה-API של ITA האמיתי מתוך הרשת הסגורה (קריאה בלבד)
 test_probe.py           בדיקות ל-ita_probe מול שרת ITA מדומה
+ita_sync.py             העתקת ארון/אתר מ-ITA לעותק מקומי ita_cache/ (קריאה בלבד)
+test_sync.py            בדיקות ל-ita_sync מול שרת ITA מדומה
 CONTEXT.md              תקציר לסשן עבודה הבא (Claude Code או אחר)
 ```
 

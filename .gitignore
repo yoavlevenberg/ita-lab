@@ -21,3 +21,7 @@ TRANSFER_INSTRUCTIONS.txt
 # written by ita_probe.py on the closed network; holds real ITA data, so it
 # must never be committed or travel back
 probe_out/
+
+# written by ita_sync.py on the closed network: the local copy of real ITA
+# data. Same rule as probe_out/ — never committed, never travels back
+ita_cache/

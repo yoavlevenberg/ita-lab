@@ -343,6 +343,15 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   עותק לכל אתר → הרחבה לאתרים נוספים. ריצה ראשונה: ארון אחד בלבד.
 - טבלת Network בממשק ITA: Start item (Name, Port, Type, Description) · Route ·
   End item (Name, Port, Type, Description, IP Address) = beginItem / networkPath / endItem.
+- **`ita_sync.py` (2026-11-04):** מעתיק ארון (`--rack <שם>`), אתר (`--site <שם תיקייה>`) או
+  כל נקודה בעץ (`--id <uuid>`) ל-`ita_cache/<שם>/`: `assets/<id>.json` ו-`network/<id>.json`
+  גולמיים כמו ש-ITA החזיר, ו-`manifest.json` עם העץ (parent/type). מוצא את ה-API ב-http/https
+  וב-v8.1/current, ו-network-paths דרך `Probe.locate_network_paths`. על המסך: רק ספירות ושמות
+  סוגים, כולל שורות `STRUCT` שעונות על שאלת row/פוד בלי שמות (כמה ארונות בכל row, כמה
+  ארונות מחוץ ל-row). 401 על network-paths מדווח כ"דוחה את ההתחברות" ולא "לא נמצא".
+  `test_sync.py`: 16 בדיקות, אתר מדומה מעורב (שתי שורות באורך שונה + ארון בודד).
+  **הצעד הבא אחרי ריצה אמיתית:** ממיר מ-ita_cache לטופולוגיה של האפליקציה, עם מודל
+  שבו פוד ו-row אופציונליים (דרישת המשתמש: לעבוד עם פודים, שורות בלי פוד וארונות בודדים).
 
 ## סטטוס נכון ל-2026-11-03
 
