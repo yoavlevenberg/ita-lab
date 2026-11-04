@@ -9,6 +9,7 @@ reports only the SHAPE of it, never the data.
     python ita_probe.py --server <address> --asset <uuid>     skip the search
     python ita_probe.py --server <address> --insecure         self-signed TLS
     python ita_probe.py --server <address> --proxy            via Windows' proxy
+    python ita_probe.py --server <address> --spec final.json  spec saved from Chrome
 
 WHY THIS EXISTS
 ---------------
@@ -160,31 +161,42 @@ class Probe:
     def login(self, spec, user, password):
         check = self._cheap_get_path(spec)
         for kind, url in self.login_candidates(spec):
-            if url:
-                self.auth_urls.add(url)
-            if kind == "basic":
-                import base64
-                pair = base64.b64encode(f"{user}:{password}".encode()).decode()
-                self.headers["Authorization"] = "Basic " + pair
-            else:
-                if kind == "oauth":
-                    body = urllib.parse.urlencode({"grant_type": "password",
-                                                   "username": user,
-                                                   "password": password}).encode()
-                    ctype = "application/x-www-form-urlencoded"
-                else:
-                    body = json.dumps({"username": user, "password": password}).encode()
-                    ctype = "application/json"
-                st, raw = self._request("POST", url, body, {"Content-Type": ctype})
-                token = _find_token(_json(raw)) if st in (200, 201) else None
-                if not token:
-                    continue
-                self.headers["Authorization"] = "Bearer " + token
-            st, _ = self.get(check)
-            if st == 200:
-                return kind
+            try:
+                if self._try_login(kind, url, user, password, check):
+                    return kind
+            except (urllib.error.URLError, OSError) as e:
+                self.attempts.append(f"login {kind} {_path(url or check)} -> {_why(e)}")
             self.headers.pop("Authorization", None)
         return None
+
+    def _try_login(self, kind, url, user, password, check):
+        """One login method; True if a cheap GET then works. Notes what each
+        step got back, so a failure says more than FAILED."""
+        if url:
+            self.auth_urls.add(url)
+        if kind == "basic":
+            import base64
+            pair = base64.b64encode(f"{user}:{password}".encode()).decode()
+            self.headers["Authorization"] = "Basic " + pair
+        else:
+            if kind == "oauth":
+                body = urllib.parse.urlencode({"grant_type": "password",
+                                               "username": user,
+                                               "password": password}).encode()
+                ctype = "application/x-www-form-urlencoded"
+            else:
+                body = json.dumps({"username": user, "password": password}).encode()
+                ctype = "application/json"
+            st, raw = self._request("POST", url, body, {"Content-Type": ctype})
+            token = _find_token(_json(raw)) if st in (200, 201) else None
+            self.attempts.append(f"login {kind} {_path(url)} -> {self.last}"
+                                 + ("" if token or st not in (200, 201) else ", no token in reply"))
+            if not token:
+                return False
+            self.headers["Authorization"] = "Bearer " + token
+        st, _ = self.get(check)
+        self.attempts.append(f"login {kind} check {_path(check)} -> {self.last}")
+        return st == 200
 
     def _cheap_get_path(self, spec):
         """A GET with no path parameters, to prove a login worked."""
@@ -402,6 +414,21 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
 
     probe = spec = spec_url = None
     cert_error = False
+    if getattr(args, "spec", None):
+        # Saved from Chrome: the docs may sit behind a login Chrome already
+        # has. The server's address still comes from --server; its scheme
+        # from there, else the spec's own `schemes`, else https.
+        try:
+            spec = json.loads(Path(args.spec).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as e:
+            say(f"SPEC   : cannot read {args.spec} ({type(e).__name__})")
+            return 2
+        if "://" not in args.server and spec.get("schemes"):
+            root = spec["schemes"][0] + "://" + root.split("://", 1)[1]
+        probe = Probe(root, insecure=args.insecure, log=log,
+                      proxy=getattr(args, "proxy", False))
+        spec_url = args.spec
+        roots = []
     for root in roots:
         scheme = root.split("://", 1)[0]
         p = Probe(root, insecure=args.insecure, log=log, proxy=getattr(args, "proxy", False))
@@ -420,9 +447,9 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
             say("TLS    : the server's certificate is not trusted here.")
             say("         run again with --insecure (it is an internal server)")
         else:
-            say("SPEC   : not found. Type out the TRY lines above, and the")
-            say("         Swagger page's address from Chrome with the server")
-            say("         name replaced by X.")
+            say("SPEC   : not found. Type out the TRY lines above.")
+            say("         If Chrome opens the spec, save it (Ctrl+S) as")
+            say("         final.json next to this script and add --spec final.json")
         _save(report)
         return 2
 
@@ -438,11 +465,14 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
 
     user = args.user or ask_user("ITA user name: ")
     password = ask_password("ITA password (not shown, not saved): ")
+    before = len(probe.attempts)
     how = probe.login(spec, user, password)
     if not how:
         say("LOGIN  : FAILED with every method the spec offers")
         tried = [k for k, _ in probe.login_candidates(spec)]
         say(f"         tried: {', '.join(tried) or 'nothing found in the spec'}")
+        for a in probe.attempts[before:]:
+            say(f"TRY    : {a}")
         _save(report)
         return 1
     say(f"LOGIN  : ok ({how})")
@@ -495,6 +525,8 @@ def main():
     ap.add_argument("--asset", help="a device's uuid, to skip the search")
     ap.add_argument("--insecure", action="store_true",
                     help="accept the server's self-signed certificate")
+    ap.add_argument("--spec", metavar="FILE",
+                    help="the spec saved from Chrome, when the server will not hand it over")
     ap.add_argument("--proxy", action="store_true",
                     help="go through Windows' proxy setting (default: direct)")
     sys.exit(run(ap.parse_args()))

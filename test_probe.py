@@ -121,16 +121,17 @@ def make_server(state, login="json", docs="open"):
 
 
 class Args:
-    def __init__(self, server, asset=None):
+    def __init__(self, server, asset=None, spec=None):
         self.server, self.user, self.asset, self.insecure = server, "u", asset, False
+        self.spec = spec
 
 
-def run_probe(login="json", asset=None, password="p", docs="open", suffix=""):
+def run_probe(login="json", asset=None, password="p", docs="open", suffix="", spec=None):
     state = {"methods": [], "asked": [], "include": []}
     srv = make_server(state, login, docs)
     lines = []
     try:
-        code = ita_probe.run(Args(f"http://127.0.0.1:{srv.server_port}{suffix}", asset),
+        code = ita_probe.run(Args(f"http://127.0.0.1:{srv.server_port}{suffix}", asset, spec),
                              ask_password=lambda _: password, log=lines.append)
     finally:
         srv.shutdown()
@@ -173,6 +174,21 @@ def main():
     check("docs behind a login page: says where each try went, no host",
           code == 2 and "redirected to /login" in out and "127.0.0.1" not in out
           and "TRY    : http /api/current/docs/final.json" in out, out)
+
+    saved = ita_probe.OUT / "_test_saved_spec.json"
+    ita_probe.OUT.mkdir(exist_ok=True)
+    saved.write_text(json.dumps(SPEC), encoding="utf-8-sig")    # Chrome's Ctrl+S may add a BOM
+    try:
+        code, out, state = run_probe(docs="login", spec=str(saved))
+    finally:
+        saved.unlink()
+    check("docs behind a login + spec saved from Chrome: the whole run works",
+          code == 0 and "LOGIN  : ok (json)" in out and state["asked"] == ["pp-1"], out)
+
+    code, out, state = run_probe(password="wrong")
+    check("a failed login says what each attempt got back",
+          "TRY    : login json /api/current/token -> HTTP 401" in out
+          and "127.0.0.1" not in out, out)
 
     lines = []
     code = ita_probe.run(Args("http://127.0.0.1:9"), ask_password=lambda _: "p",
