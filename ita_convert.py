@@ -205,15 +205,18 @@ class Converter:
         self.modules[did] = mods
         for m in mods:
             for i in range(1, m["count"] + 1):
-                self._add_port(dev, m["offset"] + i, m["media"])
+                self._add_port(dev, m["offset"] + i, m["media"], m["connector"])
         return did
 
-    def _add_port(self, dev, index, media):
+    def _add_port(self, dev, index, media, connector=None):
         pid = f"{dev['id']}:{index}"
         if pid not in self.topology["ports"]:
             self.topology["ports"][pid] = {
                 "id": pid, "rack": dev["rack"], "device": dev["id"], "index": index,
                 "type": media, "status": "free", "peer": None, "circuit": None, "role": None}
+            if connector:
+                # the plug a patch cord needs at this end (patchcords.py)
+                self.topology["ports"][pid]["connector"] = str(connector)
         return pid
 
     # -- one connection end -> one map port -----------------------------------
@@ -244,7 +247,7 @@ class Converter:
         index = m["offset"] + number - m["start"] + 1
         if m.get("extra"):
             m["count"] = max(m["count"], number - m["start"] + 1)
-        return self._add_port(dev, index, m["media"])
+        return self._add_port(dev, index, m["media"], m.get("connector"))
 
     def _stub(self, end):
         """A device outside the copy: placed in a stub rack named from the

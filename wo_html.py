@@ -13,6 +13,8 @@ rest of this tool.
 from datetime import datetime
 from html import escape as e
 
+import patchcords
+
 CSS = """
 :root{ --ink:#111; --muted:#666; --line:#c9c9c9; --tint:#f4f6f8; --accent:#14507d; }
 *{ box-sizing:border-box }
@@ -81,7 +83,8 @@ def _steps(route):
     for i, seg in enumerate(route["segments"]):
         out.append((
             f"Patch {kind} #{seg['strand_index']} of trunk {seg['edge_id']} "
-            f"({seg['from_rack']} → {seg['to_rack']}, ~{seg['length_m']} m)",
+            f"({seg['from_rack']} → {seg['to_rack']}"
+            + (f", ~{seg['length_m']} m)" if seg.get("length_m") else ")"),
             seg.get("from_location") or seg["strand_port_from"],
             seg.get("to_location") or seg["strand_port_to"],
             f"#{seg['strand_index']}"))
@@ -107,10 +110,12 @@ def render(route, order_id=None, circuit_id=None):
         ("Redundancy leg", f"domain {route['domain']}" if route.get("domain")
          else "not tracked on this map"),
         ("Hops", f"{len(route['segments'])} trunk segment(s)"),
-        ("Estimated length", f"~{route['total_length_m']} m"),
         ("Source port", route["src_location"]),
         ("Destination port", route["dst_location"]),
     ]
+    if route.get("total_length_m"):
+        # a map from ITA may carry no trunk lengths; "~0 m" would be a lie
+        facts.insert(3, ("Estimated length", f"~{route['total_length_m']} m"))
     if route.get("option_index"):
         facts.append(("Route option", f"#{route['option_index']}"))
 
@@ -137,7 +142,7 @@ def render(route, order_id=None, circuit_id=None):
     rows = "".join(
         f"<tr><td class='mono'>{e(s['edge_id'])}</td>"
         f"<td class='mono'>#{s['strand_index']}</td>"
-        f"<td>{s['length_m']} m</td><td>{'domain ' + e(s['domain']) if s.get('domain') else '—'}</td>"
+        f"<td>{str(s['length_m']) + ' m' if s.get('length_m') else '—'}</td><td>{'domain ' + e(s['domain']) if s.get('domain') else '—'}</td>"
         f"<td>{s['used_before']}/{s['capacity']} used &middot; "
         f"{s['remaining_before']} free</td></tr>"
         for s in route["segments"])
@@ -146,6 +151,22 @@ def render(route, order_id=None, circuit_id=None):
     strand_heading = ("Strands used by this connection" if circuit_id
                       else "Strands reserved by this job")
     occupancy_heading = "Occupancy now" if circuit_id else "Occupancy before this job"
+
+    cords = route.get("patch_cords") or []
+
+    def cord_size(c):
+        if c["need_m"] is None:
+            return "U unknown &mdash; measure on site"
+        if c["stock_m"] is None:
+            return f"~{c['need_m']} m &mdash; longer than any stock cord"
+        return f"<b>{c['stock_m']} m</b> <span class='sub'>({c['gap_u']}U, ~{c['need_m']} m)</span>"
+    cord_html = "" if not cords else (
+        "<h2>Patch cords to bring</h2><table><thead><tr><th>Cabinet</th><th>From</th>"
+        "<th>To</th><th>Cord</th></tr></thead><tbody>"
+        + "".join(f"<tr><td class='mono'>{e(c['rack'])}</td><td class='mono'>{e(c['from'])}</td>"
+                  f"<td class='mono'>{e(c['to'])}</td><td>{cord_size(c)}</td></tr>" for c in cords)
+        + f"</tbody></table><div class='path' style='margin-top:8px'>Total: "
+        + e(", ".join(patchcords.kit(cords))) + "</div>")
 
     fact_html = "".join(
         f"<div><span class='k'>{e(k)}</span><span class='v mono'>{e(str(v))}</span></div>"
@@ -175,6 +196,7 @@ def render(route, order_id=None, circuit_id=None):
 
 <h2>Steps</h2>
 <ol class="steps">{''.join(steps)}</ol>
+{cord_html}
 
 <h2>{strand_heading}</h2>
 <table><thead><tr><th>Trunk</th><th>Strand</th><th>Length</th>

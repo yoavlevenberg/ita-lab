@@ -294,7 +294,7 @@ def _route_of_circuit(circuit_id):
     # A truncated circuit has no far end; it stops at its open end. Reading one
     # used to crash here, because every circuit was assumed to have both.
     far = circuit.get("b_port") or circuit.get("open_end")
-    return {
+    return pathengine._with_cords(TOPOLOGY, {
         "cable_type": ct_name, "domain": circuit["domain"],
         "created_at": circuit.get("created_at"),
         "src_port": circuit["a_port"], "dst_port": far,
@@ -311,7 +311,8 @@ def _route_of_circuit(circuit_id):
         "open_end": circuit.get("open_end"),
         "open_end_location": (pathengine.describe_port(TOPOLOGY, circuit["open_end"])
                               if circuit.get("open_end") else None),
-    }
+        "intra_rack": bool(circuit.get("intra_rack")),
+    })
 
 
 class Handler(BaseHTTPRequestHandler):

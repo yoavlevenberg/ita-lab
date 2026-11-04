@@ -350,6 +350,7 @@ def engine_cases():
     check("the Work Order names real panel ports, no made-up strand ids",
           "R1-U40-P6 (P1)" in text and "R3-U40-P8 (P4)" in text and "#F0" not in text
           and "domain None" not in text, text)
+    cords_cases(route, text)
 
     # a fiber whose front port has a cord in it is not free, whatever the trunk says
     m2 = copy.deepcopy(base)
@@ -413,6 +414,68 @@ def engine_cases():
           == ["R2-U40-P5 (P2)  <->  R2-U39-P7 (P3)"]
           and "near end : R1-U40-P5 (P1)" in text and "far  end : R3-U40-P7 (P4)" in text,
           text)
+    check("...and it lists the same three cords a new route would need",
+          [(c["rack"], c["stock_m"]) for c in old["patch_cords"]]
+          == [("R1", 2), ("R2", 1), ("R3", 2)], old["patch_cords"])
+
+
+def cords_cases(route, text):
+    """The cords a technician brings: device to panel at each end, panel to
+    panel at each cross-connect, sized by how far apart they sit in the cabinet
+    (field rule, 2026-11-04: panel at U40, switch at U1 -> a 3 m fiber)."""
+    import patchcords
+    import wo_html
+    got = [(c["rack"], c["from_port"], c["to_port"], c["gap_u"], c["stock_m"])
+           for c in route["patch_cords"]]
+    check("cords: switch->panel in R1, panel->panel in R2, panel->server in R3",
+          got == [("R1", "R1:SW:7", "R1:P1:6", 30, 2), ("R2", "R2:P2:6", "R2:P3:8", 1, 1),
+                  ("R3", "R3:P4:8", "R3:SRV:3", 30, 2)], got)
+    check("cords: the connector types from ITA name the cord",
+          patchcords.kit(route["patch_cords"]) == ["1 x 1 m fiber LC-LC", "2 x 2 m fiber LC-LC"],
+          patchcords.kit(route["patch_cords"]))
+    check("cords: the Work Order lists them",
+          "PATCH CORDS TO BRING" in text and "Total: 1 x 1 m fiber LC-LC, 2 x 2 m" in text, text)
+    html = wo_html.render(route)
+    check("cords: the printable sheet lists them too",
+          "Patch cords to bring" in html and "<b>2 m</b>" in html, "")
+    # ITA may hold no trunk lengths at all: then the sheet says nothing about them
+    bare = copy.deepcopy(route)
+    bare["total_length_m"] = 0.0
+    for s_ in bare["segments"]:
+        s_["length_m"] = 0.0
+    t0, h0 = workorder_text(bare), wo_html.render(bare)
+    check("a map with no trunk lengths prints no '~0 m'",
+          "~0.0 m" not in t0 and "Total length" not in t0
+          and "Estimated length" not in h0 and "0.0 m" not in h0, t0)
+
+    topo = {"ports": {"a": {"rack": "X", "device": "d1", "index": 1, "type": "fiber"},
+                      "b": {"rack": "X", "device": "d2", "index": 1, "type": "fiber"},
+                      "c": {"rack": "X", "device": "d3", "index": 1, "type": "fiber"},
+                      "z": {"rack": "Y", "device": "d4", "index": 1, "type": "fiber"}},
+            "devices": {"d1": {"name": "PP", "u_start": 40}, "d2": {"name": "SW", "u_start": 1},
+                        "d3": {"name": "PDU", "u_start": None}, "d4": {"name": "Q", "u_start": 1}}}
+    c = patchcords.cord(topo, "a", "b")
+    check("cords: the field's own example — U40 to U1 is a 3 m cord",
+          c["gap_u"] == 39 and c["stock_m"] == 3, c)
+    check("cords: an end ITA has no U for says 'measure on site', not a guess",
+          patchcords.cord(topo, "a", "c")["stock_m"] is None
+          and "measure on site" in patchcords.describe(patchcords.cord(topo, "a", "c")), "")
+    check("cords: two ports in different cabinets are never one cord",
+          patchcords.cord(topo, "a", "z") is None, "")
+    synthetic = pathengine.load_topology()
+    free = [p for p in synthetic["ports"].values()
+            if p["status"] == "free" and p["type"] == "fiber"
+            and synthetic["devices"][p["device"]]["type"] == "server"]
+    a = free[0]
+    b = next(p for p in free if p["rack"] != a["rack"])
+    r = pathengine.resolve_route_options(a["id"], b["id"], count=1, topology=synthetic)[0]
+    check("cords: the synthetic map's made-up trunk ends get no cord, and nothing breaks",
+          r["patch_cords"] == [] and "PATCH CORDS" not in workorder_text(r), r["patch_cords"])
+
+
+def workorder_text(route):
+    import workorder
+    return workorder.render(route)
 
 
 def main():

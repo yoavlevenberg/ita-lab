@@ -264,6 +264,7 @@ serials.py              סיריאל ייחודי ויציב לכל רכיב
 make_sample_sheet.py    מחולל גיליונות דוגמה תקפים
 xlsxreader.py           קורא .xlsx על הספרייה הסטנדרטית בלבד (בלי openpyxl)
 workorder.py            הפקת Work Order (טקסט)
+patchcords.py           אורך הפאץ' קורדים בתוך הארון לכל מסלול (מה הטכנאי מביא)
 wo_html.py              Work Order מודפס (HTML עצמאי, מוכן ל-PDF)
 server.py               שרת מקומי (ספרייה סטנדרטית בלבד) + API
 ui.html                 הממשק הגרפי

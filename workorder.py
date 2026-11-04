@@ -15,6 +15,19 @@ Two renderings of the same content:
 
 from datetime import datetime
 
+import patchcords
+
+
+def _cord_lines(route):
+    """What to take off the shelf: one line per cord, then the totals."""
+    cords = route.get("patch_cords") or []
+    if not cords:
+        return []
+    L = ["", "PATCH CORDS TO BRING", "-" * 68]
+    L += [f"  {patchcords.describe(c)}" for c in cords]
+    L.append("  Total: " + ", ".join(patchcords.kit(cords)))
+    return L
+
 
 def render(route, order_id=None, circuit_id=None):
     order_id = order_id or f"WO-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -29,7 +42,9 @@ def render(route, order_id=None, circuit_id=None):
     if route.get("created_at"):
         # an executed circuit reprinted later must show when it went in, not now
         L.append(f"Created       : {route['created_at']}")
-    L.append(f"Total length  : ~{route['total_length_m']} m")
+    if route.get("total_length_m"):
+        # a map from ITA may carry no trunk lengths; "~0 m" would be a lie
+        L.append(f"Total length  : ~{route['total_length_m']} m")
     L.append(f"From          : {route['src_location']}")
     L.append(f"To            : {route['dst_location']}")
     if route.get("option_index"):
@@ -51,6 +66,7 @@ def render(route, order_id=None, circuit_id=None):
         L.append(f"     to   {route['dst_location']}")
         L.append("")
         L.append("No trunk segments are used — both ends are in the same cabinet.")
+        L += _cord_lines(route)
         L.append("")
         if circuit_id:
             L.append(f"STATUS: EXECUTED — committed as {circuit_id}, written to topology.json.")
@@ -68,8 +84,9 @@ def render(route, order_id=None, circuit_id=None):
     strand_word = "fiber strand" if route["cable_type"] == "fiber" else "copper pair"
     for i, seg in enumerate(route["segments"]):
         domain = f", domain {seg['domain']}" if seg.get("domain") else ""
+        length = f", ~{seg['length_m']} m" if seg.get("length_m") else ""
         L.append(f"{n}. Patch {strand_word} #{seg['strand_index']} of trunk '{seg['edge_id']}'  "
-                 f"({seg['from_rack']} -> {seg['to_rack']}, ~{seg['length_m']} m{domain}).")
+                 f"({seg['from_rack']} -> {seg['to_rack']}{length}{domain}).")
         # on a map from ITA the strand sits on a real panel port: name the port
         L.append(f"     near end : {seg.get('from_location') or seg['strand_port_from']}")
         L.append(f"     far  end : {seg.get('to_location') or seg['strand_port_to']}")
@@ -87,6 +104,7 @@ def render(route, order_id=None, circuit_id=None):
     L.append("PATH")
     L.append("-" * 68)
     L.append("  " + "  ->  ".join(route["hop_racks"]))
+    L += _cord_lines(route)
     L.append("")
     L.append("STRANDS RESERVED BY THIS JOB")
     L.append("-" * 68)

@@ -328,7 +328,7 @@ def intra_rack_route(topology, src_port_id, dst_port_id, cable_type):
     zero transit ports, no strand consumed. Shaped exactly like any other
     route so every consumer — Work Order, commit, the UI — handles it without
     a special case."""
-    return {
+    return _with_cords(topology, {
         "status": "ok",
         "cable_type": cable_type,
         "domain": "local",              # never leaves the cabinet, so no A/B leg
@@ -341,7 +341,14 @@ def intra_rack_route(topology, src_port_id, dst_port_id, cable_type):
         "transit_points": [],
         "total_length_m": INTRA_RACK_M,
         "intra_rack": True,
-    }
+    })
+
+
+def _with_cords(topology, route):
+    """The patch cords the technician brings (see patchcords.py)."""
+    import patchcords                   # it reads ports through this module
+    route["patch_cords"] = patchcords.cords(topology, route)
+    return route
 
 
 def direct_route(topology, src_port_id, dst_port_id):
@@ -397,7 +404,7 @@ def direct_route(topology, src_port_id, dst_port_id):
                     "used": used, "remaining": ct["capacity"] - used},
                    a, b, cable_type, topology=topology,
                    held_ports={src_port_id, dst_port_id})
-    return {
+    return _with_cords(topology, {
         "status": "ok",
         "cable_type": cable_type,
         "domain": edge["domain"],
@@ -414,7 +421,7 @@ def direct_route(topology, src_port_id, dst_port_id):
         "fully_disjoint_from_previous": True,
         "option_index": 1,
         "direct": True,
-    }
+    })
 
 
 def _segment(e, a, b, cable_type, reserved=None, topology=None, held_ports=()):
@@ -584,7 +591,7 @@ def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
     domains_seen = {s["domain"] for s in segments}
     domain_label = next(iter(domains_seen)) if len(domains_seen) == 1 else "mixed"
 
-    return {
+    return _with_cords(topology, {
         "status": "ok",
         "cable_type": cable_type,
         "domain": domain_label,
@@ -597,7 +604,7 @@ def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
         "transit_points": transit,
         "patch_ports": _patch_ports(src_port_id, dst_port_id, segments, transit),
         "total_length_m": round(total, 1),
-    }
+    })
 
 
 def _patch_ports(src_port_id, dst_port_id, segments, transit):
