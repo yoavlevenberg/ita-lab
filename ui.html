@@ -236,6 +236,7 @@
   #drawer .dh h2{font-size:14px; margin:0}
   #drawer .db{padding:14px 16px; overflow:auto; display:grid;
                grid-template-columns:1fr 1fr; gap:18px}
+  #drawer .db > .opt-card{grid-column:1/-1}   /* one route at a time, full width */
   .jumpwrap{overflow-x:auto; padding:4px 0 2px}
   .jumpsvg{display:block}
   .checks{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 2px}
@@ -704,7 +705,8 @@
   <div class="dh">
     <h2 id="drawerTitle">מסלול</h2>
     <span class="spacer" style="flex:1"></span>
-    <button class="ghost" id="btnMoreOptions" style="display:none">עוד אפשרות</button>
+    <button class="ghost" id="btnPrevOption" style="display:none">→ חזור לדרך הקודמת</button>
+    <button class="ghost" id="btnMoreOptions" style="display:none">תן דרך אחרת ←</button>
     <button class="ghost" id="btnCloseDrawer">סגור</button>
   </div>
   <div class="db" id="drawerBody"></div>
@@ -1416,10 +1418,22 @@ $("btnRoute").onclick = () => {
   if (!sel.src || !sel.dst)
     return drawerError("בחר פורט מקור ופורט יעד (לחיצה על פורט ירוק פנוי), או לחץ על פורט תפוס כדי לראות את המסלול הקיים שלו.");
   routeSrc = sel.src; routeDst = sel.dst;
-  fetchRouteOptions(2);
+  optPos = 0;
+  fetchRouteOptions(1);
 };
 
-$("btnMoreOptions").onclick = () => fetchRouteOptions(routeOptions.length + 1);
+// One route at a time (2026-11-05: two side by side looked cluttered). "Give
+// another route" steps forward — through routes already fetched, or asks the
+// server for one more — and "back" returns to any route already shown.
+let optPos = 0;
+$("btnMoreOptions").onclick = () => {
+  if (optPos < routeOptions.length - 1){ optPos++; return showRouteOptions(routeOptions); }
+  optPos = routeOptions.length;               // the one about to be fetched
+  fetchRouteOptions(routeOptions.length + 1);
+};
+$("btnPrevOption").onclick = () => {
+  if (optPos > 0){ optPos--; showRouteOptions(routeOptions); }
+};
 
 function fetchRouteOptions(count){
   fetch("/api/route", {
@@ -1428,11 +1442,22 @@ function fetchRouteOptions(count){
                            count, direct: $("directMode").checked })
   }).then(r => r.json()).then(res => {
     if (res.status === "failed" || res.error){
+      // asked for one more and there is none: keep showing what we have
+      if (count > 1 && routeOptions.length) return noMoreOptions();
       currentPath = []; currentSegIds = []; renderMap();
       return drawerError(res.reason || res.error);
     }
-    showRouteOptions(res.options, count);
+    if (count > 1 && res.options.length < count){
+      routeOptions = res.options;
+      return noMoreOptions();
+    }
+    showRouteOptions(res.options);
   }).catch(e => drawerError(String(e)));
+}
+
+function noMoreOptions(){
+  optPos = Math.min(optPos, routeOptions.length - 1);
+  showRouteOptions(routeOptions, true);
 }
 
 function focusOption(i){
@@ -1443,9 +1468,10 @@ function focusOption(i){
   renderMap();
 }
 
-function showRouteOptions(options, requestedCount){
+function showRouteOptions(options, exhausted){
   routeOptions = options;
-  focusOption(0);
+  optPos = Math.max(0, Math.min(optPos, options.length - 1));
+  focusOption(optPos);
 
   const forced = !!$("domainSel").value;
   const direct = options.length === 1 && options[0].direct;
@@ -1454,14 +1480,17 @@ function showRouteOptions(options, requestedCount){
       ? `חיבור ישיר — כבל גישור בתוך הארון <span class="pill">ללא טראנק</span>`
       : `חיבור ישיר — קפיצה אחת <span class="pill">${options[0].segments.length} מקטע</span>`;
   } else
-  $("drawerTitle").textContent = options.length > 1
-    ? `${options.length} מסלולים מוצעים — לחיצה על "הצג במפה" מדגישה כל אחד בנפרד`
-    : "מסלול מוצע" + (forced ? " (דומיין נכפה ידנית)" : "");
-  $("drawerBody").innerHTML = options.map((route, i) => renderOptionCard(route, i)).join("");
-  $("btnMoreOptions").style.display =
-      (!forced && !direct && options.length >= requestedCount) ? "" : "none";
-  $("btnMoreOptions").disabled = false;
-  $("btnMoreOptions").textContent = "עוד אפשרות";
+  $("drawerTitle").textContent = (options.length > 1
+      ? `דרך ${optPos + 1} מתוך ${options.length} שהוצגו` : "מסלול מוצע")
+    + (forced ? " — דומיין נכפה ידנית" : "")
+    + (exhausted ? " — אין דרך נוספת" : "");
+  $("drawerBody").innerHTML = renderOptionCard(options[optPos], optPos);
+  const more = $("btnMoreOptions");
+  more.style.display = (forced || direct) ? "none" : "";
+  // a route already fetched further on is still reachable after "no more"
+  more.disabled = !!exhausted && optPos >= options.length - 1;
+  more.textContent = more.disabled ? "אין דרך נוספת" : "תן דרך אחרת ←";
+  $("btnPrevOption").style.display = optPos > 0 ? "" : "none";
   openDrawer();
 }
 
@@ -1493,7 +1522,7 @@ function renderOptionCard(route, i){
       </div>
       <div class="kv" style="margin-top:10px">
         <div><span class="k">סוג כבל</span> ${route.cable_type === "fiber" ? "סיב (Fiber)" : "נחושת (Copper)"}</div>
-        <div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>
+        ${route.total_length_m ? `<div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>` : ""}
         <div><span class="k">מקור</span> <span class="mono">${route.src_location}</span></div>
         <div><span class="k">יעד</span> <span class="mono">${route.dst_location}</span></div>
       </div>
@@ -1571,6 +1600,7 @@ function showExistingCircuit(cid){
     currentPath = c.hop_racks; currentSegIds = c.segment_ids;
     routeOptions = [];
     $("btnMoreOptions").style.display = "none";
+    $("btnPrevOption").style.display = "none";
     renderMap();
     $("drawerTitle").innerHTML = c.partial
       ? `<span style="color:#ffb84d">חיבור לא גמור</span>
@@ -1632,6 +1662,7 @@ function drawerError(msg){
   $("drawerBody").innerHTML = `<div class="err" style="grid-column:1/-1">${escapeHtml(msg)}</div>`;
   routeOptions = [];
   $("btnMoreOptions").style.display = "none";
+  $("btnPrevOption").style.display = "none";
   openDrawer();
 }
 
@@ -1659,6 +1690,7 @@ function applyExecutedOption(i, circuit, workOrderText){
   // the port pair is now committed to this option — every other option for
   // the same pair is moot, and there's nothing left to compute more of.
   $("btnMoreOptions").style.display = "none";
+  $("btnPrevOption").style.display = "none";
   routeOptions.forEach((_, j) => {
     const b = $(`optExec-${j}`);
     if (!b) return;
@@ -2253,7 +2285,7 @@ function renderRowOption(row, route, i, d){
       </div>
       <div class="kv" style="margin-top:10px">
         <div><span class="k">קפיצות</span> ${route.segments.length}</div>
-        <div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>
+        ${route.total_length_m ? `<div><span class="k">אורך משוער</span> ~${route.total_length_m} מ'</div>` : ""}
         <div><span class="k">מקור</span> <span class="mono">${escapeHtml(route.src_location)}</span></div>
         <div><span class="k">יעד</span> <span class="mono">${escapeHtml(route.dst_location)}</span></div>
       </div>

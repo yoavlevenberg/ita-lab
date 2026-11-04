@@ -151,6 +151,11 @@ def ui_checks():
           not raw, raw)
     check("ui: the rack drawing uses the cabinet's own height and skips kit with no U",
           "meta.u_height || T.meta.rack_u" in ui and "if (d.u_start == null) continue;" in ui, "")
+    show = ui[ui.index("function showRouteOptions("):ui.index("function renderOptionCard(")]
+    check("ui: one route at a time — 'give another route' and 'back', not two cards side by side",
+          "fetchRouteOptions(1)" in ui and 'id="btnPrevOption"' in ui
+          and "renderOptionCard(options[optPos], optPos)" in show
+          and "options.map(" not in show, "")
     check("ui: no 'domain null' on a map without A/B legs",
           not re.search(r'>domain \$\{(?:route|c|e|meta)\.domain\}<', ui), "")
 
