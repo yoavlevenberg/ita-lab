@@ -20,8 +20,8 @@ The three numbers below are the site's to change.
 from collections import Counter
 
 U_M = 0.04445        # one rack unit, in metres
-SLACK_M = 0.5        # out to the cable manager and back in (U40 to U1 -> 3 m,
-                     # two panels 1U apart -> 1 m)
+SLACK_M = 0.35       # out to the cable manager and back in — 30-40 cm, from the
+                     # field (2026-11-05); U40 to U1 -> 3 m, panels 1U apart -> 1 m
 STOCK_M = (1, 2, 3, 5, 10)   # the cord lengths kept on the shelf
 
 
