@@ -317,6 +317,46 @@ def review_cases():
                                                 and p["status"] == "used"])
     check("files an earlier copy left behind are not read",
           not any("GHOST" in d for d in m["devices"]), list(m["devices"]))
+    lines = ita_convert.summary(m, conv.notes, conv.shape)
+    check("SHAPE: how ITA models the fiber, in connector types and counts only",
+          "SHAPE  : trunk links by connector: LC-LC=4" in lines
+          and "SHAPE  : panel ports by connector: LC=144" in lines
+          and "SHAPE  : fan-out cables by outlets: none" in lines, lines)
+    mpo_cases()
+
+
+def mpo_cases():
+    """In the field the trunks are MPO into fan-out cassettes (2026-11-05).
+    If ITA records such a trunk as ONE link, counting it as one strand would
+    be a silent error of 12 to 1 — so it is counted, and said, until the real
+    model has been seen."""
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_mpo_"))
+    try:
+        small_site(tmp / "s")
+        f = tmp / "s" / "network" / "P1.json"
+        body = json.loads(f.read_text(encoding="utf-8"))
+
+        def touch(c):
+            if c.get("id") == "f6":
+                c["source"]["connectorType"] = c["destination"]["connectorType"] = "MPO-12 (MTP)"
+                c["cableType"].update(isFanOut=True, fanOutOutletsCount=12)
+        for pc in body["portConfigurations"]:
+            for cp in pc["connectionsAndPaths"]:
+                for c in [cp["connection"]] + cp["networkPath"]["connections"]:
+                    touch(c)
+        f.write_text(json.dumps(body), encoding="utf-8")
+        conv = ita_convert.Converter(tmp / "s")
+        m = conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    lines = ita_convert.summary(m, conv.notes, conv.shape)
+    check("an MPO trunk link is flagged, never silently taken as one fiber",
+          "NOTE   : MPO/MTP trunk links, each counted as ONE strand for now: 1" in lines
+          and "SHAPE  : fan-out cables by outlets: 12=1" in lines
+          and any(l.startswith("SHAPE  : trunk links by connector:") and "MPO-MPO=1" in l
+                  for l in lines), lines)
+    check("...and the connector shows as a generic word, not the text ITA holds",
+          not any("MPO-12 (MTP)" in l for l in lines), lines)
 
 
 def engine_cases():

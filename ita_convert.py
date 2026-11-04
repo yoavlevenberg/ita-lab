@@ -95,6 +95,11 @@ class Converter:
         self.manifest = json.loads((self.cache / "manifest.json").read_text(encoding="utf-8"))
         self.tree = self.manifest["tree"]
         self.notes = Counter()
+        # How ITA models the fiber plant, in connector types and counts only.
+        # In the field the trunks are MPO into fan-out cassettes (2026-11-05);
+        # whether ITA records that as one MPO link or as one link per fiber is
+        # not known yet, and the two need different handling.
+        self.shape = defaultdict(Counter)
         # only what this copy's own tree lists — a file some earlier copy
         # left in the folder must not come back as a device or a circuit
         self.assets, self.network = {}, {}
@@ -200,6 +205,9 @@ class Converter:
         }
         if external:
             dev["external"] = True
+        if dev["type"].endswith("patch_panel"):
+            for m in mods:
+                self.shape["panel ports by connector"][_kind(m["connector"])] += m["count"]
         self.topology["devices"][did] = dev
         self.device_of_asset[aid] = did
         self.modules[did] = mods
@@ -289,8 +297,12 @@ class Converter:
                 for cp in pc.get("connectionsAndPaths") or []:
                     np = cp.get("networkPath") or {}
                     for c in [cp.get("connection")] + list(np.get("connections") or []):
-                        if c and c.get("id") is not None:
-                            connections.setdefault(str(c["id"]), c)
+                        if c and c.get("id") is not None and str(c["id"]) not in connections:
+                            connections[str(c["id"])] = c
+                            cable = c.get("cableType") or {}
+                            if cable.get("isFanOut"):
+                                self.shape["fan-out cables by outlets"][
+                                    str(cable.get("fanOutOutletsCount"))] += 1
                     if np.get("connections") and np.get("beginItem") and np.get("endItem"):
                         key = tuple(sorted((self.port_of(np["beginItem"]),
                                             self.port_of(np["endItem"]))))
@@ -314,6 +326,12 @@ class Converter:
                 continue
             if rb < ra:
                 a, b, ra, rb = b, a, rb, ra
+            ends = "-".join(sorted((_kind(a.get("connectorType")), _kind(b.get("connectorType")))))
+            self.shape["trunk links by connector"][ends] += 1
+            if MULTI.search(ends):
+                # one ITA link that may carry 8/12/24 fibers: taken as ONE strand
+                # until the real model is seen — said loudly, never silently
+                self.notes["MPO/MTP trunk links, each counted as ONE strand for now"] += 1
             media = self.topology["ports"][self.port_of(a)]["type"]
             groups[(ra, rb, media)].append((self.port_of(a), self.port_of(b), cid, c))
         edges = {}
@@ -437,6 +455,19 @@ class Converter:
         return self.topology
 
 
+MULTI = re.compile(r"MPO|MTP", re.I)
+
+
+def _kind(connector):
+    """A connector type as a short generic word for the SHAPE lines — LC, MPO,
+    RJ45 — so nothing a site typed in free text reaches the screen."""
+    c = str(connector or "")
+    for word in ("MPO", "MTP", "LC", "SC", "ST", "FC", "E2000", "MU", "QSFP", "SFP", "RJ45"):
+        if re.search(word.replace("RJ45", r"RJ-?45"), c, re.I):
+            return word
+    return "other" if c else "none"
+
+
 def _rear(end):
     return bool(end.get("rearPort") or end.get("readPort"))
 
@@ -458,7 +489,7 @@ def _safe(aid):
     return re.sub(r"[^\w.-]", "_", str(aid))
 
 
-def summary(topology, notes):
+def summary(topology, notes, shape=None):
     racks = topology["racks"].values()
     edges = topology["edges"]
     lines = [
@@ -484,6 +515,11 @@ def summary(topology, notes):
         notes["devices with no U position"] += no_u
     for k, v in sorted(notes.items()):
         lines.append(f"NOTE   : {k}: {v}")
+    for k in ("panel ports by connector", "trunk links by connector",
+              "fan-out cables by outlets"):
+        got = (shape or {}).get(k)
+        lines.append(f"SHAPE  : {k}: " + (", ".join(f"{t}={n}" for t, n in got.most_common(8))
+                                           if got else "none"))
     return lines
 
 
@@ -498,7 +534,7 @@ def main():
     topology = conv.convert()
     out = Path(args.out) if args.out else Path(args.cache) / "topology.json"
     out.write_text(json.dumps(topology, ensure_ascii=False), encoding="utf-8")
-    for line in summary(topology, conv.notes):
+    for line in summary(topology, conv.notes, conv.shape):
         print(line)
     print(f"\nWritten next to the copy ({out.name}). It stays on this machine.")
 
