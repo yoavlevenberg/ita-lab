@@ -334,6 +334,15 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   `connection` = הכבל הישיר; `networkPath` = **כל המסלול** דרך הפאנלים (begin/end = הקצוות).
   `rearPort` = צד אחורי של פאנל (טראנק). `isFanOut` = MPO שמתפצל. `assetPath` = שרשרת מיקום
   (8 רמות בדוגמה; `elementType` אומר מה כל רמה). קריאה אחת לכל רכיב.
+- **רמות `assetPath` (elementType, לפי הסדר):** `location > location > location > server-room >
+  row > rack > unsupported > patch-panel` (או `network` במקום patch-panel = מתג). שלוש רמות
+  location = תיקיות; **על השרת יש כמה אתרים**, כל אחד בתיקייה. `unsupported` = לא ידוע עדיין.
+  יש `row` מפורש; **אין פוד** ואין סימון EOR/MDA ב-ITA ("פשוט יודעים") — יוסק מהחיבורים
+  ויאושר פעם אחת ע"י המתכנן, שמירה מקומית (כמו zones.json).
+- **החלטה: עותק מקומי.** `ita_sync.py` (קריאה בלבד) מושך ל-cache מקומי; ITA Lab קורא מה-cache.
+  עותק לכל אתר → הרחבה לאתרים נוספים. ריצה ראשונה: ארון אחד בלבד.
+- טבלת Network בממשק ITA: Start item (Name, Port, Type, Description) · Route ·
+  End item (Name, Port, Type, Description, IP Address) = beginItem / networkPath / endItem.
 
 ## סטטוס נכון ל-2026-11-03
 
