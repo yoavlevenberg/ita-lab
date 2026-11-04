@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 
 import fuzzy
+import layout
 
 DEFAULT_ZONE = "yellow"          # whatever is left over, MDA pods excepted
 NEUTRAL = None                   # what an MDA pod's zone is
@@ -58,7 +59,8 @@ def load_named_zones(path=None):
     except ValueError as e:
         raise ZoneError(f"{path} is not readable JSON ({e})")
     if not isinstance(raw, dict) or not raw:
-        raise ZoneError(f"{path} should be an object of colour -> list of pods")
+        raise ZoneError(f"{path} should be an object of colour -> list of pods, "
+                        f"rows, cabinets or rooms")
 
     seen = {}
     out = {}
@@ -144,6 +146,23 @@ def is_neutral(topology, pod):
     return bool(topology.get("pods", {}).get(pod, {}).get("is_mda"))
 
 
+# A zone's members are named in zones.json. On the synthetic map they are pods;
+# a site converted from ITA has no pods (ITA does not know them), so a member
+# may equally be a row, a cabinet or a room — whatever the site is divided by.
+# A cabinet takes the colour of its most specific named unit.
+
+def zone_of_rack(topology, rack_id):
+    """The cabinet's colour, None if it is neutral (an MDA or EOR position:
+    cross-connect real estate, never holding kit)."""
+    if layout.is_mda(topology, rack_id):
+        return NEUTRAL
+    for unit in layout.units_of(topology, rack_id):
+        for name, members in NAMED_ZONES.items():
+            if unit in members:
+                return name
+    return DEFAULT_ZONE
+
+
 def zone_of_pod(topology, pod):
     """The pod's colour, or None if it is neutral."""
     if is_neutral(topology, pod):
@@ -177,8 +196,19 @@ def installable_pods(topology, zone):
 
 def racks_in(topology, zone):
     """Rack ids a device of this zone may be installed in."""
-    allowed = set(installable_pods(topology, zone))
-    return [rid for rid, meta in topology["racks"].items() if meta["pod"] in allowed]
+    return [rid for rid in topology["racks"]
+            if not topology["racks"][rid].get("external")
+            and zone_of_rack(topology, rid) == zone]
+
+
+def where(topology, zone):
+    """The zone as a person would read it in an error message: its pods on a
+    map that has pods, otherwise how many cabinets it holds."""
+    pods = installable_pods(topology, zone)
+    if pods:
+        return f"pods {', '.join(pods)}"
+    n = len(racks_in(topology, zone))
+    return f"{n} cabinet{'s' if n != 1 else ''} on this map"
 
 
 def audit(topology):
@@ -187,11 +217,12 @@ def audit(topology):
     typo in the configuration, and silence about it would mean a device could
     be turned away from a zone that looked bigger than it was."""
     known = set(topology.get("pods", ()))
+    names = layout.all_units(topology)
     out = []
     for zone in ALL:
         pods = pods_in(topology, zone)
         declared = set(NAMED_ZONES.get(zone, ()))
-        missing = sorted(declared - known)
+        missing = sorted(declared - names)
         neutral = sorted(p for p in declared if is_neutral(topology, p))
         notes = []
         if missing:

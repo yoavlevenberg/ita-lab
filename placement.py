@@ -34,6 +34,7 @@ something the site does not do.
 
 from collections import defaultdict
 
+import layout
 import zones
 from pathengine import devices_by_rack
 
@@ -78,9 +79,16 @@ def occupancy(topology, rack_id):
     taken = set()
     for dev in devices_by_rack(topology).get(rack_id, ()):
         top = dev["u_start"]
+        if top is None:
+            continue        # ITA gave no U: 0U, side-mounted, or not racked
         for u in range(top - dev["u_size"] + 1, top + 1):
             taken.add(u)
     return taken
+
+
+def rack_u(topology, rack_id):
+    """The cabinet's own height — a map from ITA has more than one."""
+    return (topology["racks"].get(rack_id) or {}).get("u_height") or RACK_U
 
 
 def free_gaps(topology, rack_id, extra_taken=()):
@@ -91,7 +99,7 @@ def free_gaps(topology, rack_id, extra_taken=()):
     """
     taken = occupancy(topology, rack_id) | set(extra_taken)
     gaps, run_top, run_len = [], None, 0
-    for u in range(RACK_U, 0, -1):
+    for u in range(rack_u(topology, rack_id), 0, -1):
         if u in taken:
             if run_len:
                 gaps.append((run_top, run_len))
@@ -130,20 +138,15 @@ def distance_rank(topology, rack_a, rack_b):
     """How far apart two cabinets are, in the rings described at the top."""
     if rack_a == rack_b:
         return SAME_RACK
-    ma, mb = _rack_meta(topology, rack_a), _rack_meta(topology, rack_b)
-    if not ma or not mb:
+    if not _rack_meta(topology, rack_a) or not _rack_meta(topology, rack_b):
         return ELSEWHERE
-    if ma["pod"] == mb["pod"]:
-        return SAME_ROW if ma["row"] == mb["row"] else SAME_POD
-
-    pods = topology["pods"]
-    pa, pb = pods.get(ma["pod"], {}), pods.get(mb["pod"], {})
-    mda_a = pa.get("mda") or ma["pod"]
-    mda_b = pb.get("mda") or mb["pod"]
-    if mda_a == mda_b:
-        return SAME_MDA
-    if pa.get("room") and pa.get("room") == pb.get("room"):
-        return SAME_ROOM
+    # Each ring counts only where the map actually has it: a map from ITA has
+    # rows and rooms but no pods or MDAs, and two unknowns are not "the same".
+    for ring, of in ((SAME_ROW, layout.row_of), (SAME_POD, layout.pod_of),
+                     (SAME_MDA, layout.mda_of), (SAME_ROOM, layout.room_of)):
+        a = of(topology, rack_a)
+        if a is not None and a == of(topology, rack_b):
+            return ring
     return ELSEWHERE
 
 
@@ -162,11 +165,11 @@ PREFER_BONUS = -10_000.0
 
 
 def _pod_of(topology, rack_id):
-    return topology["racks"][rack_id]["pod"]
+    return layout.pod_of(topology, rack_id)
 
 
 def _room_of(topology, rack_id):
-    return topology["pods"].get(_pod_of(topology, rack_id), {}).get("room")
+    return layout.room_of(topology, rack_id)
 
 
 def eligible_racks(topology, constraints=None, zone=None):
@@ -192,11 +195,13 @@ def eligible_racks(topology, constraints=None, zone=None):
 
     out = []
     for rid, meta in topology["racks"].items():
-        if meta.get("is_eor") or meta.get("is_mda"):
+        if layout.is_eor(topology, rid) or layout.is_mda(topology, rid):
             continue
+        if meta.get("external"):
+            continue        # a stub for a cabinet outside the copy: nothing known about it
         if in_zone is not None and rid not in in_zone:
             continue
-        if rid in c["avoid_racks"] or meta["pod"] in c["avoid_pods"]:
+        if rid in c["avoid_racks"] or meta.get("pod") in c["avoid_pods"]:
             continue
         if _room_of(topology, rid) in c["avoid_rooms"]:
             continue
@@ -210,7 +215,7 @@ def eligible_racks(topology, constraints=None, zone=None):
 
 def _rack_fullness(topology, rack_id):
     """0.0 empty .. 1.0 full, by U."""
-    return len(occupancy(topology, rack_id)) / RACK_U
+    return len(occupancy(topology, rack_id)) / rack_u(topology, rack_id)
 
 
 def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
@@ -262,8 +267,8 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
             "proximity": round(proximity, 1),
             "rack_fullness_pct": round(fullness * 100),
             "gap_height": best["gap_height"],
-            "pod": topology["racks"][rack_id]["pod"],
-            "zone": zones.zone_of_pod(topology, topology["racks"][rack_id]["pod"]),
+            "pod": layout.pod_of(topology, rack_id),
+            "zone": zones.zone_of_rack(topology, rack_id),
             "reason": _reason(topology, rack_id, neighbours, fullness, preferred,
                               device.get("zone")),
             "alternatives_in_rack": len(spots),
@@ -273,8 +278,7 @@ def rank_positions(topology, device, neighbours, extra_taken=None, limit=5,
         zone = device.get("zone")
         narrowed = any(c[k] for k in ("avoid_racks", "avoid_pods", "avoid_rooms"))
         if zone:
-            usable = zones.installable_pods(topology, zone)
-            extra = (f" anywhere in the {zone} zone (pods {', '.join(usable)})"
+            extra = (f" anywhere in the {zone} zone ({zones.where(topology, zone)})"
                      + (" once your 'avoid' instructions are applied" if narrowed else ""))
         else:
             extra = (" once your 'avoid' instructions are applied — try relaxing them"

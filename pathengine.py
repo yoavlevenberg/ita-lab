@@ -504,7 +504,10 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
     # returning the first that happens to work. Without this the planner
     # would pour everything onto domain A and leave domain B idle.
     candidates, attempts = [], []
-    for d in ([domain] if domain else ["A", "B"]):
+    # The legs the map actually has: A and B on the synthetic map; a map from
+    # ITA carries none (domain None), and is then one unlabelled leg.
+    legs = sorted({e["domain"] for e in topology["edges"]}, key=lambda x: (x is None, str(x)))
+    for d in ([domain] if domain else legs or [None]):
         g = _build_graph(topology, cable_type, domain=d)
         if src_rack not in g or dst_rack not in g:
             attempts.append(f"domain {d}: no {cable_type} uplink with spare capacity")

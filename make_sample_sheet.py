@@ -19,11 +19,14 @@ as reading one (see xlsxreader.py).
 """
 
 import argparse
+import copy
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pathengine
+import serials
+import zones
 
 OUT_DEFAULT = Path(__file__).parent / "data" / "sample_demand.xlsx"
 
@@ -129,10 +132,57 @@ def write_xlsx(path, tabs):
 def free_ports(topology, rack, cable_type, n):
     out = []
     for pid, p in topology["ports"].items():
-        if p["rack"] == rack and p["type"] == cable_type and p["status"] == "free":
+        if (p["rack"] == rack and p["type"] == cable_type and p["status"] == "free"
+                and not topology["devices"][p["device"]].get("external")):
             out.append(pid)
             if len(out) == n:
                 break
+    return out
+
+
+def _routable_pairs(topology, cable_type, count, want, tries=80):
+    """Cabinet pairs with `count` free ports of this media at both ends AND a
+    route between them, found on whatever map is loaded. The fixed BUNDLES
+    name cabinets of the synthetic map; a site from ITA has its own."""
+    racks = sorted(r for r, meta in topology["racks"].items()
+                   if not meta.get("external")
+                   and len(free_ports(topology, r, cable_type, count)) == count)
+    out, used = [], set()
+    for i, a in enumerate(racks):
+        for b in racks[i + 1:]:
+            if tries <= 0 or len(out) == want:
+                return out
+            if a in used or b in used:
+                continue
+            tries -= 1
+            # every row of the bundle has to route, not just the first: a trunk
+            # with one free fiber carries one row, so plan them all on a copy
+            trial = copy.deepcopy(topology)
+            try:
+                for src, dst in zip(free_ports(trial, a, cable_type, count),
+                                    free_ports(trial, b, cable_type, count)):
+                    route = pathengine.resolve_route_options(src, dst, count=1,
+                                                             topology=trial)[0]
+                    pathengine.commit_route(trial, route, pathengine.next_circuit_id(trial))
+            except pathengine.RouteError:
+                continue
+            out.append((a, b))
+            used.update((a, b))
+    return out
+
+
+def _bundles(topology):
+    """The fixed bundles when this is the synthetic map, otherwise bundles
+    found on the map itself."""
+    if all(a in topology["racks"] and b in topology["racks"] for _, a, b, _, _ in BUNDLES):
+        return BUNDLES
+    out = []
+    for cable, count, want in (("fiber", 3, 2), ("copper", 2, 1)):
+        # a small or tightly patched site may only carry single rows
+        pairs = _routable_pairs(topology, cable, count, want) or             _routable_pairs(topology, cable, 1, want)
+        n = count if pairs and len(free_ports(topology, pairs[0][0], cable, count)) == count             and _routable_pairs(topology, cable, count, want) else 1
+        for a, b in pairs:
+            out.append((f"SVC-{len(out) + 1}", a, b, cable, n))
     return out
 
 
@@ -149,12 +199,17 @@ def endpoint(topology, port_id):
     """Split a port id into the two cells the sheet now uses: the serial of the
     box, and the port number on it."""
     dev_id, _, index = port_id.rpartition(":")
-    return topology["devices"][dev_id]["serial"], index
+    serial = topology["devices"][dev_id].get("serial")
+    # a serial that is blank, junk or shared cannot name the box: use its id,
+    # which the sheet accepts just the same
+    if serials.index(topology).get(serials.canonical(serial)) != dev_id:
+        return dev_id, index
+    return serial, index
 
 
 def build_clean(topology):
     rows = [["SRC_DEVICE", "SRC_PORT", "DST_DEVICE", "DST_PORT", "GROUP", "LABEL"]]
-    for group, a_rack, b_rack, cable, count in BUNDLES:
+    for group, a_rack, b_rack, cable, count in _bundles(topology):
         a = free_ports(topology, a_rack, cable, count)
         b = free_ports(topology, b_rack, cable, count)
         if len(a) < count or len(b) < count:
@@ -172,13 +227,24 @@ def build_broken(topology):
     """One row per fault the preflight review reports, so you can see what a
     bad sheet looks like before trusting the tool with a real one."""
     E = lambda pid: endpoint(topology, pid)
-    a = [E(p) for p in free_ports(topology, "A1-S05", "fiber", 4)]
-    b = [E(p) for p in free_ports(topology, "D5-N06", "fiber", 3)]
-    copper = E(free_ports(topology, "A1-S05", "copper", 1)[0])
-    taken = E(next((pid for pid, p in topology["ports"].items()
-                    if p["rack"] == "A1-S05" and p["status"] == "used"),
-                   "A1-S05:FIB-PP-01:1"))
-    same_rack = [E(p) for p in free_ports(topology, "A1-S05", "fiber", 6)]
+    ra, rb = "A1-S05", "D5-N06"
+    if ra not in topology["racks"] or rb not in topology["racks"]:
+        found = _routable_pairs(topology, "fiber", 6, 1)
+        if not found:
+            raise ValueError("this map has no two cabinets with six free fiber ports "
+                             "and a route between them — nothing to build an example from")
+        ra, rb = found[0]
+    a = [E(p) for p in free_ports(topology, ra, "fiber", 4)]
+    b = [E(p) for p in free_ports(topology, rb, "fiber", 3)]
+    copper_free = free_ports(topology, ra, "copper", 1) or next(
+        ([pid] for pid, p in topology["ports"].items()
+         if p["type"] == "copper" and p["status"] == "free"
+         and not topology["devices"][p["device"]].get("external")), [])
+    copper = E(copper_free[0]) if copper_free else (a[3][0], "1")
+    used = next((pid for pid, p in topology["ports"].items()
+                 if p["rack"] == ra and p["status"] == "used"), None)
+    taken = E(used) if used else a[0]
+    same_rack = [E(p) for p in free_ports(topology, ra, "fiber", 6)]
 
     return [
         ["SRC_DEVICE", "SRC_PORT", "DST_DEVICE", "DST_PORT", "GROUP"],
@@ -200,18 +266,34 @@ def build_new_devices(topology):
     """A workbook showing the other half of the tool: kit that has not been
     installed yet. The Devices tab says what is arriving; the P2P tab wires it
     up by serial, exactly as if it were already racked."""
-    tor = topology["devices"]["A1-S05:TOR-SW-01"]["serial"]
+    if "A1-S05:TOR-SW-01" in topology["devices"]:
+        tor = topology["devices"]["A1-S05:TOR-SW-01"]["serial"]
+    else:
+        # a site from ITA: uplink to any switch with a free fiber port, named
+        # the way the sheet will name it
+        index = serials.index(topology)
+        sw = next((d for d in sorted(topology["devices"].values(), key=lambda d: d["id"])
+                   if d["type"] == "switch" and not d.get("external")
+                   and any(p["type"] == "fiber" and p["status"] == "free"
+                           for p in topology["ports"].values() if p["device"] == d["id"])), None)
+        if sw is None:
+            raise ValueError("this map has no switch with a free fiber port to uplink to")
+        tor = sw["serial"] if index.get(serials.canonical(sw["serial"])) == sw["id"] else sw["id"]
+    # a zone is a hard boundary: name it in the example only where this map
+    # actually has cabinets of that colour
+    green = "ירוק" if zones.racks_in(topology, "green") else ""
+    blue = "blue" if zones.racks_in(topology, "blue") else ""
 
     # ZONE is a hard boundary: a device of a colour is installed inside that
     # colour's pods or not at all. Leave it blank for no restriction.
     # Serials are plain numbers. LABEL is optional everywhere it appears.
     devices = [
         ["SERIAL", "TYPE", "U_SIZE", "FIBER", "COPPER", "ZONE", "LABEL"],
-        ["7700100001", "switch", "1", "4", "48", "ירוק",
+        ["7700100001", "switch", "1", "4", "48", green,
          "Leaf switch 48x RJ45 + 4x SFP+"],
-        ["7700100002", "server", "2", "2", "2", "ירוק", "App server 2U"],
-        ["7700100003", "server", "2", "2", "2", "ירוק", ""],
-        ["7700100004", "server", "2", "2", "2", "blue", "App server (blue zone)"],
+        ["7700100002", "server", "2", "2", "2", green, "App server 2U"],
+        ["7700100003", "server", "2", "2", "2", green, ""],
+        ["7700100004", "server", "2", "2", "2", blue, "App server (blue zone)"],
     ]
     # note the chaining: the servers hang off the NEW switch, which itself
     # uplinks to an existing ToR.

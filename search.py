@@ -38,6 +38,7 @@ sheet reader follows.
 import re
 
 import fuzzy
+import layout
 import serials
 
 RACK_RE = re.compile(r"^[A-D]\d{1,2}-[SN]\d{1,2}$", re.I)
@@ -56,7 +57,7 @@ def _port_hit(topology, port_id, why):
         "kind": "port", "id": port_id, "why": why,
         "title": f"{p['rack']}-U{dev['u_start']}-P{p['index']}",
         "sub": f"{dev['name']} · {'סיב' if p['type'] == 'fiber' else 'נחושת'} · {state}",
-        "rack": p["rack"], "pod": topology["racks"][p["rack"]]["pod"],
+        "rack": p["rack"], "pod": layout.pod_of(topology, p["rack"]),
         "device": p["device"], "port": port_id,
         "status": p["status"], "circuit": p.get("circuit"),
     }
@@ -73,7 +74,7 @@ def _device_hit(topology, dev, why, free=None):
         "title": f"{dev['rack']} · {dev['name']}",
         "sub": f"{dev['label']} · U{dev['u_start']} · {free}/{total} פורטים פנויים"
                + (f" · {dev['serial']}" if dev.get("serial") else ""),
-        "rack": dev["rack"], "pod": topology["racks"][dev["rack"]]["pod"],
+        "rack": dev["rack"], "pod": layout.pod_of(topology, dev["rack"]),
         "device": dev["id"], "port": None,
     }
 
@@ -83,11 +84,9 @@ def _rack_hit(topology, rack, why):
     return {
         "kind": "rack", "id": rack["id"], "why": why,
         "title": rack["id"],
-        "sub": (f"פוד {rack['pod']} · שדרה {rack['row']} · עמדה {rack['position']}"
-                + (" · EOR" if rack.get("is_eor") else "")
-                + (" · MDA" if rack.get("is_mda") else "")
+        "sub": (layout.describe(topology, rack["id"])
                 + f" · {devices} רכיבים"),
-        "rack": rack["id"], "pod": rack["pod"], "device": None, "port": None,
+        "rack": rack["id"], "pod": rack.get("pod"), "device": None, "port": None,
     }
 
 
@@ -111,7 +110,7 @@ def _circuit_hit(topology, circuit, why):
                 + f" · {hops} {'קפיצה' if hops == 1 else 'קפיצות'}"
                 + f" · {circuit['a_port']} ⇄ {circuit.get('b_port') or '—'}"),
         "rack": topology["ports"][circuit["a_port"]]["rack"],
-        "pod": topology["racks"][topology["ports"][circuit["a_port"]]["rack"]]["pod"],
+        "pod": layout.pod_of(topology, topology["ports"][circuit["a_port"]]["rack"]),
         "device": None, "port": circuit["a_port"], "circuit": circuit["id"],
     }
 

@@ -22,6 +22,8 @@ matters — a cross-room backbone at 90% is a site-wide problem, one cabinet's
 uplink at 90% is a cabinet's problem.
 """
 
+import layout
+
 TRUNK_KINDS = {
     "rack_to_eor": "מסד → EOR",
     "eor_to_mda": "EOR → MDA",
@@ -57,7 +59,9 @@ def port_stats(topology):
             r["free"] += 1
 
     for rid, r in racks.items():
-        pod = topology["racks"][rid]["pod"]
+        pod = topology["racks"][rid].get("pod")
+        if pod is None:
+            continue                    # a site from ITA: no pods to total by
         b = pods.setdefault(pod, {"free": 0, "used": 0, "total": 0})
         b["free"] += r["free"]
         b["used"] += r["used"]
@@ -78,20 +82,25 @@ def port_stats(topology):
 
 
 def classify(topology, edge):
-    """What kind of trunk this is, from the cabinets it joins."""
-    racks, pods = topology["racks"], topology["pods"]
-    a, b = racks.get(edge["from"]), racks.get(edge["to"])
-    if not a or not b:
-        return "other"
-    a_mda, b_mda = pods[a["pod"]]["is_mda"], pods[b["pod"]]["is_mda"]
+    """What kind of trunk this is, from the cabinets it joins.
 
+    Works from whatever the map says: pods and MDA pods on the synthetic map,
+    EOR/MDA marks on cabinets of a site from ITA. With neither, a trunk is
+    'other' — the counts are right, only the grouping is coarser."""
+    a, b = edge["from"], edge["to"]
+    if a not in topology["racks"] or b not in topology["racks"]:
+        return "other"
+    a_mda, b_mda = layout.is_mda(topology, a), layout.is_mda(topology, b)
     if a_mda and b_mda:
-        same_room = pods[a["pod"]]["room"] == pods[b["pod"]]["room"]
-        return "backbone_room" if same_room else "backbone_cross"
-    if a["pod"] == b["pod"]:
+        ra, rb = layout.room_of(topology, a), layout.room_of(topology, b)
+        return "backbone_room" if ra is not None and ra == rb else "backbone_cross"
+    pa = layout.pod_of(topology, a)
+    if pa is not None and pa == layout.pod_of(topology, b):
         return "rack_to_eor"
     if a_mda or b_mda:
         return "eor_to_mda"
+    if layout.is_eor(topology, a) or layout.is_eor(topology, b):
+        return "rack_to_eor"
     return "other"
 
 
@@ -153,7 +162,7 @@ def report(topology, tightest=25, racks=15):
     for b in per_rack.values():
         b["free"] = b["total"] - b["used"]
         b["pct"] = round(100 * b["used"] / b["total"], 1) if b["total"] else 0.0
-        b["pod"] = topology["racks"][b["rack"]]["pod"]
+        b["pod"] = layout.pod_of(topology, b["rack"])
     tight_racks = sorted(per_rack.values(), key=lambda b: (-b["pct"], b["free"]))
 
     ports_total = sum(b["total"] for b in per_rack.values())
