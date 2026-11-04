@@ -106,10 +106,12 @@ class Probe:
     def fetch_spec(self):
         """The Swagger page links its spec (final.json); read the link out of
         the page rather than guess it, then fall back to the likely places."""
-        tried = [self.root + "/api/current/docs/index.html"]
-        tried += [self.root + p for p in ("/api/current/docs/final.json",
-                                         "/api/current/final.json",
-                                         "/api/current/swagger.json")]
+        tried = [self.root + p for p in ("/api/current/docs/index.html",
+                                        "/api/current/docs/final.json",
+                                        "/api/current/final.json",
+                                        "/api/current/swagger.json",
+                                        "/api/v8.1/docs/index.html",
+                                        "/api/v8.1/docs/final.json")]
         seen = set()
         while tried:
             url = tried.pop(0)
@@ -139,11 +141,12 @@ class Probe:
 
     # -- 2. logging in -------------------------------------------------------
     def login_candidates(self, spec):
-        """Where the spec says a login goes. Swagger 2.0 puts an oauth2
-        password flow under securityDefinitions; otherwise look for a POST
-        whose path is about tokens or logging in."""
+        """How to log in. Basic first, whatever the spec says: it is what
+        worked against this server before (a curl script, 2026-11-04), and it
+        sends nothing but GETs. Then what the spec offers — an oauth2 password
+        flow under securityDefinitions, or a POST about tokens or logging in."""
         base = self.root + spec.get("basePath", "/api/current").rstrip("/")
-        out = []
+        out = [("basic", None)]
         for d in (spec.get("securityDefinitions") or {}).values():
             if d.get("type") == "oauth2" and d.get("tokenUrl"):
                 out.append(("oauth", urllib.parse.urljoin(base + "/", d["tokenUrl"])))
@@ -153,9 +156,6 @@ class Probe:
                     and re.search(r"token|login|auth", low)
                     and not re.search(r"revoke|logout|refresh|password|ldap|saml", low)):
                 out.append(("json", base + path))
-        if any(d.get("type") == "basic"
-               for d in (spec.get("securityDefinitions") or {}).values()):
-            out.append(("basic", None))
         return out
 
     def login(self, spec, user, password):
@@ -169,15 +169,18 @@ class Probe:
             self.headers.pop("Authorization", None)
         return None
 
+    def use_basic(self, user, password):
+        import base64
+        pair = base64.b64encode(f"{user}:{password}".encode()).decode()
+        self.headers["Authorization"] = "Basic " + pair
+
     def _try_login(self, kind, url, user, password, check):
         """One login method; True if a cheap GET then works. Notes what each
         step got back, so a failure says more than FAILED."""
         if url:
             self.auth_urls.add(url)
         if kind == "basic":
-            import base64
-            pair = base64.b64encode(f"{user}:{password}".encode()).decode()
-            self.headers["Authorization"] = "Basic " + pair
+            self.use_basic(user, password)
         else:
             if kind == "oauth":
                 body = urllib.parse.urlencode({"grant_type": "password",
@@ -412,6 +415,11 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
     if "://" not in args.server:
         roots.append("http://" + root.split("://", 1)[1])
 
+    # Asked up front: the docs themselves may want the login (Chrome only
+    # showed them because it was already signed in).
+    user = args.user or ask_user("ITA user name: ")
+    password = ask_password("ITA password (not shown, not saved): ")
+
     probe = spec = spec_url = None
     cert_error = False
     if getattr(args, "spec", None):
@@ -432,13 +440,23 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
     for root in roots:
         scheme = root.split("://", 1)[0]
         p = Probe(root, insecure=args.insecure, log=log, proxy=getattr(args, "proxy", False))
-        try:
-            s, u = p.fetch_spec()
-        except (urllib.error.URLError, OSError) as e:
-            cert_error = cert_error or _is_cert_error(e)
-            s = None
-        for a in p.attempts:
-            say(f"TRY    : {scheme} {a}")
+        s = None
+        for with_login in (False, True):
+            if with_login:
+                p.use_basic(user, password)
+            p.attempts = []
+            try:
+                s, u = p.fetch_spec()
+            except (urllib.error.URLError, OSError) as e:
+                cert_error = cert_error or _is_cert_error(e)
+                for a in p.attempts:
+                    say(f"TRY    : {scheme} {a}")
+                break               # the host itself failed; a login won't help
+            for a in p.attempts:
+                say(f"TRY    : {scheme}{' +login' if with_login else ''} {a}")
+            if s:
+                break
+        p.headers.pop("Authorization", None)
         if s:
             probe, spec, spec_url = p, s, u
             break
@@ -463,8 +481,6 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
     for h in hits[:12]:
         say(f"         {h}")
 
-    user = args.user or ask_user("ITA user name: ")
-    password = ask_password("ITA password (not shown, not saved): ")
     before = len(probe.attempts)
     how = probe.login(spec, user, password)
     if not how:

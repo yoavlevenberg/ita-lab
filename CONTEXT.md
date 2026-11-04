@@ -286,10 +286,15 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   שהוא עצמו מצא ב-spec) — נאכף ב-`Probe._request`, לא בהבטחה. נתונים גולמיים
   נשמרים ב-`probe_out/` (ב-gitignore) ונשארים שם.
 - אופן ההתחברות ל-API לא ידוע — הכלי מגלה אותו מ-`securityDefinitions` ומנתיבי
-  POST עם token/login. `test_probe.py` בודק אותו מול שרת מדומה (18 בדיקות).
+  POST עם token/login. `test_probe.py` בודק אותו מול שרת מדומה (19 בדיקות).
 - ריצה ראשונה (2026-11-04): `SPEC not found`, אבל Chrome פותח את final.json.
   החשד: ה-docs מאחורי התחברות ש-Chrome כבר מחזיק. לכן נוספו `--spec final.json`
   (שמירה מ-Chrome ב-Ctrl+S) ושורות `TRY` שמפרטות מה כל ניסיון קיבל, בלי כתובת השרת.
+- **מסקריפט curl ישן של המשתמש (ממכונת Ubuntu ברשת הסגורה), שעבד:** התחברות היא
+  **HTTP Basic** (`curl -u user:pass`) בכל בקשה, בלי token. כתובת הבסיס:
+  `http://<ip>/api/v8.1` (http, לא https). קיים `GET /assets/search?q=<שם ארון>`.
+  לכן הכלי שואל שם משתמש וסיסמה בהתחלה, מנסה Basic ראשון (רק GET, בלי POST), ואם ה-docs
+  מחזירים 401 הוא מנסה שוב עם Basic.
 
 ## סטטוס נכון ל-2026-11-03
 

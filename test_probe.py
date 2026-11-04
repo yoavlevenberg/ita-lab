@@ -12,6 +12,7 @@ method, and the checks prove the probe finds it rather than assumes it.
     python test_probe.py
 """
 
+import base64
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -66,11 +67,20 @@ def make_server(state, login="json", docs="open"):
             self.wfile.write(body)
 
         def _authed(self):
-            return self.headers.get("Authorization") == "Bearer T0K"
+            got = self.headers.get("Authorization")
+            if login == "basic":
+                return got == "Basic " + base64.b64encode(b"u:p").decode()
+            return got == "Bearer T0K"
 
         def do_GET(self):
             state["methods"].append("GET")
             path, _, query = self.path.partition("?")
+            if docs == "basic" and path.startswith("/api/current/docs/") and not self._authed():
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="ita"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if docs == "login" and path.startswith("/api/current/docs/"):
                 self.send_response(302)
                 self.send_header("Location", "/login?next=docs")
@@ -165,6 +175,14 @@ def main():
     code, out, state = run_probe(password="wrong")
     check("a wrong password fails plainly, before any asset is touched",
           code == 1 and "LOGIN  : FAILED" in out and not state["asked"], out)
+
+    # what the real server turned out to want (an old curl script, 2026-11-04):
+    # Basic on every request, the docs included
+    code, out, state = run_probe(login="basic", docs="basic")
+    check("Basic everywhere, docs too: finds the spec, logs in, sends no POST",
+          code == 0 and "SPEC   : ok" in out and "LOGIN  : ok (basic)" in out
+          and state["asked"] == ["pp-1"]
+          and not any(m.startswith("POST") for m in state["methods"]), out)
 
     code, out, state = run_probe(suffix="/api/current/docs/index.html#/assets")
     check("a Swagger URL pasted whole as --server still works",
