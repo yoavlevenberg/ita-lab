@@ -94,14 +94,22 @@ class Converter:
         self.unit_top = unit_top
         self.manifest = json.loads((self.cache / "manifest.json").read_text(encoding="utf-8"))
         self.tree = self.manifest["tree"]
-        self.assets = {}
-        for f in (self.cache / "assets").glob("*.json"):
-            a = json.loads(f.read_text(encoding="utf-8"))
-            self.assets[str(a.get("id"))] = a
-        self.network = {}
-        for f in (self.cache / "network").glob("*.json"):
-            self.network[f.stem] = json.loads(f.read_text(encoding="utf-8"))
         self.notes = Counter()
+        # only what this copy's own tree lists — a file some earlier copy
+        # left in the folder must not come back as a device or a circuit
+        self.assets, self.network = {}, {}
+        for aid in self.tree:
+            f = self.cache / "assets" / f"{_safe(aid)}.json"
+            if f.exists():
+                self.assets[aid] = json.loads(f.read_text(encoding="utf-8"))
+            f = self.cache / "network" / f"{_safe(aid)}.json"
+            if f.exists():
+                self.network[_safe(aid)] = json.loads(f.read_text(encoding="utf-8"))
+        if self.manifest.get("complete") is False:
+            self.notes["THE COPY IS INCOMPLETE: " + str(self.manifest.get("aborted"))] += 1
+        missing = self.manifest.get("network_missing") or []
+        if missing:
+            self.notes["devices whose ports/connections were not copied"] += len(missing)
         self.topology = {"meta": {}, "pods": {}, "racks": {}, "devices": {},
                          "ports": {}, "edges": [], "circuits": {}}
         self.rack_of_asset = {}       # ITA rack uuid -> map rack id
@@ -168,7 +176,8 @@ class Converter:
             media = media_of(conf.get("connectorType"))
             keys = {str(k) for k in (conf.get("id"), conf.get("name")) if k is not None}
             mods.append({"keys": keys, "offset": offset, "count": n,
-                         "start": int(conf.get("portStart") or 1), "media": media,
+                         "start": int(conf["portStart"]) if conf.get("portStart") is not None
+                         else 1, "media": media,
                          "connector": conf.get("connectorType")})
             counts[media] += n
             offset += n
@@ -222,9 +231,20 @@ class Converter:
             same = [m for m in mods if media_of(m["connector"]) == media_of(end.get("connectorType"))]
             m = same[0] if len(same) == 1 else (mods[0] if len(mods) == 1 else None)
         if m is None:
-            self.notes["connection ends on an unknown cassette"] += 1
-            return self._add_port(dev, number, media_of(end.get("connectorType")))
-        return self._add_port(dev, m["offset"] + number - m["start"] + 1, m["media"])
+            # A cassette the device's own record did not list (always so for a
+            # stub). It gets a number range of its own past every known port —
+            # never the bare port number, which is cassette 1's port of that number.
+            if mods and not dev.get("external"):
+                self.notes["connection ends on an unknown cassette"] += 1
+            top = max([x["offset"] + x["count"] for x in mods] + [0])
+            m = {"keys": {module or f"?{end.get('connectorType')}"}, "offset": top,
+                 "count": 0, "start": 0, "media": media_of(end.get("connectorType")),
+                 "connector": end.get("connectorType"), "extra": True}
+            self.modules.setdefault(did, []).append(m)
+        index = m["offset"] + number - m["start"] + 1
+        if m.get("extra"):
+            m["count"] = max(m["count"], number - m["start"] + 1)
+        return self._add_port(dev, index, m["media"])
 
     def _stub(self, end):
         """A device outside the copy: placed in a stub rack named from the
@@ -252,7 +272,7 @@ class Converter:
     # -- connections -> trunks, paths -> circuits ------------------------------
     def _is_trunk(self, conn):
         s, d = conn.get("source") or {}, conn.get("destination") or {}
-        return bool(s.get("rearPort") and _rear(d)
+        return bool(_rear(s) and _rear(d)
                     and "patch" in str(s.get("assetType", "")).lower()
                     and "patch" in str(d.get("assetType", "")).lower())
 
@@ -313,49 +333,89 @@ class Converter:
         self.edges = edges
 
     def build_circuits(self, paths):
+        """Every networkPath that is more than one unpatched trunk fiber is a
+        circuit. The cables are followed end to end from beginItem — device to
+        device, whatever order ITA listed them in — so the racks come out in
+        the order a technician walks them, and EVERY port on the way is marked
+        taken: the patch-cord ports, and both panel ports of every trunk fiber,
+        because front port N is rear port N (code review, 2026-11-04)."""
         n = 0
+        owner = {}
         for key, np in sorted(paths.items()):
             conns = [c for c in np.get("connections") or [] if c]
-            trunks = [c for c in conns if str(c.get("id")) in self.strand_of]
-            if not trunks and len(conns) <= 1:
-                continue                            # a lone patch cord, no route
-            if len(trunks) == 1 and len(conns) == 1:
-                continue                            # an unpatched strand
+            if not conns:
+                continue
+            if len(conns) == 1 and str(conns[0].get("id")) in self.strand_of:
+                continue                            # one trunk fiber, nothing patched to it
+            steps = self._chain(np["beginItem"], conns)
+            if steps is None:
+                self.notes["paths whose cables do not chain (taken as listed)"] += 1
+                steps = [(c.get("source") or {}, c.get("destination") or {}, c) for c in conns]
             n += 1
             cid = f"CIR-{n:04d}"
             a_port, b_port = self.port_of(np["beginItem"]), self.port_of(np["endItem"])
-            hops = [self.topology["ports"][a_port]["rack"]]
-            strands, segments, transit = [], [], []
-            for c in trunks:
-                eid, media, idx = self.strand_of[str(c["id"])]
+            rack = lambda pid: self.topology["ports"][pid]["rack"]      # noqa: E731
+            hops = [rack(a_port)]
+            strands, segments, on_path = [], [], []
+            for frm, to, c in steps:
+                pf, pt = self.port_of(frm), self.port_of(to)
+                on_path += [pf, pt]
+                if rack(pt) != hops[-1]:
+                    hops.append(rack(pt))
+                hit = self.strand_of.get(str(c.get("id")))
+                if hit is None:
+                    if rack(pf) != rack(pt):
+                        self.notes["direct cables between racks (no trunk)"] += 1
+                    continue
+                eid, media, idx = hit
                 edge = self.edges[eid]
-                here = hops[-1]
-                there = edge["to"] if here == edge["from"] else edge["from"]
-                if here not in (edge["from"], edge["to"]):
-                    self.notes["circuits whose trunks do not chain (kept, check)"] += 1
-                    here, there = edge["from"], edge["to"]
-                if len(hops) > 1:
-                    transit.append(edge["strand_ports"][media][str(idx)][here])
-                hops.append(there)
-                segments.append(eid)
                 edge["cable_types"][media]["strands"][str(idx)] = cid
+                segments.append(eid)
                 strands.append({"edge_id": eid, "cable_type": media, "strand_index": idx,
-                                "from_port": edge["strand_ports"][media][str(idx)][here],
-                                "to_port": edge["strand_ports"][media][str(idx)][there]})
-            media = strands[0]["cable_type"] if strands else \
-                self.topology["ports"][a_port]["type"]
+                                "from_port": pf, "to_port": pt})
+            transit = []
+            for pid in on_path:
+                if pid not in (a_port, b_port) and pid not in transit:
+                    transit.append(pid)
+            media = strands[0]["cable_type"] if strands else self.topology["ports"][a_port]["type"]
             self.topology["circuits"][cid] = {
                 "id": cid, "cable_type": media, "domain": None,
                 "a_port": a_port, "b_port": b_port,
                 "hop_racks": hops, "segment_ids": segments, "strands": strands,
-                "intra_rack": not trunks, "transit_ports": transit,
+                "intra_rack": rack(a_port) == rack(b_port), "transit_ports": transit,
                 "total_length_m": sum(self.edges[s]["length_m"] for s in segments),
             }
-            for pid, peer, role in ((a_port, b_port, "endpoint"), (b_port, a_port, "endpoint")):
+            for pid in [a_port, b_port] + transit:
+                if owner.get(pid, cid) != cid:
+                    self.notes["ports on two different paths (check in ITA)"] += 1
+                owner[pid] = cid
+            for pid, peer in ((a_port, b_port), (b_port, a_port)):
                 self.topology["ports"][pid].update(status="used", peer=peer, circuit=cid,
-                                                   role=role)
+                                                   role="endpoint")
             for pid in transit:
                 self.topology["ports"][pid].update(status="used", circuit=cid, role="transit")
+
+    def _chain(self, begin, conns):
+        """The connections as steps (from END, to END, connection), walked
+        from `begin`: each step leaves the device the last one reached. A
+        panel counts as one device front and rear, so a patch cord into
+        front 5 continues on the trunk out of rear 5. Tries the order ITA
+        gave, then the reverse; None if neither chains."""
+        for order in (conns, conns[::-1]):
+            here, steps = str(begin.get("assetId")), []
+            for c in order:
+                s, d = c.get("source") or {}, c.get("destination") or {}
+                if str(s.get("assetId")) == here:
+                    steps.append((s, d, c))
+                    here = str(d.get("assetId"))
+                elif str(d.get("assetId")) == here:
+                    steps.append((d, s, c))
+                    here = str(s.get("assetId"))
+                else:
+                    break
+            else:
+                return steps
+        return None
 
     def convert(self):
         self.build_racks()

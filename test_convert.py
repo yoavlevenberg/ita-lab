@@ -136,12 +136,31 @@ def to_ita_cache(t, out):
         mod = next(x for x in mods if x["portConfiguration"]["name"] == media)
         mod["connectionsAndPaths"].append(entry)
 
+    def cord(n, a, b):
+        """A front patch cord between two ENDs."""
+        return {"id": f"P|{n}", "source": dict(a, rearPort=False),
+                "destination": dict(b, rearPort=False), "cableType": {"length": 2}}
+
     used = set()
     for c in t["circuits"].values():
+        # as ITA keeps it physically: endpoint -> cord -> TRUNK panel front N =
+        # rear N -> fiber -> far TRUNK panel rear/front N -> cross-connect cord
+        # to front M of the same panel -> rear M -> next fiber ... -> cord -> endpoint
         conns = []
-        for s in c["strands"]:
-            conns.append(trunk[(s["edge_id"], s["cable_type"], s["strand_index"])])
+        hops = c["hop_racks"]
+        for i, s in enumerate(c["strands"]):
+            fiber = trunk[(s["edge_id"], s["cable_type"], s["strand_index"])]
+            near = fiber["source"] if fiber["source"]["assetId"].startswith(hops[i] + ":") \
+                else fiber["destination"]
+            far = fiber["destination"] if near is fiber["source"] else fiber["source"]
+            if i == 0:
+                conns.append(cord(f"{c['id']}/a", port_end(c["a_port"]), near))
+            else:
+                conns.append(cord(f"{c['id']}/x{i}", last_far, near))
+            conns.append(fiber)
+            last_far = far
             used.add((s["edge_id"], s["cable_type"], s["strand_index"]))
+        conns.append(cord(f"{c['id']}/b", last_far, port_end(c["b_port"])))
         path = {"connections": conns, "beginItem": port_end(c["a_port"]),
                 "endItem": port_end(c["b_port"])}
         for pid in (c["a_port"], c["b_port"]):
@@ -164,7 +183,142 @@ def to_ita_cache(t, out):
                                        encoding="utf-8")
 
 
+def small_site(out):
+    """A hand-built copy holding each case the code review raised
+    (2026-11-04), as ITA records it physically:
+
+      C1  SW:1 (R1) -cord- P1 f5 | P1 r5 =fiber= P2 r5 | P2 f5 -cord- P3 f7 (R2)
+          | P3 r7 =fiber= P4 r7 | P4 f7 -cord- SRV:1 (R3)     — listed BACKWARDS
+      C2  SW:2 -cord- SRV2:1, both in R1                      — one direct cable
+      C3  SW:3 (R1) -cable- SRV:2 (R3)                         — direct, across racks
+      --  P1 r6 =fiber= P2 r6, nothing patched                 — a free strand
+      P5  two cassettes: A (ports 1-24), B (numbered from 0)
+      a ghost device's files left in the folder by an earlier copy
+    """
+    (out / "assets").mkdir(parents=True)
+    (out / "network").mkdir()
+    tree = {"site": {"parent": None, "type": "location"}}
+    nets = {}
+
+    def put(aid, kind, parent, name, mods=(), u=None):
+        tree[aid] = {"parent": parent, "type": kind}
+        rec = {"id": aid, "type": kind, "name": name, "serialNumber": f"SN{aid}1"}
+        if u:
+            rec["rackMounted"] = {"unitPosition": u, "unitHeight": 1}
+        (out / "assets" / f"{aid}.json").write_text(json.dumps(rec), encoding="utf-8")
+        nets[aid] = {"portConfigurations": [
+            {"portConfiguration": {"id": f"{aid}-{m}", "name": m, "connectorType": "LC",
+                                   "portCount": n, "portStart": start},
+             "connectionsAndPaths": []} for m, n, start in mods]}
+
+    for r in ("R1", "R2", "R3"):
+        put(r, "rack", "site", r)
+    put("SW", "network", "R1", "SW", [("m", 8, 1)], u=10)
+    put("SRV2", "server", "R1", "SRV2", [("m", 2, 1)], u=5)
+    put("P1", "patch-panel", "R1", "P1", [("m", 24, 1)], u=40)
+    put("P5", "patch-panel", "R1", "P5", [("A", 24, 1), ("B", 24, 0)], u=39)
+    put("P2", "patch-panel", "R2", "P2", [("m", 24, 1)], u=40)
+    put("P3", "patch-panel", "R2", "P3", [("m", 24, 1)], u=39)
+    put("P4", "patch-panel", "R3", "P4", [("m", 24, 1)], u=40)
+    put("SRV", "server", "R3", "SRV", [("m", 4, 1)], u=10)
+
+    def e(aid, port, rear=False, module="m"):
+        kind = tree[aid]["type"]
+        return {"assetId": aid, "networkModule": f"{aid}-{module}", "portNumber": port,
+                "rearPort": rear, "connectorType": "LC", "assetType": kind,
+                "assetName": aid}
+
+    def conn(cid, a, b):
+        return {"id": cid, "source": a, "destination": b, "cableType": {"length": 5}}
+
+    c1 = [conn("c1a", e("SW", 1), e("P1", 5)),
+          conn("c1b", e("P1", 5, True), e("P2", 5, True)),
+          conn("c1c", e("P2", 5), e("P3", 7)),
+          conn("c1d", e("P3", 7, True), e("P4", 7, True)),
+          conn("c1e", e("P4", 7), e("SRV", 1))]
+    c2 = [conn("c2", e("SW", 2), e("SRV2", 1))]
+    c3 = [conn("c3", e("SW", 3), e("SRV", 2))]
+    free = [conn("f6", e("P1", 6, True), e("P2", 6, True))]
+    cass = [conn("k1", e("P5", 0, module="B"), e("SW", 4)),
+            conn("k2", e("P5", 5, module="Z"), e("SW", 5)),
+            conn("k3", e("P5", 5, module="A"), e("SW", 6))]
+
+    def path(conns, begin, end, holder):
+        nets[holder]["portConfigurations"][0]["connectionsAndPaths"].append(
+            {"connection": conns[0], "networkPath": {
+                "connections": conns, "beginItem": begin, "endItem": end}})
+
+    path(c1[::-1], e("SW", 1), e("SRV", 1), "SW")
+    path(c1, e("SW", 1), e("SRV", 1), "SRV")              # the same circuit, from its far end
+    path(c2, e("SW", 2), e("SRV2", 1), "SW")
+    path(c3, e("SW", 3), e("SRV", 2), "SW")
+    path(free, e("P1", 6), e("P2", 6), "P1")
+    for k in cass:
+        path([k], k["source"], k["destination"], "P5")
+
+    for aid, n in nets.items():
+        (out / "network" / f"{aid}.json").write_text(json.dumps(n), encoding="utf-8")
+    # an earlier copy's leftover: on disk, not in this copy's tree
+    (out / "assets" / "GHOST.json").write_text(json.dumps(
+        {"id": "GHOST", "type": "server", "name": "GHOST"}), encoding="utf-8")
+    (out / "network" / "GHOST.json").write_text(json.dumps({"portConfigurations": [
+        {"portConfiguration": {"id": "g", "connectorType": "LC", "portCount": 1},
+         "connectionsAndPaths": [{"networkPath": {"connections": c2,
+                                                  "beginItem": e("SW", 2),
+                                                  "endItem": e("SRV2", 1)}}]}]}),
+        encoding="utf-8")
+    (out / "manifest.json").write_text(json.dumps(
+        {"synced_at": "test", "complete": True, "network_missing": [], "tree": tree}),
+        encoding="utf-8")
+
+
+def review_cases():
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_small_"))
+    try:
+        small_site(tmp / "s")
+        conv = ita_convert.Converter(tmp / "s")
+        m = conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    P = m["ports"]
+    circ = {tuple(sorted((c["a_port"], c["b_port"]))): c for c in m["circuits"].values()}
+    c1 = circ.get(("R1:SW:1", "R3:SRV:1"))
+    check("a path listed backwards still walks R1 -> R2 -> R3, both trunks in order",
+          c1 and [r for r in (c1["hop_racks"] if c1["a_port"] == "R1:SW:1"
+                              else c1["hop_racks"][::-1])] == ["R1", "R2", "R3"]
+          and len(c1["strands"]) == 2, c1)
+    check("every panel port on the path is taken — both ends of each fiber, not one",
+          all(P[p]["status"] == "used" and P[p]["circuit"] == (c1 or {}).get("id")
+              for p in ("R1:P1:5", "R2:P2:5", "R2:P3:7", "R3:P4:7")),
+          {p: P[p]["status"] for p in ("R1:P1:5", "R2:P2:5", "R2:P3:7", "R3:P4:7")})
+    check("the same circuit seen from both ends is one circuit", len(
+        [c for c in m["circuits"].values() if c["a_port"] in ("R1:SW:1", "R3:SRV:1")]) == 1, "")
+    c2 = circ.get(("R1:SRV2:1", "R1:SW:2"))
+    check("one direct cable in a rack is a circuit: both ports taken",
+          c2 and c2["intra_rack"] and P["R1:SW:2"]["status"] == "used"
+          and P["R1:SRV2:1"]["peer"] == "R1:SW:2", c2)
+    c3 = circ.get(("R1:SW:3", "R3:SRV:2"))
+    check("a direct cable between racks: not intra-rack, both racks on the path, noted",
+          c3 and not c3["intra_rack"] and c3["hop_racks"] == ["R1", "R3"]
+          and conv.notes["direct cables between racks (no trunk)"] == 1, (c3, dict(conv.notes)))
+    e12 = next((x for x in m["edges"] if {x["from"], x["to"]} == {"R1", "R2"}), None)
+    check("an unpatched fiber is a free strand of the trunk, its ports free",
+          e12 and e12["cable_types"]["fiber"]["capacity"] == 2
+          and len(e12["cable_types"]["fiber"]["strands"]) == 1
+          and P["R1:P1:6"]["status"] == "free", e12)
+    check("cassette B numbered from 0 continues after cassette A (B:0 -> port 25)",
+          P["R1:P5:25"]["peer"] == "R1:SW:4", P.get("R1:P5:25"))
+    check("an unknown cassette gets ports of its own, never cassette A's of that number",
+          P["R1:P5:5"]["peer"] == "R1:SW:6"
+          and any(p["peer"] == "R1:SW:5" and p["index"] > 48 for p in P.values()
+                  if p["device"] == "R1:P5"), [p for p in P.values() if p["device"] == "R1:P5"
+                                                and p["status"] == "used"])
+    check("files an earlier copy left behind are not read",
+          not any("GHOST" in d for d in m["devices"]), list(m["devices"]))
+
+
 def main():
+    review_cases()
     t = pathengine.load_topology()
     tmp = Path(tempfile.mkdtemp(prefix="ita_convert_test_"))
     try:
