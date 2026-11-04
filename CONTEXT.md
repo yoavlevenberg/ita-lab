@@ -189,7 +189,7 @@ Intents: `clear_constraints`, `avoid`, `prefer`, `list_constraints`,
 | `server.py` | שרת מקומי + API |
 | `ui.html` | ממשק: מפת חווה 4×8 → פוד → מסד → רכיב → פורט, פאנל bulk, צ'אט |
 | `cli.py` | גישה משורת פקודה |
-| `test_scenarios.py` | **322/322 בדיקות עוברות** |
+| `test_scenarios.py` | **328/328 בדיקות עוברות** |
 
 ### API
 
@@ -413,7 +413,7 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
 
 **הצעד הבא:**
 1. להעביר את `ITA_transfer.xlsx` העדכני (כולל התיקון + `ita_probe.py`) ולהחיל
-   כעדכון (שלבים 3,4,6,7 — **בלי** 5). מצופה `322/322`.
+   כעדכון (שלבים 3,4,6,7 — **בלי** 5). מצופה `328/328`.
 2. להריץ שם `python ita_probe.py --server <כתובת>` (אם TLS נכשל: `--insecure`),
    והמשתמש מקליד חזרה את שורות `SPEC` / `LOGIN` / `ASSETS` / `NETWORK`.
 3. לפי הפלט: לכתוב `load_topology()` אמיתי — מבנה מ-`/assets`, חיבורים

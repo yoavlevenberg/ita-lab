@@ -19,6 +19,7 @@ import test_agreement
 import fuzzy
 import placement
 import xlsxreader
+import search
 import serials
 import wo_html
 import zones
@@ -771,7 +772,7 @@ def _model_cleanup(T):
     ]
     _a5 = {i["row"]: i["kind"]
            for i in bulkplan.validate_devices(T, _a5_specs, [])["issues"]}
-    check("A5: a serial that is not a plain number is refused",
+    check("A5: a serial with markup or a hyphen in it is refused",
           _a5 == {2: "bad_serial", 3: "bad_serial"}, str(_a5))
 
     # a real serial must of course still pass
@@ -781,6 +782,37 @@ def _model_cleanup(T):
     check("A5: a ten-digit serial is still accepted",
           not any(i["kind"] == "bad_serial" for i in _ok5["issues"]),
           str([i["kind"] for i in _ok5["issues"]]))
+
+    # real ITA serials are the vendor's, mostly letters and digits (code
+    # review, 2026-11-04): they have to work everywhere a serial does
+    _ok5b = bulkplan.validate_devices(T, [
+        {"row": 2, "serial": "FDO2134X0AB", "type": "switch", "raw_type": "switch",
+         "u_size": 1, "fiber_ports": 4, "copper_ports": 0, "label": "vendor"}], [])
+    check("A5: a vendor serial with letters (FDO2134X0AB) is accepted",
+          not any(i["kind"] == "bad_serial" for i in _ok5b["issues"]),
+          str([i["kind"] for i in _ok5b["issues"]]))
+    check("serials: letters-and-digits parse, with a port, in any case",
+          serials.parse("fdo2134x0ab:12") == ("FDO2134X0AB", 12)
+          and serials.parse("SN: FDO2134X0AB") == ("FDO2134X0AB", None),
+          str(serials.parse("fdo2134x0ab:12")))
+    check("serials: a rack, a device name, a port id or a plain word is not one",
+          not any(serials.parse(x) for x in
+                  ("A1-S05", "SRV-01", "A1-S05:FIB-PP-01:2", "N/A", "connect", "U10")))
+    check("serials: a serial that itself starts with SN keeps its SN",
+          serials.parse("SN12345ABC") == ("SN12345ABC", None),
+          str(serials.parse("SN12345ABC")))
+    _sx = {"devices": {
+        "a": {"id": "a", "serial": "fdo1111aaaa"}, "b": {"id": "b", "serial": "N/A"},
+        "c": {"id": "c", "serial": "DUP22222"}, "d": {"id": "d", "serial": "dup22222"},
+        "e": {"id": "e", "serial": ""}}}
+    check("serials: the index is case-blind, skips junk, and leaves duplicates out",
+          serials.index(_sx) == {"FDO1111AAAA": "a"}
+          and serials.duplicates(_sx) == {"DUP22222": ["c", "d"]}, str(serials.index(_sx)))
+    _sdev = next(d for d in T["devices"].values())
+    _shit = search.search(dict(T, devices=dict(T["devices"], **{
+        _sdev["id"]: dict(_sdev, serial="abc12345x")})), "ABC12345X")
+    check("search finds a device by its serial in any case",
+          any(h.get("id") == _sdev["id"] for h in _shit["results"]), str(_shit)[:200])
 
     # -- D5: which colour a pod belongs to is an operational decision (tenancy,
     #    security, environment). It lived in source, so moving one pod from

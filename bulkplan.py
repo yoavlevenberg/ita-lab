@@ -417,10 +417,10 @@ VALID_TYPES = ("switch", "server", "fiber_patch_panel", "copper_patch_panel")
 # tens of thousands of port dicts. Both are refused up front now.
 MAX_PORTS_PER_DEVICE = 512
 
-# What a serial is allowed to look like on the Devices tab: digits only. The map
-# derives ten-digit serials (see serials.py), and a sheet naming new kit has to
-# use the same shape — anything else is a typo or a paste of the wrong column.
-_SERIAL_ONLY = re.compile(r"\d{4,}")
+# What a serial is allowed to look like on the Devices tab: serials.SERIAL —
+# digits, or a vendor's letters-and-digits (FDO2134X0AB). Anything else (a
+# hyphen, markup, a space) is a typo or a paste of the wrong column.
+_SERIAL_ONLY = serials.SERIAL
 
 
 def validate_devices(topology, new_devices, demands=()):
@@ -451,8 +451,9 @@ def validate_devices(topology, new_devices, demands=()):
         # render site to escape it.
         if not _SERIAL_ONLY.fullmatch(serial):
             fault(d, "bad_serial",
-                  f"'{serial}' is not a serial — a serial is digits only, and "
-                  f"the map uses ten of them (e.g. {serials.serial_for('example')})")
+                  f"'{serial}' is not a serial — a serial is letters and digits only, "
+                  f"with at least one digit (e.g. FDO2134X0AB or "
+                  f"{serials.serial_for('example')})")
             continue
         if serial in seen:
             fault(d, "duplicate_serial",

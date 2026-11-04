@@ -28,9 +28,22 @@ LENGTH = 10
 FIRST = 10 ** (LENGTH - 1)          # no leading zero, so the number survives
 SPAN = 9 * FIRST                    # a round-trip through a spreadsheet cell
 
-# A port is addressed as <serial>:<port>, e.g. 4827193056:12. Bare digits mean
-# "this device, any suitable port"; with the suffix, that exact port.
-_SERIAL_RE = re.compile(r"^\s*(\d{4,})\s*(?::\s*(\d+)\s*)?$")
+# What counts as a serial. The synthetic map derives ten digits, but real ITA
+# serials are the vendor's own and mostly alphanumeric (FDO2134X0AB, 7XJ2K3).
+# So: four or more digits, OR 5-24 letters and digits with at least one digit.
+# No hyphen, no colon, no space — which is what keeps a rack (A1-S05), a device
+# name (SRV-01), a port id (A1-S05:FIB-PP-01:2) and an ordinary word apart
+# from a serial. Compared case-insensitively: canonical() upper-cases.
+SERIAL = re.compile(r"\d{4,}|(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{5,24}")
+
+# A port is addressed as <serial>:<port>, e.g. 4827193056:12 or FDO2134X0AB:12.
+# The serial alone means "this device, any suitable port"; with the suffix,
+# that exact port.
+_SERIAL_RE = re.compile(r"^\s*(" + SERIAL.pattern + r")\s*(?::\s*(\d+)\s*)?$")
+
+# "SN 123", "S/N: 123", "sn-123" — the label is dropped only when a separator
+# follows it, because a real serial may itself begin with SN (SN12345ABC)
+_LABEL_RE = re.compile(r"^\s*s[/\-]?n(?:\s*[:\-]\s*|\s+)", re.I)
 
 
 class SerialError(Exception):
@@ -43,9 +56,41 @@ def serial_for(device_id):
     return str(FIRST + int.from_bytes(digest[:8], "big") % SPAN)
 
 
+def canonical(serial):
+    return str(serial or "").strip().upper()
+
+
+def is_serial(text):
+    """Is this, exactly, a serial (no port suffix, no label)?"""
+    return bool(SERIAL.fullmatch(str(text or "").strip()))
+
+
 def index(topology):
-    """serial -> device id, for resolving what a demand sheet refers to."""
-    return {d["serial"]: d["id"] for d in topology["devices"].values() if d.get("serial")}
+    """serial -> device id, for resolving what a demand sheet refers to.
+
+    Only usable serials go in. Real data has blanks, "N/A", and two boxes
+    sharing a serial now and then; a duplicate is left OUT rather than letting
+    the last one silently win — a sheet that names it then fails as unknown,
+    and duplicates() says why."""
+    seen, dup = {}, set()
+    for d in topology["devices"].values():
+        s = canonical(d.get("serial"))
+        if not is_serial(s):
+            continue
+        if s in seen:
+            dup.add(s)
+        seen[s] = d["id"]
+    return {s: i for s, i in seen.items() if s not in dup}
+
+
+def duplicates(topology):
+    """serial -> [device ids], for every serial more than one device carries."""
+    by = {}
+    for d in topology["devices"].values():
+        s = canonical(d.get("serial"))
+        if is_serial(s):
+            by.setdefault(s, []).append(d["id"])
+    return {s: ids for s, ids in by.items() if len(ids) > 1}
 
 
 def parse(text):
@@ -58,11 +103,11 @@ def parse(text):
     """
     # a stray "SN" / "S/N" prefix is tolerated here rather than only in
     # normalise(), so every caller agrees on what counts as a serial
-    raw = re.sub(r"^\s*(?:s[/\-]?n)\s*[:\-]?\s*", "", str(text or ""), flags=re.I)
+    raw = _LABEL_RE.sub("", str(text or ""))
     m = _SERIAL_RE.match(raw)
     if not m:
         return None
-    return (m.group(1), int(m.group(2)) if m.group(2) else None)
+    return (canonical(m.group(1)), int(m.group(2)) if m.group(2) else None)
 
 
 def normalise(text):

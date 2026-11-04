@@ -148,7 +148,7 @@ def search(topology, query, limit=MAX_RESULTS):
     parsed = serials.parse(q)
     if parsed:
         serial, index = parsed
-        dev = next((d for d in devices.values() if d.get("serial") == serial), None)
+        dev = devices.get(serials.index(topology).get(serial))   # case-insensitive
         if dev:
             if index is not None:
                 pid = f"{dev['id']}:{index}"
