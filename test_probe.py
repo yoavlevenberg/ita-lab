@@ -164,6 +164,8 @@ def main():
           "parameter 'assetId' -> HTTP 200" in out, out)
     check("it reports field names and types",
           "connections[].cableType: str" in out and "portName: str" in out, out)
+    check("the unconfirmed guesses are tried with GET and reported by code",
+          "GUESS  : /api/current/connections -> HTTP 404" in out, out)
     check("no real value reaches the screen", SECRET not in out and "pp-1" not in out, out)
     check("nothing but GET and the one login POST was sent",
           set(state["methods"]) <= {"GET", "POST /api/current/token"}, state["methods"])

@@ -55,7 +55,12 @@ from pathlib import Path
 OUT = Path(__file__).parent / "probe_out"
 NETWORK_PATHS = "/api/networks/internal/rest/network-paths"
 # tried in this order; the server's 400 names no parameter, only "arg0"
-PARAM_NAMES = ("asset_id", "assetId", "asset", "id", "assetIds", "asset_ids")
+PARAM_NAMES = ("asset_id", "assetId", "asset", "id", "assetIds", "asset_ids",
+               "sourceAssetId")    # the last from an internal AI's guess, 2026-11-04
+# Paths nobody has confirmed (an internal AI's guesses, 2026-11-04; the spec
+# does not list them). Bare GETs — only the HTTP code is reported.
+GUESSES = ("/api/current/connections", "/api/current/ports",
+           "/api/current/connections/network-paths")
 MAX_GETS = 400          # the asset walk stops here, found or not
 TIMEOUT = 30
 
@@ -492,6 +497,14 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         _save(report)
         return 1
     say(f"LOGIN  : ok ({how})")
+    for g in GUESSES:
+        try:
+            st, raw = probe.get(g)
+            n = _json(raw)
+            size = f", {len(n)} items" if st == 200 and isinstance(n, list) else ""
+            say(f"GUESS  : {g} -> {probe.last}{size}")
+        except (urllib.error.URLError, OSError) as e:
+            say(f"GUESS  : {g} -> {_why(e)}")
 
     if args.asset:
         asset, types = args.asset, Counter()
