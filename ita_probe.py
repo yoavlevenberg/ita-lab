@@ -56,6 +56,8 @@ OUT = Path(__file__).parent / "probe_out"
 # Where the internal endpoint lives is not certain: the 400 was seen once
 # (2026-11-03), but on 2026-11-04 the first of these gave 404 in Chrome. The
 # right one answers a bare GET with 400 "...must not be null".
+# Confirmed 2026-11-04 from F12 in ITA's own Network window:
+#   GET https://<ip>/api/networks/internal/rest/network-paths?asset_id=<uuid>
 NETWORK_PATH_CANDIDATES = ("/api/networks/internal/rest/network-paths",
                            "/api/v8.1/networks/internal/rest/network-paths",
                            "/api/current/networks/internal/rest/network-paths",
@@ -259,14 +261,25 @@ class Probe:
 
     # -- 4. the endpoint we actually need ------------------------------------
     def locate_network_paths(self):
-        """Which candidate path is the endpoint: the one whose bare GET
-        complains about the missing argument. Returns (path or None, notes)."""
+        """Which candidate is the endpoint: the one whose bare GET complains
+        about the missing argument. Both schemes: on the real server the
+        documented API answers on http, but this one only on https (Chrome's
+        F12, 2026-11-04) — http gets a different web server and a 404.
+        Returns (full URL or None, notes)."""
+        scheme, host = self.root.split("://", 1)
+        other = ("http" if scheme == "https" else "https") + "://" + host
         notes = []
         for path in NETWORK_PATH_CANDIDATES:
-            st, raw = self.get(path)
-            notes.append(f"{path} -> {self.last}")
-            if st == 400 and b"must not be null" in raw:
-                return path, notes
+            for root in (self.root, other):
+                url = root + path
+                try:
+                    st, raw = self.get(url)
+                except (urllib.error.URLError, OSError) as e:
+                    notes.append(f"{root.split('://')[0]} {path} -> {_why(e)}")
+                    continue
+                notes.append(f"{root.split('://')[0]} {path} -> {self.last}")
+                if st == 400 and b"must not be null" in raw:
+                    return url, notes
         return None, notes
 
     def network_paths(self, path, asset_id):

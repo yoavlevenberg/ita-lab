@@ -162,9 +162,10 @@ def main():
           any(q == "include=children" for q in state["include"]), state["include"])
     check("it walks the tree down to the patch panel and asks about THAT one",
           state["asked"] == ["pp-1"], state["asked"])
-    check("it finds which candidate path is the endpoint",
-          "PATH   : /api/networks/internal/rest/network-paths -> HTTP 404" in out
-          and f"PATH   : {REAL_NETWORK_PATHS} -> HTTP 400" in out, out)
+    check("it finds which candidate path is the endpoint, trying both schemes",
+          "PATH   : http /api/networks/internal/rest/network-paths -> HTTP 404" in out
+          and "PATH   : https /api/networks/internal/rest/network-paths -> TLS failed" in out
+          and f"PATH   : http {REAL_NETWORK_PATHS} -> HTTP 400" in out, out)
     check("it finds the parameter name the server actually answers to",
           "parameter 'assetId' -> HTTP 200" in out, out)
     check("it reports field names and types",
