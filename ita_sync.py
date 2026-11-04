@@ -38,6 +38,7 @@ import argparse
 import getpass
 import json
 import re
+import shutil
 import sys
 import time
 import urllib.error
@@ -57,6 +58,13 @@ CONTAINER = re.compile(r"location|site|building|floor|room|row|rack|cage|zone|fo
 
 class SyncError(Exception):
     """Something the person running this has to act on; the message says what."""
+
+
+class SyncAborted(Exception):
+    """The server stopped answering mid-copy; what was copied is kept aside."""
+
+
+MAX_IN_A_ROW = 10       # this many failed requests in a row: the server is gone
 
 
 def _other_scheme(root):
@@ -86,12 +94,16 @@ class Sync:
         old curl script used http, Chrome uses https."""
         notes = []
         for root in (self.p.root, _other_scheme(self.p.root)):
+            if any("certificate not trusted" in n for n in notes):
+                break           # no http retry: it would send the password in clear
             for base in API_BASES:
                 url = f"{root}{base}/assets/search?{urllib.parse.urlencode({'q': probe_query})}"
                 try:
                     st, raw = self.p.get(url)
                 except (urllib.error.URLError, OSError) as e:
                     notes.append(f"{root.split('://')[0]} {base}/assets/search -> {_why(e)}")
+                    if "certificate" in _why(e):
+                        break
                     continue
                 notes.append(f"{root.split('://')[0]} {base}/assets/search -> {self.p.last}")
                 if st == 200:
@@ -127,72 +139,128 @@ class Sync:
         self.network_url = url
         return notes
 
+    # -- one request, never fatal ----------------------------------------------
+    def _get(self, url, what, failed):
+        """GET that survives the network: one retry, then counted as a
+        failure instead of thrown. A long site copy must not die on the
+        3,000th request. Returns (status, body) or (None, None)."""
+        for attempt in (1, 2):
+            try:
+                st, raw = self.p.get(url)
+                self.in_a_row = 0
+                return st, raw
+            except (urllib.error.URLError, OSError) as e:
+                reason = _why(e)
+        failed[f"{what}: {reason}"] += 1
+        self.in_a_row += 1
+        if self.in_a_row >= MAX_IN_A_ROW:
+            raise SyncAborted(f"{MAX_IN_A_ROW} requests in a row failed ({reason})")
+        return None, None
+
     # -- the walk ------------------------------------------------------------
     def walk(self, start_id, limit=None):
         """Breadth-first from start_id: every asset record, then connections
-        for each device. Returns the manifest."""
-        (self.out / "assets").mkdir(parents=True, exist_ok=True)
-        (self.out / "network").mkdir(parents=True, exist_ok=True)
+        for each device. Returns the manifest.
+
+        Everything goes into <out>.partial/ first, and replaces <out> only when
+        the walk finished: a copy cut short never mixes with the last good
+        one, and a fresh copy never carries files a previous one left behind
+        (a device removed in ITA would otherwise come back from its old file)."""
+        stage = self.out.with_name(self.out.name + ".partial")
+        if stage.exists():
+            shutil.rmtree(stage)
+        (stage / "assets").mkdir(parents=True)
+        (stage / "network").mkdir(parents=True)
         kinds, parent_of, kind_of = Counter(), {}, {}
         failed = Counter()
-        devices = []
-        queue, seen = [(start_id, None)], set()
-        while queue:
-            aid, parent = queue.pop(0)
-            if not aid or aid in seen:
-                continue
-            if limit and len(seen) >= limit:
-                failed["stopped at --limit"] += 1
-                break
-            seen.add(aid)
-            st, raw = self.p.get(f"{self.api}/assets/{urllib.parse.quote(str(aid))}?include=children")
-            body = _json(raw) if st == 200 else None
-            if not isinstance(body, dict):
-                failed[f"asset HTTP {st}"] += 1
-                continue
-            _write(self.out / "assets" / f"{_safe(aid)}.json", body)
-            kind = _kind(body)
-            kinds[kind] += 1
-            kind_of[aid], parent_of[aid] = kind, parent
-            if not CONTAINER.search(kind):
-                devices.append(aid)
-            for child in _children(body):
-                cid = child.get("id") if isinstance(child, dict) else child
-                queue.append((cid, aid))
-
+        devices, missing = [], []
         connections = ports = 0
         net_codes = Counter()
-        for aid in devices:
-            if not self.network_url:
-                break
-            st, raw = self.p.get(f"{self.network_url}?{urllib.parse.urlencode({'asset_id': aid})}")
-            net_codes[st] += 1
-            body = _json(raw) if st == 200 else None
-            if body is None:
-                if st in (401, 403) and net_codes[st] == 1 and len(net_codes) == 1:
-                    failed[f"network-paths HTTP {st} — refuses this login"] += 1
-                    break       # every other device would say the same
-                continue
-            _write(self.out / "network" / f"{_safe(aid)}.json", body)
-            for pc in (body.get("portConfigurations") or []) if isinstance(body, dict) else []:
-                ports += 1
-                connections += len(pc.get("connectionsAndPaths") or [])
+        self.in_a_row = 0
+        aborted = None
+        try:
+            queue, seen = [(start_id, None)], set()
+            while queue:
+                aid, parent = queue.pop(0)
+                if not aid or aid in seen:
+                    continue
+                if limit and len(seen) >= limit:
+                    failed["stopped at --limit"] += 1
+                    break
+                seen.add(aid)
+                st, raw = self._get(
+                    f"{self.api}/assets/{urllib.parse.quote(str(aid))}?include=children",
+                    "asset", failed)
+                body = _json(raw) if st == 200 else None
+                if not isinstance(body, dict):
+                    if st is not None:
+                        failed[f"asset HTTP {st}"] += 1
+                    continue
+                _write(stage / "assets" / f"{_safe(aid)}.json", body)
+                kind = _kind(body)
+                kinds[kind] += 1
+                kind_of[aid], parent_of[aid] = kind, parent
+                if not CONTAINER.search(kind):
+                    devices.append(aid)
+                for child in _children(body):
+                    cid = child.get("id") if isinstance(child, dict) else child
+                    queue.append((cid, aid))
 
-        manifest = {
-            "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "start": start_id,
-            "api": self.api,
-            "network_paths": self.network_url,
-            "assets": len(kind_of),
-            "kinds": dict(kinds),
-            "devices": len(devices),
-            "network_http": {str(k): v for k, v in net_codes.items()},
-            "port_configurations": ports,
-            "connections": connections,
-            "problems": dict(failed),
-            "tree": {a: {"parent": parent_of[a], "type": kind_of[a]} for a in kind_of},
-        }
-        _write(self.out / "manifest.json", manifest)
+            for aid in devices:
+                if not self.network_url:
+                    missing.append(aid)
+                    continue
+                st, raw = self._get(
+                    f"{self.network_url}?{urllib.parse.urlencode({'asset_id': aid})}",
+                    "network-paths", failed)
+                if st is not None:
+                    net_codes[st] += 1
+                body = _json(raw) if st == 200 else None
+                if not isinstance(body, dict):
+                    missing.append(aid)
+                    if st in (401, 403) and net_codes[st] == 1 and len(net_codes) == 1:
+                        failed[f"network-paths HTTP {st} — refuses this login"] += 1
+                        missing.extend(d for d in devices if d not in missing)
+                        break       # every other device would say the same
+                    continue
+                _write(stage / "network" / f"{_safe(aid)}.json", body)
+                for pc in body.get("portConfigurations") or []:
+                    ports += 1
+                    connections += len(pc.get("connectionsAndPaths") or [])
+        except SyncAborted as e:
+            aborted = str(e)
+        except KeyboardInterrupt:
+            aborted = "stopped by Ctrl+C"
+        finally:
+            manifest = {
+                "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "complete": aborted is None,
+                "aborted": aborted,
+                "start": start_id,
+                "api": self.api,
+                "network_paths": self.network_url,
+                "assets": len(kind_of),
+                "kinds": dict(kinds),
+                "devices": len(devices),
+                # devices whose ports and connections are NOT in the copy —
+                # the converter must not read them as "no ports, nothing patched"
+                "network_missing": missing,
+                "network_http": {str(k): v for k, v in net_codes.items()},
+                "port_configurations": ports,
+                "connections": connections,
+                "problems": dict(failed),
+                "tree": {a: {"parent": parent_of[a], "type": kind_of[a]} for a in kind_of},
+            }
+            _write(stage / "manifest.json", manifest)
+        # a copy without connections must not replace one that has them
+        if aborted is None and not self.network_url:
+            aborted = "network-paths was not reachable, so this copy has no connections"
+            manifest.update(complete=False, aborted=aborted)
+            _write(stage / "manifest.json", manifest)
+        if aborted is None:
+            if self.out.exists():
+                shutil.rmtree(self.out)
+            stage.rename(self.out)
         return manifest
 
 
@@ -259,10 +327,13 @@ def check_login(sync, say):
         say("LOGIN  : the server refused this user name or password.")
         say("         If it is a domain user, try it as DOMAIN\\name or name@domain,")
         say("         or the user the old curl script used (DCIM_USER), if that was a different one.")
-    for n in sync.find_network():
+    net_notes = sync.find_network()
+    for n in net_notes:
         say(f"PATH   : {n}")
     if sync.network_url:
         say("NETWORK: ok — network-paths accepts this login too")
+    if any("certificate not trusted" in n for n in notes + net_notes):
+        say("TLS    : the server's certificate is not trusted here — run again with --insecure")
     return 0 if sync.api and sync.network_url else 1
 
 
@@ -314,10 +385,18 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         # A 401/403 means the path is there and only the login was turned
         # away (Chrome gets in with its own session) — not "not found".
         refused = next((n for n in notes if re.search(r"-> HTTP 40[13]\b", n)), None)
-        say("NETWORK: network-paths is there but refuses this login — assets only this time"
-            if refused else "NETWORK: network-paths not found — assets only this time")
+        if any("certificate not trusted" in n for n in notes):
+            say("NETWORK: network-paths is on https and its certificate is not trusted here —")
+            say("         run again with --insecure (assets only this time)")
+        else:
+            say("NETWORK: network-paths is there but refuses this login — assets only this time"
+                if refused else "NETWORK: network-paths not found — assets only this time")
 
     m = sync.walk(start, limit=args.limit)
+    if not m["complete"]:
+        say(f"ABORTED: {m['aborted']}")
+        say("         the previous copy (if any) is untouched; this one is kept aside")
+        say("         as .partial and is NOT used — run the same command again")
     say(f"ASSETS : {m['assets']} — " + ", ".join(f"{k}={v}" for k, v in
                                                   Counter(m["kinds"]).most_common(10)))
     say(f"DEVICES: {m['devices']}, network-paths answers: " +

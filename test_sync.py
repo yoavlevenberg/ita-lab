@@ -112,6 +112,10 @@ def make_server(state, network="ok"):
             if path == NETWORK:
                 if network == "deny":
                     return self._send(401, {"error": "session required"})
+                if (network == "dead" and "asset_id" in q) or (
+                        network.startswith("drop:") and q.get("asset_id") == network[5:]):
+                    self.close_connection = True
+                    return              # hang up without a word
                 if "asset_id" not in q:
                     return self._send(400, {"invalid-parameters": [{
                         "reason": "must not be null",
@@ -136,10 +140,10 @@ class Args:
         self.user, self.insecure, self.proxy, self.check = "u", False, False, check
 
 
-def run_sync(network="ok", password="p", **kw):
+def run_sync(network="ok", password="p", out=None, **kw):
     state = {"methods": [], "assets": [], "network": []}
     srv = make_server(state, network)
-    out = Path(tempfile.mkdtemp(prefix="ita_sync_test_"))
+    out = out or Path(tempfile.mkdtemp(prefix="ita_sync_test_"))
     lines = []
     try:
         code = ita_sync.run(Args(f"http://127.0.0.1:{srv.server_port}", str(out), **kw),
@@ -208,6 +212,73 @@ def main():
     check("--id starts anywhere in the tree",
           code == 0 and sorted(set(state["assets"])) == ["pp1", "rack1", "rack2", "row1",
                                                          "srv1", "sw1"], state["assets"])
+
+    # a network hiccup on one device: the copy goes on, and says what it lacks
+    code, out, state, cache = run_sync(network="drop:sw1", site="SITE-A")
+    try:
+        m = json.loads((cache / "SITE-A" / "manifest.json").read_text(encoding="utf-8"))
+        check("one request that dies mid-copy is counted, not fatal",
+              m["complete"] and m["network_missing"] == ["sw1"]
+              and not (cache / "SITE-A" / "network" / "sw1.json").exists()
+              and "PROBLEM: network-paths:" in out, out)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
+
+    # a fresh copy carries nothing the last one left behind
+    cache = Path(tempfile.mkdtemp(prefix="ita_sync_test_"))
+    (cache / "SITE-A" / "network").mkdir(parents=True)
+    (cache / "SITE-A" / "network" / "ghost.json").write_text("{}", encoding="utf-8")
+    code, out, state, cache = run_sync(site="SITE-A", out=cache)
+    check("a new copy replaces the old one whole: no file from before survives",
+          code == 0 and not (cache / "SITE-A" / "network" / "ghost.json").exists()
+          and (cache / "SITE-A" / "network" / "sw1.json").exists(), out)
+
+    # network-paths unreachable this time: a copy with no connections must not
+    # replace one that has them
+    code, out, state, cache = run_sync(network="deny", site="SITE-A", out=cache)
+    check("a copy without connections never overwrites one that has them",
+          code == 1 and (cache / "SITE-A" / "network" / "sw1.json").exists()
+          and "ABORTED: network-paths was not reachable" in out, out)
+
+    # the server stops answering: the good copy from before is left alone
+    keep = ita_sync.MAX_IN_A_ROW
+    ita_sync.MAX_IN_A_ROW = 2
+    try:
+        code, out, state, cache = run_sync(network="dead", site="SITE-A", out=cache)
+    finally:
+        ita_sync.MAX_IN_A_ROW = keep
+    try:
+        check("a server that goes silent aborts the copy without a traceback",
+              "ABORTED: 2 requests in a row failed" in out, out)
+        check("...and the last complete copy is untouched, the broken one set aside",
+              (cache / "SITE-A" / "network" / "sw1.json").exists()
+              and json.loads((cache / "SITE-A.partial" / "manifest.json")
+                             .read_text(encoding="utf-8"))["complete"] is False, out)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
+
+    # a certificate the PC does not trust: never retried over http
+    import ssl
+    import urllib.error
+    from ita_probe import Probe
+
+    class CertFails(Probe):
+        def __init__(self):
+            super().__init__("https://ita.example")
+            self.sent = []
+
+        def get(self, url):
+            self.sent.append(url.split("://")[0])
+            if url.startswith("https://"):
+                raise urllib.error.URLError(ssl.SSLError("[SSL: CERTIFICATE_VERIFY_FAILED]"))
+            return 200, b"[]"
+
+    probe = CertFails()
+    sync = ita_sync.Sync(probe, None)
+    sync.find_api("a")
+    probe.locate_network_paths()
+    check("a certificate error never falls back to http (the password would go in clear)",
+          probe.sent and set(probe.sent) == {"https"} and sync.api is None, probe.sent)
 
     # --check: the one-minute login test for the first thing on Sunday
     code, out, state, cache = run_sync(check=True)

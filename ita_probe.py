@@ -269,13 +269,17 @@ class Probe:
         scheme, host = self.root.split("://", 1)
         other = ("http" if scheme == "https" else "https") + "://" + host
         notes = []
+        cert_failed = False
         for path in NETWORK_PATH_CANDIDATES:
             for root in (self.root, other):
+                if cert_failed and root.startswith("http://"):
+                    continue    # never retry in clear text what https refused on a certificate
                 url = root + path
                 try:
                     st, raw = self.get(url)
                 except (urllib.error.URLError, OSError) as e:
                     notes.append(f"{root.split('://')[0]} {path} -> {_why(e)}")
+                    cert_failed = cert_failed or _is_cert_error(e)
                     continue
                 notes.append(f"{root.split('://')[0]} {path} -> {self.last}")
                 if st == 400 and b"must not be null" in raw:
