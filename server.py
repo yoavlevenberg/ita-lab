@@ -422,6 +422,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/zones":
             return self._send(200, {
                 "pods": zones.summary(TOPOLOGY),
+                # a site with no pods is painted cabinet by cabinet
+                "racks": ({} if TOPOLOGY.get("pods") else
+                          {rid: zones.zone_of_rack(TOPOLOGY, rid) for rid in TOPOLOGY["racks"]}),
                 "colours": zones.COLOURS,
                 "audit": zones.audit(TOPOLOGY),
             })
@@ -1125,8 +1128,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    url = f"http://127.0.0.1:{PORT}"
+    global STORE, TOPOLOGY
+    import argparse
+    ap = argparse.ArgumentParser(description="ITA Lab — physical layer route planner")
+    ap.add_argument("--map", help="plan on this map instead of data/topology.json — "
+                                  "e.g. ita_cache/<site>/topology.json from ita_convert.py")
+    ap.add_argument("--port", type=int, default=PORT)
+    args = ap.parse_args()
+    if args.map:
+        # changes made while planning are written back to THIS file, never to
+        # data/topology.json — and a fresh sync + convert replaces it
+        STORE = storage.open_store("json", path=Path(args.map))
+        TOPOLOGY = STORE.load()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    url = f"http://127.0.0.1:{args.port}"
     print("=" * 58)
     print("  ITA Lab — physical layer route planner")
     print("=" * 58)

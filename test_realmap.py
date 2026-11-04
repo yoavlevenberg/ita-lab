@@ -130,8 +130,29 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
 
     content_checks()
+    ui_checks()
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} real-map checks passed")
     raise SystemExit(0 if all(RESULTS) else 1)
+
+
+def ui_checks():
+    """The page, read as source (it was also driven in Chrome on a full-size
+    converted map on 2026-11-04: 640 cabinets in 64 rows, a route planned)."""
+    import re
+    ui = (Path(__file__).parent / "ui.html").read_text(encoding="utf-8")
+    render_map = ui[ui.index("function renderMap()"):ui.index("function renderSiteOverview()")]
+    check("ui: a map with no pods gets its own overview, not the 4x8 grid",
+          "if (!isClassicMap())" in render_map and "renderSiteOverview()" in render_map, "")
+    check("ui: selecting a pod that does not exist falls back to the overview",
+          re.search(r"function selectPod\(pid\)\{\s*if \(!isClassicMap\(\) \|\| pid == null",
+                    ui) is not None, "")
+    raw = re.findall(r"""onclick="[^"]*'\$\{(?:x\.(?:from|to|rack)|rid)\}'""", ui)
+    check("ui: a cabinet name from ITA never lands raw inside an inline handler",
+          not raw, raw)
+    check("ui: the rack drawing uses the cabinet's own height and skips kit with no U",
+          "meta.u_height || T.meta.rack_u" in ui and "if (d.u_start == null) continue;" in ui, "")
+    check("ui: no 'domain null' on a map without A/B legs",
+          not re.search(r'>domain \$\{(?:route|c|e|meta)\.domain\}<', ui), "")
 
 
 def content_checks():

@@ -828,11 +828,93 @@ const heat = pct => pct < 50 ? "var(--free)" : pct < 80 ? "var(--amber)" : "var(
 const domainCls = d => d === "A" ? "a" : d === "B" ? "b" : "";
 
 // ----------------------------------------------------------------- map ---
+// The synthetic map is a 4x8 grid of pods. A map converted from ITA has no
+// pods at all (ITA knows rooms, rows and cabinets; pods are "just known" on
+// site), and a real site mixes pods, plain rows and lone cabinets — so it is
+// drawn from what it has.
+function isClassicMap(){
+  return !!(T.meta && T.meta.rooms && T.meta.pods_per_column
+            && T.pods && Object.keys(T.pods).length);
+}
+
+function rackDesc(meta){
+  const parts = [];
+  if (meta.pod != null) parts.push(`פוד ${escapeHtml(meta.pod)}`);
+  if (meta.row != null) parts.push(`שדרה ${escapeHtml(meta.row)}`);
+  if (meta.pod == null && meta.room != null) parts.push(`חדר ${escapeHtml(meta.room)}`);
+  if (meta.position) parts.push(`עמדה ${meta.position}`);
+  return parts.join(" · ");
+}
+
+function pickRackHint(){
+  return isClassicMap() ? "בחר פוד ואז מסד" : "בחר ארון מהמפה";
+}
+
 function renderMap(){
+  if (!isClassicMap()){
+    const n = Object.values(T.racks).filter(r => !r.external).length;
+    $("mapTitle").textContent = `מפת אתר — ${n} ארונות`;
+    return renderSiteOverview();
+  }
   $("mapTitle").textContent = sel.view === "pod"
     ? `פוד ${sel.pod}` : "מפת חווה — 4 טורים × 8 פודים";
   if (sel.view === "pod" && sel.pod) renderPodDetail(sel.pod);
   else renderOverview();
+}
+
+function renderSiteOverview(){
+  const el = $("map"); el.innerHTML = "";
+  const rooms = {};
+  let outside = 0;
+  for (const [rid, meta] of Object.entries(T.racks)){
+    if (meta.external){ outside++; continue; }
+    const room = meta.room == null ? "" : String(meta.room);
+    const row = meta.row == null ? "" : String(meta.row);
+    rooms[room] = rooms[room] || {};
+    (rooms[room][row] = rooms[room][row] || []).push(rid);
+  }
+  const named = k => k === "" ? "\uffff" : k;           // the unnamed group last
+  for (const room of Object.keys(rooms).sort((a, b) => named(a).localeCompare(named(b)))){
+    const group = document.createElement("div"); group.className = "room-group";
+    group.innerHTML = `<div class="room-label">${room ? "חדר " + escapeHtml(room) : "בלי חדר"}</div>`;
+    const rows = rooms[room];
+    for (const row of Object.keys(rows).sort((a, b) => named(a).localeCompare(named(b)))){
+      const wrap = document.createElement("div"); wrap.className = "row-wrap";
+      wrap.innerHTML = `<div class="row-tag">${row ? "שדרה <b>" + escapeHtml(row) + "</b>"
+                                                 : "ארונות בודדים"}</div>`;
+      const box = document.createElement("div"); box.className = "racks";
+      const order = rows[row].sort((a, b) =>
+        (T.racks[a].position || 0) - (T.racks[b].position || 0) || a.localeCompare(b));
+      for (const rid of order){
+        const meta = T.racks[rid], st = rackStats[rid] || {used:0, total:0};
+        const pct = st.total ? Math.round(st.used / st.total * 100) : 0;
+        const hop = currentPath.indexOf(rid);
+        const zone = ZONES.racks ? ZONES.racks[rid] : null;
+        const d = document.createElement("div");
+        d.className = "rack" + (meta.is_eor ? " eor" : "")
+                    + (sel.rack === rid ? " active" : "")
+                    + (hop >= 0 ? " on-path" : "");
+        d.style.minWidth = "auto";
+        if (zone && ZONES.colours[zone]) d.style.borderInlineStartColor = ZONES.colours[zone];
+        d.title = `${rid} — ${st.used}/${st.total} פורטים תפוסים`
+                + (zone ? ` · אזור ${ZONE_HE[zone] || zone}` : "");
+        d.innerHTML =
+          (hop >= 0 ? `<span class="hop">${hop+1}</span>` : "") +
+          `<div class="rid">${escapeHtml(rid)}</div>` +
+          `<div class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></div>` +
+          `<div class="pct">${meta.is_eor ? "EOR" : meta.is_mda ? "MDA" : pct + "%"}</div>`;
+        d.onclick = () => selectRack(rid);
+        box.appendChild(d);
+      }
+      wrap.appendChild(box); group.appendChild(wrap);
+    }
+    el.appendChild(group);
+  }
+  if (outside){
+    const note = document.createElement("div"); note.className = "mda-info";
+    note.textContent = `${outside} ארונות מחוץ לעותק — הקצה השני של טראנקים שיוצאים ממנו`;
+    el.appendChild(note);
+  }
 }
 
 function renderOverview(){
@@ -882,7 +964,7 @@ function renderOverview(){
     const on = currentSegIds.includes(e.id);
     bb.innerHTML += `<div class="bb ${on ? "on-path" : ""}">
         <span class="mono" style="width:190px">${e.id}</span>
-        <span class="pill ${domainCls(e.domain)}">domain ${e.domain}</span>
+        ${domainPill(e.domain)}
         <span class="bar"><i style="width:${pct}%;background:${heat(pct)}"></i></span>
         <span style="width:64px;text-align:left">${f.used}/${f.capacity}</span>
       </div>`;
@@ -945,6 +1027,7 @@ function renderPodDetail(pid){
 }
 
 function selectPod(pid){
+  if (!isClassicMap() || pid == null || !T.pods[pid]){ backToOverview(); return; }
   sel.view = "pod"; sel.pod = pid; sel.rack = null; sel.device = null;
   renderMap();
   $("rackPanel").innerHTML = `<div class="empty">בחר מסד מהפוד<br>כדי לראות את תכולת ה-42U</div>`;
@@ -956,7 +1039,7 @@ function selectPod(pid){
 function backToOverview(){
   sel.view = "overview"; sel.pod = null; sel.rack = null; sel.device = null;
   renderMap();
-  $("rackPanel").innerHTML = `<div class="empty">בחר פוד ואז מסד<br>כדי לראות את תכולת ה-42U</div>`;
+  $("rackPanel").innerHTML = `<div class="empty">${pickRackHint()}<br>כדי לראות את תכולת המסד</div>`;
   $("rackTitle").textContent = "תצוגת מסד (42U)";
   $("devPanel").innerHTML = `<div class="empty">בחר רכיב מתוך המסד<br>כדי לראות את הפורטים ולאן הם מגיעים</div>`;
   $("devTitle").textContent = "פרטי רכיב ופורטים";
@@ -980,13 +1063,17 @@ function selectRack(rid){
 function renderRack(){
   const rid = sel.rack, meta = T.racks[rid], st = rackStats[rid];
   $("rackTitle").innerHTML = `תצוגת מסד <span class="mono" style="color:var(--text)">${rid}</span>` +
-      (meta.is_eor ? ` <span class="pill" style="border-color:var(--eor);color:var(--eor)">EOR · domain ${meta.domain}</span>` : "");
+      (meta.is_eor ? ` <span class="pill" style="border-color:var(--eor);color:var(--eor)">EOR${meta.domain ? " · domain " + escapeHtml(meta.domain) : ""}</span>` : "");
 
-  const U = T.meta.rack_u, H = 15;
+  // a site from ITA has cabinets of more than one height
+  const U = meta.u_height || T.meta.rack_u, H = 15;
   let gut = "", body = "";
   for (let u = U; u >= 1; u--) gut += `<div>${u}</div>`;
+  // ITA gives no U for 0U and side-mounted kit: listed under the drawing
+  const unplaced = (devicesByRack[rid] || []).filter(d => d.u_start == null);
 
   for (const d of devicesByRack[rid] || []){
+    if (d.u_start == null) continue;
     const ports = portsByDevice[d.id];
     const used = ports.filter(p => p.status === "used").length;
     body += `<div class="dev ${d.type} ${sel.device === d.id ? "sel" : ""}"
@@ -999,15 +1086,17 @@ function renderRack(){
 
   $("rackPanel").innerHTML =
     `<div class="rackhead">
-       <span>פוד ${meta.pod} · שדרה ${meta.row} · עמדה ${meta.position} ·
+       <span>${rackDesc(meta)}${rackDesc(meta) ? " ·" : ""}
          ${st.used}/${st.total} פורטים תפוסים</span>
-       ${st.used ? `<button class="danger sm" onclick="releaseAll('rack','${rid}')"
+       ${st.used ? `<button class="danger sm" onclick="releaseAll('rack',${jsArg(rid)})"
             title="מנתק כל חיבור שנוגע במסד הזה">✂ נתק הכל במסד</button>` : ""}
      </div>
      <div class="elev">
        <div class="ugutter">${gut}</div>
        <div class="ubody" style="height:${U * H}px">${body}</div>
-     </div>`;
+     </div>` +
+    (unplaced.length ? `<div class="mda-info">ללא מיקום U (0U / צד):
+       ${unplaced.map(d => `<span class="servedchip" data-dev="${escapeHtml(d.id)}">${escapeHtml(d.name)}</span>`).join("")}</div>` : "");
 
   $("rackPanel").querySelectorAll(".dev").forEach(n =>
     n.onclick = () => selectDevice(n.dataset.dev));
@@ -1378,7 +1467,6 @@ function showRouteOptions(options, requestedCount){
 
 function renderOptionCard(route, i){
   const jumpPorts = [route.src_port, ...route.transit_points.map(t => t.port), route.dst_port];
-  const pillCls = domainCls(route.domain);
   const diversityBadge = route.shared_segments.length
     ? `<span class="check warn">⚠ חופף ב-${route.shared_segments.length} מקטע/ים עם אפשרות קודמת</span>`
     : `<span class="check">✓ 100% נפרד פיזית מכל אפשרות קודמת</span>`;
@@ -1392,7 +1480,7 @@ function renderOptionCard(route, i){
     <div class="opt-card" data-idx="${i}">
       <div class="opt-head">
         <h3 style="font-size:13px;margin:0">אפשרות ${route.option_index}</h3>
-        <span class="pill ${pillCls}">domain ${route.domain}</span>
+        ${domainPill(route.domain)}
         <button class="ghost" onclick="focusOption(${i})">הצג במפה</button>
       </div>
       <h4 style="font-size:11px;color:var(--muted);margin:8px 0 6px;font-weight:600">מסלול הכבל — קפיצות בין מסדים</h4>
@@ -1487,9 +1575,9 @@ function showExistingCircuit(cid){
     $("drawerTitle").innerHTML = c.partial
       ? `<span style="color:#ffb84d">חיבור לא גמור</span>
          <span class="mono">${c.id}</span>
-         <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`
+         ${domainPill(c.domain)}`
       : `חיבור קיים <span class="mono">${c.id}</span>
-         <span class="pill ${domainCls(c.domain)}">domain ${c.domain}</span>`;
+         ${domainPill(c.domain)}`;
     openCircuit = c.partial ? c.id : null;
     const jumpPorts = [c.a_port, ...c.transit_ports, c.b_port];
     $("drawerBody").innerHTML = `
@@ -1615,7 +1703,7 @@ function renderCapacity(r){
   const media = Object.entries(r.by_media);
 
   const trunkRow = x => `
-    <tr class="clickable" onclick="showTrunk('${x.from}','${x.to}')">
+    <tr class="clickable" onclick="showTrunk(${jsArg(x.from)},${jsArg(x.to)})">
       <td class="mono">${escapeHtml(x.id)}</td>
       <td>${x.media === "fiber" ? "סיב" : "נחושת"}</td>
       <td style="color:var(--muted)">${escapeHtml(x.kind_he)}</td>
@@ -1663,7 +1751,7 @@ function renderCapacity(r){
         <h3>המסדים העמוסים ביותר בפורטים</h3>
         <table class="cap"><tbody>
           ${r.tight_racks.slice(0, 8).map(x => `
-            <tr class="clickable" onclick="gotoRack('${x.rack}')">
+            <tr class="clickable" onclick="gotoRack(${jsArg(x.rack)})">
               <td class="mono">${x.rack}</td>
               <td class="bar">${capBar(x.pct)}</td>
               <td class="mono" style="color:var(--muted)">${x.used}/${x.total}</td>
@@ -2098,7 +2186,7 @@ function bulkRow(r){
         ? `<div style="color:var(--text)">${escapeHtml(r.label)}</div>` : ""}</td>
     <td class="mono">${escapeHtml(r.src)}</td><td class="mono">${escapeHtml(r.dst)}</td>
     <td>${r.hops}</td>
-    <td><span class="pill ${domainCls(r.domain)}">${r.domain}</span></td>
+    <td>${r.domain ? `<span class="pill ${domainCls(r.domain)}">${escapeHtml(r.domain)}</span>` : "—"}</td>
     <td class="mono" style="font-size:10px">${strands}</td>
     <td style="color:var(--muted);font-size:10.5px">${escapeHtml(r.note || "")}</td>
     <td style="text-align:center">${open ? "▾" : "▸"} ${print}</td></tr>`;
@@ -2150,7 +2238,7 @@ function renderRowOption(row, route, i, d){
     <div class="opt-card${isChosen ? " chosen" : ""}">
       <div class="opt-head">
         <h3 style="font-size:13px;margin:0">אפשרות ${i + 1}</h3>
-        <span class="pill ${domainCls(route.domain)}">domain ${route.domain}</span>
+        ${domainPill(route.domain)}
         <button class="ghost" onclick="focusRowOption(${row},${i})">הצג במפה</button>
         ${pick}
       </div>
@@ -2593,6 +2681,17 @@ $("btnBulkDownload").onclick = () => {
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c =>
     ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// A value passed as an argument from an inline onclick. escapeHtml alone is not
+// enough there: the browser decodes &#39; back to ' BEFORE the handler runs, so
+// a cabinet named O'Brien from ITA would end the string early. JSON makes it a
+// valid JS string, escapeHtml then makes that safe inside the attribute.
+function jsArg(v){ return escapeHtml(JSON.stringify(String(v))); }
+
+// A map from ITA has no A/B domains: show the leg only where there is one.
+function domainPill(d){
+  return d ? `<span class="pill ${domainCls(d)}">domain ${escapeHtml(d)}</span>` : "";
 }
 </script>
 </body>
