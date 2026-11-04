@@ -273,6 +273,8 @@ ita_probe.py            בדיקת ה-API של ITA האמיתי מתוך הרש�
 test_probe.py           בדיקות ל-ita_probe מול שרת ITA מדומה
 ita_sync.py             העתקת ארון/אתר מ-ITA לעותק מקומי ita_cache/ (קריאה בלבד)
 test_sync.py            בדיקות ל-ita_sync מול שרת ITA מדומה
+ita_convert.py          המרת העותק המקומי (ita_cache) למפה שהאפליקציה מתכננת עליה
+test_convert.py         בדיקת הלוך-חזור: מפה מדומה -> פורמט ITA -> ממיר -> אותה מפה
 CONTEXT.md              תקציר לסשן עבודה הבא (Claude Code או אחר)
 ```
 
