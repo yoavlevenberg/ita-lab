@@ -10,6 +10,7 @@ when more sites come in.
     python ita_sync.py --server https://<ip> --rack "<rack name>"     try one rack first
     python ita_sync.py --server https://<ip> --site "<folder name>"   a whole site
     python ita_sync.py --server https://<ip> --id <uuid>              start from any asset
+    python ita_sync.py --server https://<ip> --check                  only test the login
         --insecure   accept the server's self-signed certificate
         --proxy      go through Windows' proxy setting (default: direct)
 
@@ -241,17 +242,46 @@ def _write(path, obj):
     path.write_text(json.dumps(obj, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
+def check_login(sync, say):
+    """Does this user and password get in — to the asset API, and to
+    network-paths? No asset is needed: network-paths checks the login before
+    it checks its argument, so 'must not be null' means the login passed."""
+    try:
+        _, notes = sync.find_api("a")
+    except (urllib.error.URLError, OSError) as e:
+        say(f"LOGIN  : {_why(e)}" + ("  (try --insecure)" if "certificate" in _why(e) else ""))
+        return 1
+    for n in notes:
+        say(f"LOGIN  : {n}")
+    if sync.api:
+        say("LOGIN  : ok — the asset API accepts this user")
+    elif any("-> HTTP 401" in n for n in notes):
+        say("LOGIN  : the server refused this user name or password.")
+        say("         If it is a domain user, try it as DOMAIN\\name or name@domain,")
+        say("         or the user the old curl script used (DCIM_USER), if that was a different one.")
+    for n in sync.find_network():
+        say(f"PATH   : {n}")
+    if sync.network_url:
+        say("NETWORK: ok — network-paths accepts this login too")
+    return 0 if sync.api and sync.network_url else 1
+
+
 def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
     say = log
-    if bool(args.rack) + bool(args.site) + bool(args.id) != 1:
-        say("give exactly one of --rack, --site or --id")
+    check = getattr(args, "check", False)
+    if not check and bool(args.rack) + bool(args.site) + bool(args.id) != 1:
+        say("give exactly one of --rack, --site or --id (or --check)")
         return 2
-    user = args.user or ask_user("ITA user name: ")
+    user = (args.user or ask_user("ITA user name: ")).strip()
     password = ask_password("ITA password (not shown, not saved): ")
 
     probe = Probe(_root(args.server), insecure=args.insecure, log=log,
                   proxy=getattr(args, "proxy", False))
     probe.use_basic(user, password)
+    if check:
+        say("ITA login check — read-only, nothing is copied.")
+        say("")
+        return check_login(Sync(probe, None, log), say)
     label = args.rack or args.site or args.id
     out = Path(args.out) / _slug(label)
     sync = Sync(probe, out, log)
@@ -311,6 +341,8 @@ def main():
     ap.add_argument("--rack", help="one rack, by its exact name — the first test")
     ap.add_argument("--site", help="a whole site, by its folder's exact name")
     ap.add_argument("--id", help="start from this asset's uuid instead of a name")
+    ap.add_argument("--check", action="store_true",
+                    help="only test the user and password, copy nothing")
     ap.add_argument("--user", help="ITA user name (asked for if left out)")
     ap.add_argument("--out", default=str(CACHE), help="where the copy goes (default ita_cache/)")
     ap.add_argument("--limit", type=int, help="stop after this many assets")

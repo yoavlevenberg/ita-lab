@@ -130,20 +130,20 @@ def make_server(state, network="ok"):
 
 
 class Args:
-    def __init__(self, server, out, rack=None, site=None, id=None, limit=None):
+    def __init__(self, server, out, rack=None, site=None, id=None, limit=None, check=False):
         self.server, self.out = server, out
         self.rack, self.site, self.id, self.limit = rack, site, id, limit
-        self.user, self.insecure, self.proxy = "u", False, False
+        self.user, self.insecure, self.proxy, self.check = "u", False, False, check
 
 
-def run_sync(network="ok", **kw):
+def run_sync(network="ok", password="p", **kw):
     state = {"methods": [], "assets": [], "network": []}
     srv = make_server(state, network)
     out = Path(tempfile.mkdtemp(prefix="ita_sync_test_"))
     lines = []
     try:
         code = ita_sync.run(Args(f"http://127.0.0.1:{srv.server_port}", str(out), **kw),
-                            ask_password=lambda _: "p", log=lines.append)
+                            ask_password=lambda _: password, log=lines.append)
     finally:
         srv.shutdown()
     return code, "\n".join(lines), state, out
@@ -208,6 +208,25 @@ def main():
     check("--id starts anywhere in the tree",
           code == 0 and sorted(set(state["assets"])) == ["pp1", "rack1", "rack2", "row1",
                                                          "srv1", "sw1"], state["assets"])
+
+    # --check: the one-minute login test for the first thing on Sunday
+    code, out, state, cache = run_sync(check=True)
+    shutil.rmtree(cache, ignore_errors=True)
+    check("--check: a good login gets into the asset API and network-paths, copies nothing",
+          code == 0 and "LOGIN  : ok" in out and "NETWORK: ok" in out
+          and not state["assets"] and not state["network"], out)
+
+    code, out, state, cache = run_sync(check=True, password="wrong")
+    shutil.rmtree(cache, ignore_errors=True)
+    check("--check: a refused login is named as such, with what to try next",
+          code == 1 and "refused this user name or password" in out
+          and "DOMAIN\\name" in out, out)
+
+    code, out, state, cache = run_sync(check=True, network="deny")
+    shutil.rmtree(cache, ignore_errors=True)
+    check("--check: assets in but network-paths refusing shows as exactly that",
+          code == 1 and "LOGIN  : ok" in out and "NETWORK: ok" not in out
+          and "network-paths -> HTTP 401" in out, out)
 
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} sync checks passed")
     raise SystemExit(0 if all(RESULTS) else 1)
