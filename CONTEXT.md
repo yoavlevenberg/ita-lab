@@ -295,6 +295,16 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   `http://<ip>/api/v8.1` (http, לא https). קיים `GET /assets/search?q=<שם ארון>`.
   לכן הכלי שואל שם משתמש וסיסמה בהתחלה, מנסה Basic ראשון (רק GET, בלי POST), ואם ה-docs
   מחזירים 401 הוא מנסה שוב עם Basic.
+- **רשומת רכיב אמיתית** (`GET /api/v8.1/assets/<uuid>` נפתח ב-Chrome, המשתמש הקליד שמות שדות
+  בלבד, 2026-11-04). מיפוי למודל שלנו:
+  `id`→id · `type`/`subType`→type · `parentId`+`parentType`→rack · `name`→name ·
+  **`serialNumber`→serial** · `modelName`/`manufacturer`/`description`→label ·
+  **`rackMounted.unitPosition`→u_start**, **`rackMounted.unitHeight`→u_size**,
+  `rackMounted.rackMountingPosition` (FRONT/REAR... — אין לנו front/rear במודל) ·
+  `navigationPath`→שרשרת מיקום (חדר/שורה?) · `tags`/`customProperties`→אולי zone.
+  שדות נוספים: children, deviceLinks, shape, positionTopleftX/Y, orientation, cageId,
+  width, depth, barcode, partNumber, weight, height, powerConsumer, customerRelation, stage.
+  **חסר:** מספר/רשימת פורטים (fiber/copper) וחיבורים. לא ידוע עדיין: מה בתוך `deviceLinks`.
 
 ## סטטוס נכון ל-2026-11-03
 
