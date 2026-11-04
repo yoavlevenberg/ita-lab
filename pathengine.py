@@ -221,7 +221,7 @@ def is_trunk_full(edge, cable_type):
     return len(ct.get("strands") or {}) >= ct["capacity"]
 
 
-def first_free_strand(edge, cable_type, claimed=()):
+def first_free_strand(edge, cable_type, claimed=(), usable=None):
     """Lowest-numbered free strand — technicians patch bottom-up, and a
     deterministic choice keeps Work Orders reproducible.
 
@@ -235,9 +235,17 @@ def first_free_strand(edge, cable_type, claimed=()):
         return None
     taken = ct.get("strands") or {}
     for i in range(1, ct["capacity"] + 1):
-        if str(i) not in taken and i not in claimed:
+        if str(i) not in taken and i not in claimed and (usable is None or usable(i)):
             return i
     return None
+
+
+def physical_strands(edge, cable_type):
+    """{index: {rack: port id}} when this trunk's strands sit on real panel
+    ports — a map converted from ITA, where every fiber is a rear-port-to-
+    rear-port connection and front N is rear N. None on the synthetic map,
+    whose strands are numbered capacity with no panel behind them."""
+    return ((edge.get("strand_ports") or {}).get(cable_type)) or None
 
 
 def _build_graph(topology, cable_type, domain=None):
@@ -387,7 +395,8 @@ def direct_route(topology, src_port_id, dst_port_id):
     seg = _segment({"id": edge["id"], "obj": edge, "domain": edge["domain"],
                     "length_m": edge["length_m"], "capacity": ct["capacity"],
                     "used": used, "remaining": ct["capacity"] - used},
-                   a, b, cable_type)
+                   a, b, cable_type, topology=topology,
+                   held_ports={src_port_id, dst_port_id})
     return {
         "status": "ok",
         "cable_type": cable_type,
@@ -399,6 +408,7 @@ def direct_route(topology, src_port_id, dst_port_id):
         "hop_racks": [a, b],
         "segments": [seg],
         "transit_points": [],           # one jump has nothing in the middle
+        "patch_ports": _patch_ports(src_port_id, dst_port_id, [seg], []),
         "total_length_m": round(edge["length_m"], 1),
         "shared_segments": [],
         "fully_disjoint_from_previous": True,
@@ -407,7 +417,7 @@ def direct_route(topology, src_port_id, dst_port_id):
     }
 
 
-def _segment(e, a, b, cable_type, reserved=None):
+def _segment(e, a, b, cable_type, reserved=None, topology=None, held_ports=()):
     """One hop of a route: which trunk, and which numbered strand inside it
     gets patched at each end.
 
@@ -416,21 +426,38 @@ def _segment(e, a, b, cable_type, reserved=None):
     physical strand."""
     edge = e["obj"]
     claimed = (reserved or {}).get(e["id"], ())
-    index = first_free_strand(edge, cable_type, claimed)
+    phys = physical_strands(edge, cable_type) if topology is not None else None
+    usable = None
+    if phys:
+        # strand N IS panel port N at each end: it is only free if both of
+        # those ports are — a patch cord on the front takes the strand too
+        def usable(i):
+            ends = phys.get(str(i)) or {}
+            return all(ends.get(r) and ends[r] not in held_ports
+                       and (topology["ports"].get(ends[r]) or {}).get("status") == "free"
+                       for r in (a, b))
+    index = first_free_strand(edge, cable_type, claimed, usable)
     if index is None:
         raise RouteError(f"Trunk '{e['id']}' has no free {cable_type} strand left.")
     if reserved is not None:
         reserved.setdefault(e["id"], set()).add(index)
-    # the strand is physically continuous, so its two port ids are just its
-    # two ends — reported in the direction the route actually travels
-    return {
+    seg = {
         "edge_id": e["id"], "from_rack": a, "to_rack": b, "domain": e["domain"],
         "length_m": e["length_m"], "capacity": e["capacity"],
         "used_before": e["used"], "remaining_before": e["remaining"],
         "strand_index": index,
-        "strand_port_from": strand_port_id(e["id"], cable_type, index, a),
-        "strand_port_to": strand_port_id(e["id"], cable_type, index, b),
     }
+    if phys:
+        ends = phys[str(index)]
+        seg.update(physical=True, strand_port_from=ends[a], strand_port_to=ends[b],
+                   from_location=describe_port(topology, ends[a]),
+                   to_location=describe_port(topology, ends[b]))
+    else:
+        # the strand is physically continuous, so its two port ids are just its
+        # two ends — reported in the direction the route actually travels
+        seg.update(strand_port_from=strand_port_id(e["id"], cable_type, index, a),
+                   strand_port_to=strand_port_id(e["id"], cable_type, index, b))
+    return seg
 
 
 def describe_strand(seg, cable_type):
@@ -443,7 +470,9 @@ def describe_port(topology, port_id):
     """Human-friendly location string, e.g. 'D5-N05-U20-P33 (FIB-PP-01)'."""
     p = topology["ports"][port_id]
     dev = topology["devices"][p["device"]]
-    return f"{p['rack']}-U{dev['u_start']}-P{p['index']} ({dev['name']})"
+    # a device ITA has no U for (or one outside the copy) still gets a label
+    u = dev["u_start"] if dev.get("u_start") is not None else "?"
+    return f"{p['rack']}-U{u}-P{p['index']} ({dev['name']})"
 
 
 # --------------------------------------------------------------------------
@@ -493,37 +522,20 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
             segments.append(_segment(e, a, b, cable_type))
         tightest = min(s["remaining_before"] for s in segments)
         # shortest run wins; on a tie, take the leg with more headroom left
-        candidates.append(((round(total, 1), -tightest), d, hops, segments, total))
+        candidates.append(((round(total, 1), -tightest), d, hops, g))
 
     if not candidates:
         raise RouteError(f"No valid {cable_type} route between {src_rack} and {dst_rack}. "
                          + "Tried: " + "; ".join(attempts))
 
     candidates.sort(key=lambda c: c[0])
-    _, d, hops, segments, total = candidates[0]
-
-    used = {src_port_id, dst_port_id}
-    transit = []
-    for rack_id in hops[1:-1]:
-        pid = _pick_transit_port(topology, rack_id, cable_type, used)
-        used.add(pid)
-        transit.append({"rack": rack_id, "port": pid,
-                        "location": describe_port(topology, pid)})
-
-    return {
-        "status": "ok",
-        "cable_type": cable_type,
-        "domain": d,
-        "src_port": src_port_id,
-        "dst_port": dst_port_id,
-        "src_location": describe_port(topology, src_port_id),
-        "dst_location": describe_port(topology, dst_port_id),
-        "hop_racks": hops,
-        "segments": segments,
-        "transit_points": transit,
-        "total_length_m": round(total, 1),
-        "alternatives_considered": [c[1] for c in candidates],
-    }
+    _, d, hops, g = candidates[0]
+    # one builder for every route, so strands on real panel ports are chosen
+    # and cross-connected the same way here as in resolve_route_options
+    route = _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g)
+    route["domain"] = d
+    route["alternatives_considered"] = [c[1] for c in candidates]
+    return route
 
 
 # --------------------------------------------------------------------------
@@ -539,14 +551,28 @@ def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
     so two alternatives for the same request never quote the same strand or
     the same cross-connect port."""
     segments, total = [], 0.0
+    held = {src_port_id, dst_port_id} | set(reserved_ports or ())
     for a, b in zip(hops, hops[1:]):
         e = g.get_edge_data(a, b)
         total += e["length_m"]
-        segments.append(_segment(e, a, b, cable_type, reserved))
+        seg = _segment(e, a, b, cable_type, reserved, topology, held)
+        if seg.get("physical"):
+            held.update((seg["strand_port_from"], seg["strand_port_to"]))
+        segments.append(seg)
 
-    used = {src_port_id, dst_port_id} | set(reserved_ports or ())
+    used = set(held)
     transit = []
-    for rack_id in hops[1:-1]:
+    for i, rack_id in enumerate(hops[1:-1]):
+        inbound, outbound = segments[i], segments[i + 1]
+        if inbound.get("physical") and outbound.get("physical"):
+            # The fiber coming in lands on one panel port and the next one
+            # leaves from another: the cross-connect is a patch cord between
+            # exactly those two, not any free port in the cabinet.
+            a_in, a_out = inbound["strand_port_to"], outbound["strand_port_from"]
+            transit.append({"rack": rack_id, "port": a_in, "out_port": a_out,
+                            "location": f"{describe_port(topology, a_in)}  <->  "
+                                        f"{describe_port(topology, a_out)}"})
+            continue
         pid = _pick_transit_port(topology, rack_id, cable_type, used)
         used.add(pid)
         transit.append({"rack": rack_id, "port": pid,
@@ -566,8 +592,25 @@ def _route_from_hops(topology, hops, src_port_id, dst_port_id, cable_type, g,
         "hop_racks": hops,
         "segments": segments,
         "transit_points": transit,
+        "patch_ports": _patch_ports(src_port_id, dst_port_id, segments, transit),
         "total_length_m": round(total, 1),
     }
+
+
+def _patch_ports(src_port_id, dst_port_id, segments, transit):
+    """Every port the route takes besides its two ends, once each, in order:
+    each strand's panel port at both ends (front N is rear N, so the strand
+    takes it) and every cross-connect port."""
+    out = []
+    for i, seg in enumerate(segments):
+        for pid in ((seg["strand_port_from"], seg["strand_port_to"])
+                    if seg.get("physical") else ()):
+            out.append(pid)
+        if i < len(transit):
+            out += [transit[i]["port"]] + ([transit[i]["out_port"]]
+                                           if transit[i].get("out_port") else [])
+    seen = {src_port_id, dst_port_id}
+    return [p for p in out if not (p in seen or seen.add(p))]
 
 
 def _next_best_fallback(g, src_rack, dst_rack, exclude_hop_lists):
@@ -673,7 +716,7 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
             if options:
                 break
             raise
-        reserved_ports.update(t["port"] for t in route["transit_points"])
+        reserved_ports.update(route["patch_ports"])
         this_edges = {s["edge_id"] for s in route["segments"]}
         prev_edges = set().union(*seen_edge_sets) if seen_edge_sets else set()
         shared = sorted(this_edges & prev_edges)
@@ -724,9 +767,9 @@ def revalidate_route(topology, route):
     for port_id in (route["src_port"], route["dst_port"]):
         if topology["ports"][port_id]["status"] != "free":
             raise RouteError(f"Port '{port_id}' is no longer free — recompute the route.")
-    for tp in route["transit_points"]:
-        if topology["ports"][tp["port"]]["status"] != "free":
-            raise RouteError(f"Transit port '{tp['port']}' is no longer free — recompute the route.")
+    for pid in route.get("patch_ports") or [t["port"] for t in route["transit_points"]]:
+        if topology["ports"][pid]["status"] != "free":
+            raise RouteError(f"Transit port '{pid}' is no longer free — recompute the route.")
     edges = {e["id"]: e for e in topology["edges"]}
     for seg in route["segments"]:
         edge = edges.get(seg["edge_id"])
@@ -838,6 +881,13 @@ def decommission_route(topology, circuit_id, force=False):
             "a_port": circuit["a_port"], "b_port": circuit["b_port"]}
 
 
+def _on_real_ports(topology, strand):
+    """Was this strand recorded with real panel ports (a map from ITA), rather
+    than the synthetic map's derived '<trunk>#F003@<rack>' ids?"""
+    return strand.get("to_port") in topology["ports"] \
+        and strand.get("from_port") in topology["ports"]
+
+
 def open_end_of(topology, circuit):
     """Where a truncated circuit currently stops: the cross-connect port that
     the remaining trunk still lands on, waiting for a new final leg."""
@@ -891,6 +941,19 @@ def truncate_route(topology, circuit_id):
         raise DecommissionError(
             f"{circuit_id} has no cross-connect to stop at — release it instead.")
     new_end = transit[-1]
+    released = []
+    if _on_real_ports(topology, last):
+        # Real panel ports, listed in path order: the open end is the port the
+        # last KEPT fiber lands on, and every port after it — the cross-connect
+        # out, the dropped fiber's two ends, the cords to the far device — goes.
+        new_end = strands[-2]["to_port"]
+        if new_end not in transit:
+            raise DecommissionError(
+                f"{circuit_id}: {new_end} is not on its recorded path, so "
+                f"nothing was changed.")
+        cut = transit.index(new_end)
+        released = transit[cut + 1:]
+        transit = transit[:cut + 1]
 
     b_port = circuit["b_port"]
     if topology["ports"].get(b_port, {}).get("circuit") != circuit_id:
@@ -902,6 +965,10 @@ def truncate_route(topology, circuit_id):
 
     p = topology["ports"][b_port]
     p["status"], p["circuit"], p["role"], p["peer"] = "free", None, None, None
+    for pid in released:
+        q = topology["ports"].get(pid)
+        if q is not None and q.get("circuit") == circuit_id:
+            q["status"], q["circuit"], q["role"], q["peer"] = "free", None, None, None
 
     end = topology["ports"][new_end]
     end["role"] = "open_end"
@@ -977,10 +1044,12 @@ def extend_route(topology, circuit_id, dst_port_id):
     end["role"] = "transit"
     end["peer"] = None
     circuit["transit_ports"].append(end_id)
-    for tp in tail["transit_points"]:
-        p = topology["ports"][tp["port"]]
+    for pid in tail.get("patch_ports") or [tp["port"] for tp in tail["transit_points"]]:
+        if pid == end_id:
+            continue
+        p = topology["ports"][pid]
         p["status"], p["circuit"], p["role"], p["peer"] = "used", circuit_id, "transit", None
-        circuit["transit_ports"].append(tp["port"])
+        circuit["transit_ports"].append(pid)
 
     dst["status"], dst["circuit"], dst["role"] = "used", circuit_id, "endpoint"
     dst["peer"] = circuit["a_port"]
@@ -1033,8 +1102,9 @@ def commit_route(topology, route, circuit_id):
         p["role"] = "endpoint"
         p["peer"] = endpoints[1] if port_id == endpoints[0] else endpoints[0]
 
-    for tp in route["transit_points"]:
-        p = topology["ports"][tp["port"]]
+    taken = route.get("patch_ports") or [t["port"] for t in route["transit_points"]]
+    for pid in taken:
+        p = topology["ports"][pid]
         p["status"] = "used"
         p["circuit"] = circuit_id
         p["role"] = "transit"
@@ -1053,7 +1123,7 @@ def commit_route(topology, route, circuit_id):
         "segment_ids": [s["edge_id"] for s in route["segments"]],
         "strands": strand_log,
         "intra_rack": bool(route.get("intra_rack")),
-        "transit_ports": [t["port"] for t in route["transit_points"]],
+        "transit_ports": list(taken),
         "total_length_m": route["total_length_m"],
     }
     return topology["circuits"][circuit_id]

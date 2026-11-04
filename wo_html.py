@@ -82,7 +82,8 @@ def _steps(route):
         out.append((
             f"Patch {kind} #{seg['strand_index']} of trunk {seg['edge_id']} "
             f"({seg['from_rack']} → {seg['to_rack']}, ~{seg['length_m']} m)",
-            seg["strand_port_from"], seg["strand_port_to"],
+            seg.get("from_location") or seg["strand_port_from"],
+            seg.get("to_location") or seg["strand_port_to"],
             f"#{seg['strand_index']}"))
         if i < len(route["transit_points"]):
             tp = route["transit_points"][i]
@@ -103,7 +104,8 @@ def render(route, order_id=None, circuit_id=None):
 
     facts = [
         ("Cable type", route["cable_type"].upper()),
-        ("Redundancy leg", f"domain {route['domain']}"),
+        ("Redundancy leg", f"domain {route['domain']}" if route.get("domain")
+         else "not tracked on this map"),
         ("Hops", f"{len(route['segments'])} trunk segment(s)"),
         ("Estimated length", f"~{route['total_length_m']} m"),
         ("Source port", route["src_location"]),
@@ -135,7 +137,7 @@ def render(route, order_id=None, circuit_id=None):
     rows = "".join(
         f"<tr><td class='mono'>{e(s['edge_id'])}</td>"
         f"<td class='mono'>#{s['strand_index']}</td>"
-        f"<td>{s['length_m']} m</td><td>domain {e(s['domain'])}</td>"
+        f"<td>{s['length_m']} m</td><td>{'domain ' + e(s['domain']) if s.get('domain') else '—'}</td>"
         f"<td>{s['used_before']}/{s['capacity']} used &middot; "
         f"{s['remaining_before']} free</td></tr>"
         for s in route["segments"])

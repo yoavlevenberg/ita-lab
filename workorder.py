@@ -23,7 +23,9 @@ def render(route, order_id=None, circuit_id=None):
     L.append(f"  WORK ORDER  {order_id}")
     L.append("=" * 68)
     L.append(f"Cable type    : {route['cable_type'].upper()}")
-    L.append(f"Redundancy    : domain {route['domain']}")
+    # a map from ITA carries no A/B legs (the site may not have them): say so
+    L.append(f"Redundancy    : " + (f"domain {route['domain']}" if route.get("domain")
+                                    else "not tracked on this map"))
     if route.get("created_at"):
         # an executed circuit reprinted later must show when it went in, not now
         L.append(f"Created       : {route['created_at']}")
@@ -65,10 +67,12 @@ def render(route, order_id=None, circuit_id=None):
 
     strand_word = "fiber strand" if route["cable_type"] == "fiber" else "copper pair"
     for i, seg in enumerate(route["segments"]):
+        domain = f", domain {seg['domain']}" if seg.get("domain") else ""
         L.append(f"{n}. Patch {strand_word} #{seg['strand_index']} of trunk '{seg['edge_id']}'  "
-                 f"({seg['from_rack']} -> {seg['to_rack']}, ~{seg['length_m']} m, domain {seg['domain']}).")
-        L.append(f"     near end : {seg['strand_port_from']}")
-        L.append(f"     far  end : {seg['strand_port_to']}")
+                 f"({seg['from_rack']} -> {seg['to_rack']}, ~{seg['length_m']} m{domain}).")
+        # on a map from ITA the strand sits on a real panel port: name the port
+        L.append(f"     near end : {seg.get('from_location') or seg['strand_port_from']}")
+        L.append(f"     far  end : {seg.get('to_location') or seg['strand_port_to']}")
         n += 1
         if i < len(route["transit_points"]):
             tp = route["transit_points"][i]

@@ -239,6 +239,7 @@ def small_site(out):
     c2 = [conn("c2", e("SW", 2), e("SRV2", 1))]
     c3 = [conn("c3", e("SW", 3), e("SRV", 2))]
     free = [conn("f6", e("P1", 6, True), e("P2", 6, True))]
+    free2 = [conn("f8", e("P3", 8, True), e("P4", 8, True))]
     cass = [conn("k1", e("P5", 0, module="B"), e("SW", 4)),
             conn("k2", e("P5", 5, module="Z"), e("SW", 5)),
             conn("k3", e("P5", 5, module="A"), e("SW", 6))]
@@ -253,6 +254,7 @@ def small_site(out):
     path(c2, e("SW", 2), e("SRV2", 1), "SW")
     path(c3, e("SW", 3), e("SRV", 2), "SW")
     path(free, e("P1", 6), e("P2", 6), "P1")
+    path(free2, e("P3", 8), e("P4", 8), "P3")
     for k in cass:
         path([k], k["source"], k["destination"], "P5")
 
@@ -317,8 +319,105 @@ def review_cases():
           not any("GHOST" in d for d in m["devices"]), list(m["devices"]))
 
 
+def engine_cases():
+    """pathengine on a map from ITA: a new route must ride real panel ports —
+    strand N is panel port N at both ends — and cross-connect between exactly
+    the port the incoming fiber lands on and the one the outgoing leaves from.
+    Free on the small site: R1-R2 fiber on P1:6/P2:6, R2-R3 fiber on P3:8/P4:8."""
+    import workorder
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_engine_"))
+    try:
+        small_site(tmp / "s")
+        base = ita_convert.Converter(tmp / "s").convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    pathengine.seed_circuit_seq(base)
+
+    m = copy.deepcopy(base)
+    route = pathengine.resolve_route_options("R1:SW:7", "R3:SRV:3", count=1, topology=m)[0]
+    segs = route["segments"]
+    check("a route on a map from ITA rides the free fibers' own panel ports",
+          route["hop_racks"] == ["R1", "R2", "R3"]
+          and [(s_["strand_port_from"], s_["strand_port_to"]) for s_ in segs]
+          == [("R1:P1:6", "R2:P2:6"), ("R2:P3:8", "R3:P4:8")], segs)
+    tp = route["transit_points"]
+    check("the cross-connect in R2 joins the port the fiber lands on to the one the next leaves from",
+          len(tp) == 1 and tp[0]["port"] == "R2:P2:6" and tp[0]["out_port"] == "R2:P3:8", tp)
+    check("the route lists every port it will take",
+          route["patch_ports"] == ["R1:P1:6", "R2:P2:6", "R2:P3:8", "R3:P4:8"],
+          route["patch_ports"])
+    text = workorder.render(route)
+    check("the Work Order names real panel ports, no made-up strand ids",
+          "R1-U40-P6 (P1)" in text and "R3-U40-P8 (P4)" in text and "#F0" not in text
+          and "domain None" not in text, text)
+
+    # a fiber whose front port has a cord in it is not free, whatever the trunk says
+    m2 = copy.deepcopy(base)
+    m2["ports"]["R2:P2:6"]["status"] = "used"
+    try:
+        pathengine.resolve_route_options("R1:SW:7", "R3:SRV:3", count=1, topology=m2)
+        offered = True
+    except pathengine.RouteError:
+        offered = False
+    check("a strand whose panel port is taken is never offered", not offered, "")
+
+    # a stale plan is caught before it is committed
+    m3 = copy.deepcopy(base)
+    r3 = pathengine.resolve_route_options("R1:SW:7", "R3:SRV:3", count=1, topology=m3)[0]
+    m3["ports"]["R3:P4:8"]["status"] = "used"
+    try:
+        pathengine.revalidate_route(m3, r3)
+        stale_ok = False
+    except pathengine.RouteError:
+        stale_ok = True
+    check("revalidation catches a panel port taken after planning", stale_ok, "")
+
+    # commit, truncate, extend, release: always exactly the right ports
+    cid = pathengine.next_circuit_id(m)
+    pathengine.commit_route(m, route, cid)
+    taken = ["R1:SW:7", "R1:P1:6", "R2:P2:6", "R2:P3:8", "R3:P4:8", "R3:SRV:3"]
+    check("commit takes both ends and every panel port on the way",
+          all(m["ports"][p]["circuit"] == cid for p in taken), {p: m["ports"][p] for p in taken})
+    t = pathengine.truncate_route(m, cid)
+    check("truncate: the open end is where the kept fiber lands; the rest is freed",
+          t["open_end"] == "R2:P2:6"
+          and all(m["ports"][p]["status"] == "free" for p in ("R2:P3:8", "R3:P4:8", "R3:SRV:3"))
+          and m["ports"]["R1:P1:6"]["circuit"] == cid, (t, {p: m["ports"][p]["status"]
+                                                             for p in taken}))
+    pathengine.extend_route(m, cid, "R3:SRV:4")
+    check("extend from the open end takes the new tail's panel ports",
+          all(m["ports"][p]["circuit"] == cid
+              for p in ("R2:P2:6", "R2:P3:8", "R3:P4:8", "R3:SRV:4")),
+          {p: m["ports"][p]["status"] for p in ("R2:P3:8", "R3:P4:8", "R3:SRV:4")})
+    pathengine.decommission_route(m, cid)
+    check("release gives every port and strand back",
+          all(m["ports"][p]["status"] == "free"
+              for p in taken + ["R3:SRV:4"]) and all(
+              str(i) not in (e_["cable_types"]["fiber"]["strands"])
+              for e_ in m["edges"] for i in (2,)), "")
+    check("...leaving the map exactly as it was", m["ports"] == base["ports"]
+          and m["edges"] == base["edges"], "")
+
+    # an EXISTING circuit read back from ITA prints the same way
+    import server
+    keep = server.TOPOLOGY
+    server.TOPOLOGY = base
+    try:
+        cid = next(c for c, v in base["circuits"].items() if v["a_port"] in ("R1:SW:1", "R3:SRV:1"))
+        old = server._route_of_circuit(cid)
+        text = workorder.render(old, circuit_id=cid)
+    finally:
+        server.TOPOLOGY = keep
+    check("an existing ITA circuit's Work Order: real ports, one cross-connect in R2",
+          [t_["location"] for t_ in old["transit_points"]]
+          == ["R2-U40-P5 (P2)  <->  R2-U39-P7 (P3)"]
+          and "near end : R1-U40-P5 (P1)" in text and "far  end : R3-U40-P7 (P4)" in text,
+          text)
+
+
 def main():
     review_cases()
+    engine_cases()
     t = pathengine.load_topology()
     tmp = Path(tempfile.mkdtemp(prefix="ita_convert_test_"))
     try:

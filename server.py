@@ -229,6 +229,31 @@ def _resolve_execute_route(req):
     return route, None
 
 
+def _transit_points(circuit, physical):
+    """One cross-connect per rack in the middle of the path, as a Work Order
+    lists them (after hop i comes cross-connect i).
+
+    The synthetic map records one transit port per middle rack. A circuit on
+    real panel ports records every port it takes — both ends of each fiber,
+    the patch cords — so there they are grouped by rack: what a technician
+    finds in that cabinet is a cord between those ports."""
+    ports = TOPOLOGY["ports"]
+    tps = [p for p in circuit.get("transit_ports", []) if p in ports]
+    if not physical:
+        return [{"port": p, "rack": ports[p]["rack"],
+                 "location": pathengine.describe_port(TOPOLOGY, p)} for p in tps]
+    out = []
+    for rack in circuit["hop_racks"][1:-1]:
+        here = [p for p in tps if ports[p]["rack"] == rack]
+        if not here:
+            continue
+        out.append({"rack": rack, "port": here[0],
+                    **({"out_port": here[-1]} if len(here) > 1 else {}),
+                    "location": "  <->  ".join(pathengine.describe_port(TOPOLOGY, p)
+                                               for p in here)})
+    return out
+
+
 def _route_of_circuit(circuit_id):
     """Rebuild a route-shaped dict from a committed circuit, so an already
     installed connection can be reprinted. A circuit records what was done;
@@ -240,15 +265,24 @@ def _route_of_circuit(circuit_id):
     ct_name = circuit["cable_type"]
 
     segments = []
+    ports = TOPOLOGY["ports"]
+    physical = False
     for s in circuit.get("strands", []):
         edge = edges.get(s["edge_id"])
         if not edge:
             continue
         ct = edge["cable_types"][ct_name]
         used = len(ct.get("strands") or {})
+        real = s["from_port"] in ports and s["to_port"] in ports
+        physical = physical or real
         segments.append({
+            **({"physical": True, "from_rack": ports[s["from_port"]]["rack"],
+                "to_rack": ports[s["to_port"]]["rack"],
+                "from_location": pathengine.describe_port(TOPOLOGY, s["from_port"]),
+                "to_location": pathengine.describe_port(TOPOLOGY, s["to_port"])}
+               if real else {}),
             "edge_id": s["edge_id"], "domain": edge["domain"],
-            "from_rack": edge["from"], "to_rack": edge["to"],
+            **({} if real else {"from_rack": edge["from"], "to_rack": edge["to"]}),
             "length_m": edge["length_m"], "capacity": ct["capacity"],
             # this circuit is already in place, so the honest figure is the
             # occupancy as it stands now, not a "before" we no longer know
@@ -269,9 +303,7 @@ def _route_of_circuit(circuit_id):
                          else "— אין קצה, המסלול קטום"),
         "partial": bool(circuit.get("partial")),
         "hop_racks": circuit["hop_racks"], "segments": segments,
-        "transit_points": [{"port": p, "rack": TOPOLOGY["ports"][p]["rack"],
-                            "location": pathengine.describe_port(TOPOLOGY, p)}
-                           for p in circuit.get("transit_ports", [])],
+        "transit_points": _transit_points(circuit, physical),
         "total_length_m": circuit["total_length_m"],
         # a truncated connection has to be able to say where it stops, or the
         # page can only report that something is missing
