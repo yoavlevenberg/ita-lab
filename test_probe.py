@@ -52,7 +52,7 @@ TREE = {
 PATHS = [{"portName": SECRET, "connections": [{"target": SECRET, "cableType": "FIBER"}]}]
 
 
-def make_server(state, login="json"):
+def make_server(state, login="json", docs="open"):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -71,6 +71,14 @@ def make_server(state, login="json"):
         def do_GET(self):
             state["methods"].append("GET")
             path, _, query = self.path.partition("?")
+            if docs == "login" and path.startswith("/api/current/docs/"):
+                self.send_response(302)
+                self.send_header("Location", "/login?next=docs")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path == "/login":
+                return self._send(200, b"<html>sign in</html>", "text/html")
             if path == "/api/current/docs/index.html":
                 return self._send(200, b'<script>url: "./final.json"</script>', "text/html")
             if path == "/api/current/docs/final.json":
@@ -117,12 +125,12 @@ class Args:
         self.server, self.user, self.asset, self.insecure = server, "u", asset, False
 
 
-def run_probe(login="json", asset=None, password="p"):
+def run_probe(login="json", asset=None, password="p", docs="open", suffix=""):
     state = {"methods": [], "asked": [], "include": []}
-    srv = make_server(state, login)
+    srv = make_server(state, login, docs)
     lines = []
     try:
-        code = ita_probe.run(Args(f"http://127.0.0.1:{srv.server_port}", asset),
+        code = ita_probe.run(Args(f"http://127.0.0.1:{srv.server_port}{suffix}", asset),
                              ask_password=lambda _: password, log=lines.append)
     finally:
         srv.shutdown()
@@ -156,6 +164,26 @@ def main():
     code, out, state = run_probe(password="wrong")
     check("a wrong password fails plainly, before any asset is touched",
           code == 1 and "LOGIN  : FAILED" in out and not state["asked"], out)
+
+    code, out, state = run_probe(suffix="/api/current/docs/index.html#/assets")
+    check("a Swagger URL pasted whole as --server still works",
+          code == 0 and "SPEC   : ok" in out, out)
+
+    code, out, state = run_probe(docs="login")
+    check("docs behind a login page: says where each try went, no host",
+          code == 2 and "redirected to /login" in out and "127.0.0.1" not in out
+          and "TRY    : http /api/current/docs/final.json" in out, out)
+
+    lines = []
+    code = ita_probe.run(Args("http://127.0.0.1:9"), ask_password=lambda _: "p",
+                         log=lines.append)
+    out = "\n".join(lines)
+    check("an address nobody answers on: says so instead of 'not found' alone",
+          code == 2 and "connection refused" in out and "127.0.0.1" not in out, out)
+
+    check("the server address is cut down to scheme and host",
+          ita_probe._root("10.1.2.3:8443/api/current/docs/index.html") == "https://10.1.2.3:8443"
+          and ita_probe._root("http://ita/x/y") == "http://ita", ita_probe._root("http://ita/x/y"))
 
     # the guard itself: a write cannot leave, whoever asks for it
     p = ita_probe.Probe("http://127.0.0.1:9")

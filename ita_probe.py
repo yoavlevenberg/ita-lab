@@ -8,6 +8,7 @@ reports only the SHAPE of it, never the data.
     python ita_probe.py --server <address>
     python ita_probe.py --server <address> --asset <uuid>     skip the search
     python ita_probe.py --server <address> --insecure         self-signed TLS
+    python ita_probe.py --server <address> --proxy            via Windows' proxy
 
 WHY THIS EXISTS
 ---------------
@@ -41,6 +42,7 @@ import argparse
 import getpass
 import json
 import re
+import socket
 import ssl
 import sys
 import urllib.error
@@ -62,13 +64,21 @@ class Refused(Exception):
 
 
 class Probe:
-    def __init__(self, root, insecure=False, log=print):
+    def __init__(self, root, insecure=False, log=print, proxy=False):
         self.root = root.rstrip("/")
-        self.ctx = ssl._create_unverified_context() if insecure else None
+        ctx = ssl._create_unverified_context() if insecure else None
+        # An internal server is reached directly; Windows' proxy setting is
+        # for the outside world and may not know the way in. --proxy flips it.
+        handlers = [urllib.request.HTTPSHandler(context=ctx)]
+        if not proxy:
+            handlers.append(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(*handlers)
         self.log = log
         self.auth_urls = set()      # the only URLs a POST may go to
         self.headers = {"Accept": "application/json"}
         self.gets = 0
+        self.last = ""              # one safe line on the last answer
+        self.attempts = []          # what each spec URL answered, for the report
 
     # -- the one door every request goes through ----------------------------
     def _request(self, method, url, body=None, headers=None):
@@ -80,9 +90,11 @@ class Probe:
         if method == "GET":
             self.gets += 1
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT, context=self.ctx) as r:
+            with self.opener.open(req, timeout=TIMEOUT) as r:
+                self.last = _meta(url, r.status, r.headers, r.geturl())
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
+            self.last = _meta(url, e.code, e.headers, url)
             return e.code, e.read()
 
     def get(self, path_or_url):
@@ -93,21 +105,35 @@ class Probe:
     def fetch_spec(self):
         """The Swagger page links its spec (final.json); read the link out of
         the page rather than guess it, then fall back to the likely places."""
-        tried = []
-        st, page = self.get("/api/current/docs/index.html")
-        if st == 200:
-            for m in re.findall(r"""["']([^"'\s]+\.json)["']""", page.decode("utf-8", "replace")):
-                tried.append(urllib.parse.urljoin(self.root + "/api/current/docs/", m))
+        tried = [self.root + "/api/current/docs/index.html"]
         tried += [self.root + p for p in ("/api/current/docs/final.json",
                                          "/api/current/final.json",
                                          "/api/current/swagger.json")]
-        for url in dict.fromkeys(tried):
-            st, raw = self.get(url)
+        seen = set()
+        while tried:
+            url = tried.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                st, raw = self.get(url)
+            except (urllib.error.URLError, OSError) as e:
+                self.attempts.append(f"{_path(url)} -> {_why(e)}")
+                if _is_cert_error(e) or _is_timeout(e):
+                    raise           # every other URL on this host would do the same
+                continue
+            note = self.last
+            if st == 200 and url.endswith(".html"):
+                links = re.findall(r"""["']([^"'\s]+\.json)["']""", raw.decode("utf-8", "replace"))
+                tried[:0] = [urllib.parse.urljoin(url, m) for m in links]
+                self.attempts.append(f"{_path(url)} -> {note}, {len(links)} .json links")
+                continue
             if st == 200:
                 try:
                     return json.loads(raw.decode("utf-8")), url
                 except ValueError:
-                    continue
+                    note += ", not JSON"
+            self.attempts.append(f"{_path(url)} -> {note}")
         return None, None
 
     # -- 2. logging in -------------------------------------------------------
@@ -303,8 +329,62 @@ def _spec_summary(spec):
 
 
 def _root(server):
-    s = server.strip().rstrip("/")
-    return s if "://" in s else "https://" + s
+    """Scheme and host only: a pasted Swagger URL would otherwise keep its
+    path, and every request would land under it."""
+    s = server.strip()
+    u = urllib.parse.urlsplit(s if "://" in s else "https://" + s)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def _path(url):
+    """A URL without its host — the host is the one internal detail here."""
+    u = urllib.parse.urlsplit(url)
+    return u.path + ("?" + u.query if u.query else "")
+
+
+def _meta(url, status, headers, final_url):
+    """One line on what came back, safe to type out: the code, the content
+    type, the login scheme asked for, and where a redirect went (path only)."""
+    out = f"HTTP {status}"
+    ctype = (headers.get("Content-Type") or "").split(";")[0].strip()
+    if ctype:
+        out += f", {ctype}"
+    auth = headers.get("WWW-Authenticate")
+    if auth:
+        out += f", wants {auth.split()[0]} login"
+    if final_url and _path(final_url) != _path(url):
+        out += f", redirected to {_path(final_url)}"
+    return out
+
+
+def _reason(e):
+    return getattr(e, "reason", e)
+
+
+def _is_cert_error(e):
+    return "CERTIFICATE_VERIFY_FAILED" in str(_reason(e))
+
+
+def _is_timeout(e):
+    return isinstance(e, socket.timeout) or isinstance(_reason(e), socket.timeout)
+
+
+def _why(e):
+    """What went wrong, without the address in it."""
+    r = _reason(e)
+    if _is_cert_error(e):
+        return "certificate not trusted"
+    if isinstance(r, ssl.SSLError):
+        return "TLS failed (" + str(getattr(r, "reason", None) or type(r).__name__) + ")"
+    if _is_timeout(e):
+        return "no answer (timeout)"
+    if isinstance(r, socket.gaierror):
+        return "name not found (DNS)"
+    if isinstance(r, ConnectionRefusedError):
+        return "connection refused"
+    if getattr(r, "winerror", None):
+        return f"network error (WinError {r.winerror})"
+    return type(r).__name__
 
 
 def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
@@ -315,32 +395,35 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         log(line)
         report.append(line)
 
-    roots = [_root(args.server)]
+    root = _root(args.server)
+    roots = [root]
     if "://" not in args.server:
-        roots.append("http://" + args.server.strip().rstrip("/"))
+        roots.append("http://" + root.split("://", 1)[1])
 
     probe = spec = spec_url = None
+    cert_error = False
     for root in roots:
-        p = Probe(root, insecure=args.insecure, log=log)
+        scheme = root.split("://", 1)[0]
+        p = Probe(root, insecure=args.insecure, log=log, proxy=getattr(args, "proxy", False))
         try:
             s, u = p.fetch_spec()
-        except ssl.SSLError:
-            say("TLS: the server's certificate is not trusted here.")
-            say("     run again with --insecure (it is an internal server)")
-            return 2
         except (urllib.error.URLError, OSError) as e:
-            reason = getattr(e, "reason", e)
-            if isinstance(reason, ssl.SSLError):
-                say("TLS: the server's certificate is not trusted here.")
-                say("     run again with --insecure (it is an internal server)")
-                return 2
-            continue
+            cert_error = cert_error or _is_cert_error(e)
+            s = None
+        for a in p.attempts:
+            say(f"TRY    : {scheme} {a}")
         if s:
             probe, spec, spec_url = p, s, u
             break
     if not spec:
-        say("SPEC   : not found — is the address right? Can Chrome open")
-        say("         <address>/api/current/docs/index.html from this PC?")
+        if cert_error:
+            say("TLS    : the server's certificate is not trusted here.")
+            say("         run again with --insecure (it is an internal server)")
+        else:
+            say("SPEC   : not found. Type out the TRY lines above, and the")
+            say("         Swagger page's address from Chrome with the server")
+            say("         name replaced by X.")
+        _save(report)
         return 2
 
     (OUT / "final.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
@@ -412,6 +495,8 @@ def main():
     ap.add_argument("--asset", help="a device's uuid, to skip the search")
     ap.add_argument("--insecure", action="store_true",
                     help="accept the server's self-signed certificate")
+    ap.add_argument("--proxy", action="store_true",
+                    help="go through Windows' proxy setting (default: direct)")
     sys.exit(run(ap.parse_args()))
 
 
