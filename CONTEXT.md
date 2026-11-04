@@ -316,6 +316,24 @@ docx. `make_transfer.py` אורז את הפרויקט לקובץ אקסל **רג
   הסכמות. עוד לא ידוע: האם הנתיב מקבל Basic, או רק את ה-session של הדפדפן.
   החיבורים מתועדים ב-ITA ברובם (לפי המשתמש), וניתן לייצא את טבלת החיבורים של רכיב לאקסל.
   **עדיפות המשתמש לשלב הראשון: תכנון חיבורים** (לא מיקום ציוד).
+- **מבנה התשובה של network-paths** (שמות שדות שהמשתמש הקליד, 2026-11-04; `readPort` אצלו = `rearPort`):
+  ```
+  portConfigurations[]:
+    portConfiguration {id, assetId, name, connectorType, portCount, portStart,
+                       speed, speedRate, portsUsed}
+    connectionsAndPaths[]:
+      connection  {id, source: END, destination: END, cableType: CABLE}
+      networkPath {connections[]: {id, source: END, destination: END, cableType: CABLE},
+                   beginItem: END, endItem: END}
+  END   = {networkModule, portNumber, rearPort, connectorType, ipAddress, description,
+           assetId, assetName, assetType, assetPath[]: {id, name, permission, elementType}}
+  CABLE = {name, length, speed, speedRate, color, startConnector, endConnector,
+           isFanOut, fanOutOutletsCount, fanOutOutletNumber}
+  ```
+  משמעות: `portConfiguration` = קבוצת פורטים (סוג מחבר + כמות) → fiber_ports/copper_ports.
+  `connection` = הכבל הישיר; `networkPath` = **כל המסלול** דרך הפאנלים (begin/end = הקצוות).
+  `rearPort` = צד אחורי של פאנל (טראנק). `isFanOut` = MPO שמתפצל. `assetPath` = שרשרת מיקום
+  (8 רמות בדוגמה; `elementType` אומר מה כל רמה). קריאה אחת לכל רכיב.
 
 ## סטטוס נכון ל-2026-11-03
 
