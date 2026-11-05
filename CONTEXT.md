@@ -4,6 +4,8 @@
 מילות מפתח: ITA, ITA Lab, routing engine, path engine, data center, MDA,
 strands, bulk planning, zones, pathengine.py, bulkplan.py
 
+**התוכנית קדימה — שלבים, הנחות שמחכות לאימות, עץ החלטות ליום הריצה, מקרי קצה: `PLAN.md`.**
+
 ## מה זה
 
 אב-טיפוס עצמאי (בלי חיבור אמיתי ל-ITA) שמחליף תכנון ידני של חיבורי סיב/נחושת
