@@ -305,38 +305,78 @@ def structure(manifest):
 _ID_LIKE = re.compile(r"^[0-9a-f-]{8,}$|^\d+$", re.I)
 
 
+def _field_counts(folder, manifest, kind):
+    """Field names the records of one kind carry, counted — names only (see
+    field_names). Returns (records read, Counter of names)."""
+    ids = [a for a, t in manifest["tree"].items() if str(t["type"]).lower() == kind][:20]
+    seen = Counter()
+    for aid in ids:
+        try:
+            rec = json.loads((folder / "assets" / f"{_safe(aid)}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+
+        def walk(obj, prefix, depth):
+            for k, v in obj.items():
+                if _ID_LIKE.match(str(k)):
+                    k = "<id>"
+                name = f"{prefix}{k}"
+                if isinstance(v, dict) and depth < 2:
+                    walk(v, name + ".", depth + 1)
+                else:
+                    tag = ("#" if isinstance(v, (int, float)) and not isinstance(v, bool)
+                           else "[]" if isinstance(v, list) else "")
+                    seen[name + tag] += 1
+        walk(rec if isinstance(rec, dict) else {}, "", 0)
+    return len(ids), seen
+
+
 def field_names(folder, manifest, kinds=("rack", "server-room", "room", "row")):
     """Which fields the records of racks and rooms carry — NAMES only, never a
     value. ITA draws each site as a floor plan with the cabinets placed on it
     (2026-11-05, from the user), so a rack record may hold its position; this
     is how to find the field without showing a single name or number from the
     site. A key that looks like an id is not printed."""
-    tree = manifest["tree"]
     lines = []
     for kind in kinds:
-        ids = [a for a, t in tree.items() if str(t["type"]).lower() == kind][:20]
-        seen = Counter()
-        for aid in ids:
-            try:
-                rec = json.loads((folder / "assets" / f"{_safe(aid)}.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-
-            def walk(obj, prefix, depth):
-                for k, v in obj.items():
-                    if _ID_LIKE.match(str(k)):
-                        k = "<id>"
-                    name = f"{prefix}{k}"
-                    if isinstance(v, dict) and depth < 2:
-                        walk(v, name + ".", depth + 1)
-                    else:
-                        tag = ("#" if isinstance(v, (int, float)) and not isinstance(v, bool)
-                               else "[]" if isinstance(v, list) else "")
-                        seen[name + tag] += 1
-            walk(rec if isinstance(rec, dict) else {}, "", 0)
+        n, seen = _field_counts(folder, manifest, kind)
         if seen:
-            lines.append(f"{kind} ({len(ids)} read): " + ", ".join(sorted(seen)))
+            lines.append(f"{kind} ({n} read): " + ", ".join(sorted(seen)))
     return lines
+
+
+# the rack fields the next step needs: its place on the floor plan, its height
+_POS = re.compile(r"topleft|placement|coord|floor|(^|\.)(pos(ition)?)?[xy]#?$", re.I)
+_HIGH = re.compile(r"height|unit|(^|\.)u\w{0,6}#?$", re.I)
+
+
+def block(lines):
+    """The few lines to type back by hand. The full screen above stays, for
+    when something needs a closer look."""
+    bar = "-" * 44
+    return [bar, "TYPE BACK ONLY THESE LINES:"] + list(lines) + [bar]
+
+
+def type_back(m, folder, refused=None):
+    """A sync in five lines, counts and field names only."""
+    net = "ok" if m["network_paths"] else "refused" if refused else "missing"
+    http = " ".join(f"{k}x{v}" for k, v in sorted(m["network_http"].items())) or "none"
+    probs = m["problems"]
+    racks = structure(m)
+    _, rack = _field_counts(folder, m, "rack")
+    pos = [f for f in sorted(rack) if _POS.search(f)][:6]
+    high = [f for f in sorted(rack) if _HIGH.search(f)][:4]
+    return [
+        f"S1 done={'yes' if m['complete'] else 'NO'} net={net} "
+        f"assets={m['assets']} devices={m['devices']}",
+        f"S2 ports={m['port_configurations']} conn={m['connections']} "
+        f"noNet={len(m['network_missing'])} http={http}",
+        f"S3 problems={sum(probs.values())}"
+        + ("" if not probs else " - " + "; ".join(f"{p} x{n}" for p, n in list(probs.items())[:2])),
+        "S4 " + (racks[0] if racks else "no racks"),
+        "S5 rack pos=" + (",".join(pos) or "none") + " height=" + (",".join(high) or "none")
+        + " (#=number)",
+    ]
 
 
 def _safe(aid):
@@ -369,8 +409,17 @@ def check_login(sync, say):
         say(f"PATH   : {n}")
     if sync.network_url:
         say("NETWORK: ok — network-paths accepts this login too")
-    if any("certificate not trusted" in n for n in notes + net_notes):
+    tls = any("certificate not trusted" in n for n in notes + net_notes)
+    if tls:
         say("TLS    : the server's certificate is not trusted here — run again with --insecure")
+
+    def state(ok, said):
+        return ("ok" if ok else "refused" if any(re.search(r"-> HTTP 40[13]\b", n) for n in said)
+                else "none")
+    say("")
+    for line in block([f"C1 api={state(sync.api, notes)} net={state(sync.network_url, net_notes)} "
+                       f"tls={'untrusted' if tls else 'ok'}"]):
+        say(line)
     return 0 if sync.api and sync.network_url else 1
 
 
@@ -452,7 +501,9 @@ def run(args, ask_password=getpass.getpass, ask_user=input, log=print):
         say(f"FIELDS : {line}")
     say("")
     say(f"Saved under ita_cache/ ({m['assets']} asset files). It stays on this machine.")
-    say("Type out the lines above.")
+    say("")
+    for line in block(type_back(m, folder, refused)):
+        say(line)
     return 0 if not m["problems"] else 1
 
 

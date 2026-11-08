@@ -55,6 +55,17 @@ TREE = {a["id"]: a for a in [
 # and a block keyed by ids, whose keys must not reach the screen either
 TREE["rack1"]["floorPlacement"] = {"x": 12.5, "y": 3, "rotation": 90}
 TREE["rack1"]["links"] = {"3f2a9c1e-77aa-4b1c-9d00-aa11bb22cc33": SECRET}
+TREE["rack1"]["rackUnits"] = 42
+
+
+def typed_back(out):
+    """The lines between the bars: what the user types back by hand."""
+    lines = out.splitlines()
+    try:
+        i = lines.index("TYPE BACK ONLY THESE LINES:")
+    except ValueError:
+        return []
+    return lines[i + 1:next(j for j in range(i + 1, len(lines)) if set(lines[j]) == {"-"})]
 
 
 def end(aid, port):
@@ -189,6 +200,17 @@ def main():
         check("no name, serial, address or id reaches the screen",
               SECRET not in out and "R-ONE" not in out and "rack1" not in out
               and "127.0.0.1" not in out, out)
+        tb = typed_back(out)
+        check("the sync ends with five short lines to type back",
+              len(tb) == 5 and all(len(l) <= 120 for l in tb)
+              and tb[0] == f"S1 done=yes net=ok assets={len(TREE)} devices=4"
+              and tb[1] == "S2 ports=4 conn=4 noNet=0 http=200x4"
+              and tb[2] == "S3 problems=0"
+              and tb[3].startswith("S4 ") and "> rack" in tb[3], tb or out)
+        check("...naming the rack's floor-plan and height fields, if it has them",
+              len(tb) == 5
+              and "pos=floorPlacement.rotation#,floorPlacement.x#,floorPlacement.y#" in tb[4]
+              and "height=rackUnits#" in tb[4] and "42" not in tb[4], tb)
         check("nothing but GET was sent", set(state["methods"]) == {"GET"}, state["methods"])
         m = json.loads((site / "manifest.json").read_text(encoding="utf-8"))
         check("the manifest records the tree for the next step",
@@ -216,6 +238,10 @@ def main():
     shutil.rmtree(cache, ignore_errors=True)
     check("network-paths refusing the login: said plainly, assets still saved",
           code == 1 and "refuses this login" in out and f"ASSETS : {len(TREE)}" in out, out)
+    tb = typed_back(out)
+    check("...and the lines to type back say it first",
+          len(tb) == 5 and tb[0].startswith("S1 done=NO net=refused")
+          and tb[2] != "S3 problems=0", tb or out)
 
     code, out, state, cache = run_sync(id="row1")
     shutil.rmtree(cache, ignore_errors=True)
@@ -297,17 +323,26 @@ def main():
           code == 0 and "LOGIN  : ok" in out and "NETWORK: ok" in out
           and not state["assets"] and not state["network"], out)
 
+    check("--check: one line to type back",
+          typed_back(out) == ["C1 api=ok net=ok tls=ok"], out)
+
     code, out, state, cache = run_sync(check=True, password="wrong")
     shutil.rmtree(cache, ignore_errors=True)
     check("--check: a refused login is named as such, with what to try next",
           code == 1 and "refused this user name or password" in out
           and "DOMAIN\\name" in out, out)
 
+    check("--check: ...a refused login in that one line too",
+          typed_back(out) == ["C1 api=refused net=refused tls=ok"], out)
+
     code, out, state, cache = run_sync(check=True, network="deny")
     shutil.rmtree(cache, ignore_errors=True)
     check("--check: assets in but network-paths refusing shows as exactly that",
           code == 1 and "LOGIN  : ok" in out and "NETWORK: ok" not in out
           and "network-paths -> HTTP 401" in out, out)
+
+    check("--check: ...and network-paths alone refusing",
+          typed_back(out) == ["C1 api=ok net=refused tls=ok"], out)
 
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} sync checks passed")
     raise SystemExit(0 if all(RESULTS) else 1)

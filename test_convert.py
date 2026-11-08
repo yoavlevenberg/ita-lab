@@ -322,6 +322,14 @@ def review_cases():
           "SHAPE  : trunk links by connector: LC-LC=4" in lines
           and "SHAPE  : panel ports by connector: LC=144" in lines
           and "SHAPE  : fan-out cables by outlets: none" in lines, lines)
+    tb = ita_convert.type_back(m, conv.notes, conv.shape)
+    check("the conversion ends with four short lines to type back",
+          len(tb) == 4 and all(len(l) <= 120 for l in tb)
+          and tb[0].startswith("C1 racks=") and f"circuits={len(m['circuits'])}" in tb[0]
+          and tb[2] == "C3 panel=LC:144 trunk=LC-LC:4 fanout=none"
+          and tb[3].startswith("C4 notes: ") and "direct=1" in tb[3], tb)
+    check("...in counts and short words: no name from the site",
+          not any(d.split(":")[-1] in " ".join(tb) for d in m["devices"] if len(d) > 6), tb)
     mpo_cases()
 
 
@@ -357,6 +365,9 @@ def mpo_cases():
                   for l in lines), lines)
     check("...and the connector shows as a generic word, not the text ITA holds",
           not any("MPO-12 (MTP)" in l for l in lines), lines)
+    tb = ita_convert.type_back(m, conv.notes, conv.shape)
+    check("...and the typed-back lines carry it too",
+          "MPO-MPO:1" in tb[2] and "fanout=12:1" in tb[2] and "mpo=1" in tb[3], tb)
 
 
 def engine_cases():

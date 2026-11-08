@@ -508,11 +508,7 @@ def summary(topology, notes, shape=None):
         f"CIRCUIT: {len(topology['circuits'])} existing, "
         f"{sum(len(e['cable_types'][m]['strands']) for e in edges for m in e['cable_types'])} strands in use",
     ]
-    no_u = sum(1 for d in topology["devices"].values()
-               if d["u_start"] is None and not d.get("external"))
-    if no_u:
-        notes = Counter(notes)
-        notes["devices with no U position"] += no_u
+    notes = _all_notes(topology, notes)
     for k, v in sorted(notes.items()):
         lines.append(f"NOTE   : {k}: {v}")
     for k in ("panel ports by connector", "trunk links by connector",
@@ -521,6 +517,68 @@ def summary(topology, notes, shape=None):
         lines.append(f"SHAPE  : {k}: " + (", ".join(f"{t}={n}" for t, n in got.most_common(8))
                                            if got else "none"))
     return lines
+
+
+def _all_notes(topology, notes):
+    notes = Counter(notes)
+    no_u = sum(1 for d in topology["devices"].values()
+               if d["u_start"] is None and not d.get("external"))
+    if no_u:
+        notes["devices with no U position"] += no_u
+    return notes
+
+
+# a short word for each NOTE, so the lines typed back stay short
+SHORT = (("THE COPY IS INCOMPLETE", "INCOMPLETE"),
+         ("devices whose ports/connections were not copied", "noNet"),
+         ("racks sharing a name", "dupRack"),
+         ("devices not in a rack", "noRack"),
+         ("devices sharing a name", "dupDev"),
+         ("ports with an unknown connector", "unkConn"),
+         ("connection ends on an unknown cassette", "unkCassette"),
+         ("racks outside the copy", "extRack"),
+         ("devices outside the copy", "extDev"),
+         ("rear-to-rear links inside one rack", "rearRear"),
+         ("MPO/MTP trunk links", "mpo"),
+         ("paths whose cables do not chain", "noChain"),
+         ("direct cables between racks", "direct"),
+         ("ports on two different paths", "twoPaths"),
+         ("devices with no U position", "noU"))
+
+
+def _short(note):
+    return next((w for start, w in SHORT if note.startswith(start)), note)
+
+
+def type_back(topology, notes, shape=None):
+    """The conversion in four lines, counts and connector words only."""
+    racks = topology["racks"].values()
+    edges = topology["edges"]
+    shape = shape or {}
+
+    def cap(m):
+        return sum(e["cable_types"][m]["capacity"] for e in edges if m in e["cable_types"])
+
+    def kinds(k):
+        got = shape.get(k)
+        return ",".join(f"{t}:{n}" for t, n in got.most_common(6)) if got else "none"
+    notes = _all_notes(topology, notes)
+    return [
+        f"C1 racks={sum(1 for r in racks if not r.get('external'))} "
+        f"devices={len(topology['devices'])} ports={len(topology['ports'])} "
+        f"circuits={len(topology['circuits'])}",
+        f"C2 trunks={len(edges)} fiber={cap('fiber')} copper={cap('copper')} used="
+        + str(sum(len(e["cable_types"][m]["strands"]) for e in edges for m in e["cable_types"])),
+        f"C3 panel={kinds('panel ports by connector')} trunk={kinds('trunk links by connector')} "
+        f"fanout={kinds('fan-out cables by outlets')}",
+        "C4 notes: " + (" ".join(f"{_short(k)}={v}" for k, v in sorted(notes.items())) or "none"),
+    ]
+
+
+def block(lines):
+    """The few lines to type back by hand; the full screen above stays."""
+    bar = "-" * 44
+    return [bar, "TYPE BACK ONLY THESE LINES:"] + list(lines) + [bar]
 
 
 def main():
@@ -536,7 +594,9 @@ def main():
     out.write_text(json.dumps(topology, ensure_ascii=False), encoding="utf-8")
     for line in summary(topology, conv.notes, conv.shape):
         print(line)
-    print(f"\nWritten next to the copy ({out.name}). It stays on this machine.")
+    print(f"\nWritten next to the copy ({out.name}). It stays on this machine.\n")
+    for line in block(type_back(topology, conv.notes, conv.shape)):
+        print(line)
 
 
 if __name__ == "__main__":
