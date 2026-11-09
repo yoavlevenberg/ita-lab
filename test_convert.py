@@ -322,6 +322,27 @@ def review_cases():
           "SHAPE  : trunk links by connector: LC-LC=4" in lines
           and "SHAPE  : panel ports by connector: LC=144" in lines
           and "SHAPE  : fan-out cables by outlets: none" in lines, lines)
+    ex = ita_convert.explain(conv, 39)
+    p5 = ex[:ex.index(next(l for l in ex[1:] if l.startswith("E0")))]
+    check("--explain-u: one panel, cassette by cassette, ITA's ports beside the map's",
+          p5[0].startswith("E0 U39 type=patch-panel net=yes cassettes=2 ports=49")
+          and "ita_used=?" in p5[0] and "extra=6" in p5[0]
+          and p5[1] == "E1 match: extra=1 id=2"
+          and "K1 A start=1 n=24 LC used=? | front 5 | rear - | map 5" in p5
+          and "K2 B start=0 n=24 LC used=? | front 0 | rear - | map 0" in p5
+          and any(l.startswith("X3 M3 ") and l.endswith("| front 5 | rear - | map 5") for l in p5),
+          ex)
+    p1 = [l for l in ita_convert.explain(conv, 40) if l.startswith("K1")]
+    check("--explain-u: a rear-only fiber shows in ITA's rear list, not in the map's taken",
+          "K1 m start=1 n=24 LC used=? | front 5 | rear 5-6 | map 5" in p1, p1)
+    check("--explain-u: field names and numbers only, never a name from the site",
+          not any(s in " ".join(ex) for s in ("SNP", "R1:", "P5-A")), ex)
+    check("--explain-u: a U nothing covers says so",
+          ita_convert.explain(conv, 7)[0].startswith("E0 U7: no copied device"), "")
+    check("a rack-mounted PDU is a device, not a rack (first real run, 2026-11-09)",
+          not ita_convert.RACK.search("rack-mount-pdu")
+          and not ita_convert.CONTAINER.search("rack-mount-pdu")
+          and bool(ita_convert.RACK.search("rack") and ita_convert.CONTAINER.search("rack")), "")
     tb = ita_convert.type_back(m, conv.notes, conv.shape)
     check("the conversion ends with four short lines to type back",
           len(tb) == 4 and all(len(l) <= 120 for l in tb)

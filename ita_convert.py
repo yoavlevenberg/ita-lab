@@ -60,11 +60,13 @@ from pathlib import Path
 
 FIBER = re.compile(r"\b(LC|SC|ST|FC|MPO|MTP|E2000|MU|SFP|QSFP|fib(er|re)|optic)", re.I)
 COPPER = re.compile(r"\b(RJ-?45|RJ-?11|8P8C|CAT ?\d|copper|UTP|STP|110)", re.I)
-RACK = re.compile(r"rack", re.I)
+# "rack", but not "rack-mount-pdu": a PDU mounted in a rack is a device
+# (the first real run, 2026-11-09, counted two PDUs as racks)
+RACK = re.compile(r"rack(?![-_ ]?mount)", re.I)
 ROW = re.compile(r"^row$", re.I)
 ROOM = re.compile(r"room", re.I)
-CONTAINER = re.compile(r"location|site|building|floor|room|row|rack|cage|zone|folder|unsupported",
-                       re.I)
+CONTAINER = re.compile(r"location|site|building|floor|room|row|rack(?![-_ ]?mount)|cage|zone"
+                       r"|folder|unsupported", re.I)
 DEFAULT_RACK_U = 42
 
 
@@ -181,6 +183,8 @@ class Converter:
             media = media_of(conf.get("connectorType"))
             keys = {str(k) for k in (conf.get("id"), conf.get("name")) if k is not None}
             mods.append({"keys": keys, "offset": offset, "count": n,
+                         "id": str(conf["id"]) if conf.get("id") is not None else None,
+                         "conf": conf,
                          "start": int(conf["portStart"]) if conf.get("portStart") is not None
                          else 1, "media": media,
                          "connector": conf.get("connectorType")})
@@ -236,11 +240,8 @@ class Converter:
         dev = self.topology["devices"][did]
         number = int(end.get("portNumber") or 0)
         mods = self.modules.get(did) or []
+        m, how = self._module_for(did, end)
         module = str(end.get("networkModule")) if end.get("networkModule") is not None else None
-        m = next((m for m in mods if module in m["keys"]), None)
-        if m is None:
-            same = [m for m in mods if media_of(m["connector"]) == media_of(end.get("connectorType"))]
-            m = same[0] if len(same) == 1 else (mods[0] if len(mods) == 1 else None)
         if m is None:
             # A cassette the device's own record did not list (always so for a
             # stub). It gets a number range of its own past every known port —
@@ -256,6 +257,24 @@ class Converter:
         if m.get("extra"):
             m["count"] = max(m["count"], number - m["start"] + 1)
         return self._add_port(dev, index, m["media"], m.get("connector"))
+
+    def _module_for(self, did, end):
+        """The cassette of DID an end names, and how it was found: "id" or
+        "name" (networkModule is that cassette's id or name), "media" (the
+        only cassette with that connector), "single" (the device has one), or
+        None. --explain counts these: a guess is where a shift would start."""
+        mods = self.modules.get(did) or []
+        module = str(end.get("networkModule")) if end.get("networkModule") is not None else None
+        for m in mods:
+            if module is not None and module in m["keys"]:
+                return m, ("extra" if m.get("extra") else
+                           "id" if module == m.get("id") else "name")
+        same = [m for m in mods if media_of(m["connector"]) == media_of(end.get("connectorType"))]
+        if len(same) == 1:
+            return same[0], "media"
+        if len(mods) == 1:
+            return mods[0], "single"
+        return None, None
 
     def _stub(self, end):
         """A device outside the copy: placed in a stub rack named from the
@@ -519,6 +538,141 @@ def summary(topology, notes, shape=None):
     return lines
 
 
+# -- --explain-u: one device, cassette by cassette ---------------------------
+# The first real run (2026-11-09) showed the right port COUNT on a panel but
+# the wrong ports taken, shifted, and one extra fiber on two panels. Before
+# any fix, this shows what ITA said and what the map made of it, side by
+# side, in port numbers only. Nothing here changes the map.
+
+SM = re.compile(r"\b(OS ?[12]|SMF?|single[- ]?mode|9/125)\b", re.I)
+MM = re.compile(r"\b(OM ?[1-5]|MMF?|multi[- ]?mode|50/125|62\.5/125)\b", re.I)
+# a cassette name short enough to be a label (A, B, 1, M2) and nothing more
+LABEL = re.compile(r"^[A-Za-z]{0,3}\d{0,3}$")
+
+
+def _ranges(nums):
+    """[1,2,3,5,7,8] -> '1-3,5,7-8'; '-' for none."""
+    nums, out = sorted(set(nums)), []
+    for n in nums:
+        if out and n == out[-1][1] + 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return ",".join(f"{a}" if a == b else f"{a}-{b}" for a, b in out) or "-"
+
+
+def _names(dicts, depth=1):
+    """Field names over several records, # = a number. Names only."""
+    seen = set()
+
+    def walk(d, prefix, lvl):
+        for k, v in d.items():
+            if isinstance(v, dict) and lvl < depth:
+                walk(v, f"{prefix}{k}.", lvl + 1)
+            else:
+                seen.add(f"{prefix}{k}" + ("#" if isinstance(v, (int, float))
+                                           and not isinstance(v, bool) else ""))
+    for d in dicts:
+        if isinstance(d, dict):
+            walk(d, "", 0)
+    return ",".join(sorted(seen)) or "none"
+
+
+def _modes(where):
+    """Where single/multi mode is written, as (field, SM count, MM count) —
+    the field's name and a count, never the text."""
+    hits = Counter()
+
+    def walk(d, prefix):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                walk(v, f"{prefix}{k}.")
+            elif isinstance(v, str):
+                if SM.search(v):
+                    hits[(prefix + k, "SM")] += 1
+                if MM.search(v):
+                    hits[(prefix + k, "MM")] += 1
+    for prefix, d in where:
+        if isinstance(d, dict):
+            walk(d, prefix)
+    return " ".join(f"{f}:{m}x{n}" for (f, m), n in sorted(hits.items())) or "none found"
+
+
+def explain(conv, u):
+    """Lines for every copied device that covers rack unit U."""
+    topo = conv.topology
+    lines = []
+    for aid, did in conv.device_of_asset.items():
+        dev = topo["devices"][did]
+        if dev.get("external") or dev["u_start"] is None:
+            continue
+        if not dev["u_start"] - dev["u_size"] + 1 <= u <= dev["u_start"]:
+            continue
+        mods = [m for m in conv.modules.get(did, []) if not m.get("extra")]
+        extra = [m for m in conv.modules.get(did, []) if m.get("extra")]
+        # every end that names this device, from every answer in the copy
+        ends, cables = [], []
+        for body in conv.network.values():
+            for pc in body.get("portConfigurations") or []:
+                for cp in pc.get("connectionsAndPaths") or []:
+                    np = cp.get("networkPath") or {}
+                    for c in [cp.get("connection")] + list(np.get("connections") or []):
+                        if not c:
+                            continue
+                        for e in (c.get("source") or {}, c.get("destination") or {}):
+                            if str(e.get("assetId")) == aid:
+                                ends.append((str(c.get("id")), e))
+                                cables.append(c.get("cableType") or {})
+        once = {}
+        for cid, e in ends:                 # one connection is listed many times
+            once[(cid, bool(_rear(e)), str(e.get("networkModule")), e.get("portNumber"))] = e
+        how = Counter(conv._module_for(did, e)[1] or "none" for e in once.values())
+        ports = [p for p in topo["ports"].values() if p["device"] == did]
+        used = [p for p in ports if p["status"] == "used"]
+        counted = [m["conf"]["portsUsed"] for m in mods
+                   if isinstance(m["conf"].get("portsUsed"), (int, float))]
+        conf_used = int(sum(counted)) if counted else "?"
+        has_net = _safe(aid) in conv.network
+        lines.append(f"E0 U{u} type={conv.tree[aid]['type']} net={'yes' if has_net else 'no'} "
+                     f"cassettes={len(mods)} ports={len(ports)} ita_used={conf_used} "
+                     f"map_used={len(used)} extra={sum(m['count'] for m in extra)}")
+        lines.append(f"E1 match: " + " ".join(f"{k}={v}" for k, v in sorted(how.items())))
+        lines.append("E2 cassette fields: " + _names([m["conf"] for m in mods]))
+        lines.append("E3 cable fields: " + _names(cables))
+        lines.append("E4 SM/MM: " + _modes(
+            [("record.", conv.assets.get(aid))]
+            + [("cassette.", m["conf"]) for m in mods]
+            + [("end.", e) for e in once.values()]
+            + [("cable.", c) for c in cables]))
+        for i, m in enumerate(mods + extra, 1):
+            name = str(m["conf"].get("name") if m.get("conf") else "")
+            label = name if name and LABEL.match(name) else f"M{i}"
+            front, rear = [], []
+            for e in once.values():
+                if conv._module_for(did, e)[0] is m:
+                    (rear if _rear(e) else front).append(int(e.get("portNumber") or 0))
+            mine = [p["index"] - m["offset"] + m["start"] - 1 for p in used
+                    if m["offset"] < p["index"] <= m["offset"] + m["count"]]
+            conf = m.get("conf") or {}
+            lines.append(
+                f"{'X' if m.get('extra') else 'K'}{i} {label} start={m['start']} n={m['count']} "
+                f"{_kind(m['connector'])} used={conf.get('portsUsed', '?')} "
+                f"| front {_ranges(front)} | rear {_ranges(rear)} | map {_ranges(mine)}")
+    if not lines:
+        lines.append(f"E0 U{u}: no copied device covers this U "
+                     "(devices with no U position are not listed)")
+    # the rack's own numbers: which of them is its height in U is not known yet
+    for r in topo["racks"].values():
+        if not r.get("external"):
+            rec = conv.assets.get(r.get("uuid"), {})
+            nums = {k: v for k, v in rec.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and re.search(r"height|unit", k, re.I)}
+            lines.append("R0 rack numbers: " + (" ".join(f"{k}={v}" for k, v in sorted(nums.items()))
+                                                or "none"))
+    return lines
+
+
 def _all_notes(topology, notes):
     notes = Counter(notes)
     no_u = sum(1 for d in topology["devices"].values()
@@ -587,9 +741,16 @@ def main():
     ap.add_argument("--out", help="where to write the map (default: <cache>/topology.json)")
     ap.add_argument("--unit-top", action="store_true",
                     help="ITA's unitPosition is the device's top U, not its bottom")
+    ap.add_argument("--explain-u", type=int, metavar="U",
+                    help="show one device, cassette by cassette: what ITA said and what the "
+                         "map made of it (port numbers only). Writes nothing.")
     args = ap.parse_args()
     conv = Converter(args.cache, unit_top=args.unit_top)
     topology = conv.convert()
+    if args.explain_u is not None:
+        for line in block(explain(conv, args.explain_u)):
+            print(line)
+        return 0
     out = Path(args.out) if args.out else Path(args.cache) / "topology.json"
     out.write_text(json.dumps(topology, ensure_ascii=False), encoding="utf-8")
     for line in summary(topology, conv.notes, conv.shape):

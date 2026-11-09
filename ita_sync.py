@@ -52,7 +52,9 @@ CACHE = Path(__file__).parent / "ita_cache"
 API_BASES = ("/api/v8.1", "/api/current")
 # an asset whose type matches this holds other assets; anything else is a
 # device and gets its connections fetched
-CONTAINER = re.compile(r"location|site|building|floor|room|row|rack|cage|zone|folder|unsupported",
+RACK = re.compile(r"rack(?![-_ ]?mount)", re.I)      # not "rack-mount-pdu": a device
+CONTAINER = re.compile(r"location|site|building|floor|room|row|rack(?![-_ ]?mount)|cage|zone"
+                       r"|folder|unsupported",
                        re.I)
 
 
@@ -282,19 +284,19 @@ def structure(manifest):
         return " > ".join(reversed(out))
 
     lines = []
-    rack_chains = Counter(chain(a) for a, t in tree.items() if re.search("rack", t["type"], re.I))
+    rack_chains = Counter(chain(a) for a, t in tree.items() if RACK.search(t["type"]))
     for c, n in rack_chains.most_common(6):
         lines.append(f"{n} racks at: {c}")
     rows = [a for a, t in tree.items() if re.fullmatch(r"row", t["type"], re.I)]
     if rows:
-        per_row = Counter(sum(1 for k in kids[r] if re.search("rack", tree[k]["type"], re.I))
+        per_row = Counter(sum(1 for k in kids[r] if RACK.search(tree[k]["type"]))
                           for r in rows)
         lines.append(f"{len(rows)} rows, racks per row: "
                      + ", ".join(f"{k} racks x{v}" for k, v in sorted(per_row.items())))
         parents = Counter(tree[tree[r]["parent"]]["type"] if tree[r]["parent"] else "(start)"
                           for r in rows)
         lines.append("rows sit under: " + ", ".join(f"{k}={v}" for k, v in parents.most_common()))
-    racks = [a for a, t in tree.items() if re.search("rack", t["type"], re.I)]
+    racks = [a for a, t in tree.items() if RACK.search(t["type"])]
     loose = sum(1 for a in racks
                 if tree[a]["parent"] and not re.fullmatch(r"row", tree[tree[a]["parent"]]["type"], re.I))
     if racks:
