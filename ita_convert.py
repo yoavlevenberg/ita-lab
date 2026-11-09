@@ -598,13 +598,24 @@ def _modes(where):
     return " ".join(f"{f}:{m}x{n}" for (f, m), n in sorted(hits.items())) or "none found"
 
 
-def explain(conv, u):
-    """Lines for every copied device that covers rack unit U."""
+def _in_rack(rack_id, name):
+    """Does map rack RACK_ID stand for the rack the user NAMED? Two racks
+    sharing a name get '#<uuid start>' in the map; the name matches both."""
+    return name is None or rack_id == name or rack_id.startswith(name + "#")
+
+
+def explain(conv, u, rack=None):
+    """Lines for every copied device that covers rack unit U — in the rack
+    named RACK only, when the copy holds more than one. The name is taken
+    in, never printed."""
     topo = conv.topology
     lines = []
+    if rack is not None and not any(_in_rack(r, rack) for r, v in topo["racks"].items()
+                                    if not v.get("external")):
+        return ["E0 no copied rack has that name (check the spelling, as in ITA)"]
     for aid, did in conv.device_of_asset.items():
         dev = topo["devices"][did]
-        if dev.get("external") or dev["u_start"] is None:
+        if dev.get("external") or dev["u_start"] is None or not _in_rack(dev["rack"], rack):
             continue
         if not dev["u_start"] - dev["u_size"] + 1 <= u <= dev["u_start"]:
             continue
@@ -663,7 +674,7 @@ def explain(conv, u):
                      "(devices with no U position are not listed)")
     # the rack's own numbers: which of them is its height in U is not known yet
     for r in topo["racks"].values():
-        if not r.get("external"):
+        if not r.get("external") and _in_rack(r["id"], rack):
             rec = conv.assets.get(r.get("uuid"), {})
             nums = {k: v for k, v in rec.items()
                     if isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -744,11 +755,14 @@ def main():
     ap.add_argument("--explain-u", type=int, metavar="U",
                     help="show one device, cassette by cassette: what ITA said and what the "
                          "map made of it (port numbers only). Writes nothing.")
+    ap.add_argument("--explain-rack", metavar="NAME",
+                    help="with --explain-u, when the copy holds several racks: the rack's "
+                         "exact name, as in ITA")
     args = ap.parse_args()
     conv = Converter(args.cache, unit_top=args.unit_top)
     topology = conv.convert()
     if args.explain_u is not None:
-        for line in block(explain(conv, args.explain_u)):
+        for line in block(explain(conv, args.explain_u, args.explain_rack)):
             print(line)
         return 0
     out = Path(args.out) if args.out else Path(args.cache) / "topology.json"

@@ -337,6 +337,11 @@ def review_cases():
           "K1 m start=1 n=24 LC used=? | front 5 | rear 5-6 | map 5" in p1, p1)
     check("--explain-u: field names and numbers only, never a name from the site",
           not any(s in " ".join(ex) for s in ("SNP", "R1:", "P5-A")), ex)
+    r2 = [l for l in ita_convert.explain(conv, 40, "R2") if l.startswith(("E0", "K"))]
+    check("--explain-rack: several racks in the copy, one picked by its name",
+          len(r2) == 2 and "front 5 | rear 5-6" in r2[1], r2)
+    check("--explain-rack: a name not in the copy says so",
+          ita_convert.explain(conv, 40, "NOPE")[0].startswith("E0 no copied rack"), "")
     check("--explain-u: a U nothing covers says so",
           ita_convert.explain(conv, 7)[0].startswith("E0 U7: no copied device"), "")
     check("a rack-mounted PDU is a device, not a rack (first real run, 2026-11-09)",
