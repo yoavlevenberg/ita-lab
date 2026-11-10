@@ -25,3 +25,6 @@ probe_out/
 # written by ita_sync.py on the closed network: the local copy of real ITA
 # data. Same rule as probe_out/ — never committed, never travels back
 ita_cache/
+
+# lock files Excel and Word leave next to an open file
+~$*
