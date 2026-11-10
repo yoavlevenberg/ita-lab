@@ -248,9 +248,27 @@ def physical_strands(edge, cable_type):
     return ((edge.get("strand_ports") or {}).get(cable_type)) or None
 
 
-def _build_graph(topology, cable_type, domain=None):
+def _usable(topology, phys, a, b, held_ports=()):
+    """On a trunk whose strands sit on real panel ports: is strand N free?
+    Strand N IS panel port N at each end, so it is free only if both of those
+    ports are — a patch cord on the front takes the strand too."""
+    def usable(i):
+        ends = phys.get(str(i)) or {}
+        return all(ends.get(r) and ends[r] not in held_ports
+                   and (topology["ports"].get(ends[r]) or {}).get("status") == "free"
+                   for r in (a, b))
+    return usable
+
+
+def _build_graph(topology, cable_type, domain=None, held_ports=()):
     """Graph of only the segments that can actually carry this request:
-    right cable type, spare capacity, and matching redundancy domain."""
+    right cable type, spare capacity, and matching redundancy domain.
+
+    On a map from ITA a strand with no circuit on it can still be taken — a
+    cord in its panel port — so there the spare capacity is the strands that
+    are really usable. Counted by the trunk alone, a short trunk with none
+    left stayed in the graph and the planner failed on it instead of going
+    round (code review, 2026-11-10)."""
     g = nx.Graph()
     g.add_nodes_from(topology["racks"].keys())
     for edge in topology["edges"]:
@@ -262,11 +280,20 @@ def _build_graph(topology, cable_type, domain=None):
         if domain is not None and edge["domain"] != domain:
             continue                                    # wrong redundancy leg
         used = len(ct.get("strands") or {})
+        remaining = ct["capacity"] - used
+        phys = physical_strands(edge, cable_type)
+        if phys:
+            usable = _usable(topology, phys, edge["from"], edge["to"], held_ports)
+            taken = ct.get("strands") or {}
+            remaining = sum(1 for i in range(1, ct["capacity"] + 1)
+                            if str(i) not in taken and usable(i))
+            if not remaining:
+                continue                                # every strand's panel port is taken
         g.add_edge(edge["from"], edge["to"], obj=edge,
                    id=edge["id"], domain=edge["domain"], length_m=edge["length_m"],
                    weight=HOP_COST + edge["length_m"],
-                   capacity=ct["capacity"], used=used,
-                   remaining=ct["capacity"] - used)
+                   capacity=ct["capacity"], used=ct["capacity"] - remaining,
+                   remaining=remaining)
     return g
 
 
@@ -434,15 +461,7 @@ def _segment(e, a, b, cable_type, reserved=None, topology=None, held_ports=()):
     edge = e["obj"]
     claimed = (reserved or {}).get(e["id"], ())
     phys = physical_strands(edge, cable_type) if topology is not None else None
-    usable = None
-    if phys:
-        # strand N IS panel port N at each end: it is only free if both of
-        # those ports are — a patch cord on the front takes the strand too
-        def usable(i):
-            ends = phys.get(str(i)) or {}
-            return all(ends.get(r) and ends[r] not in held_ports
-                       and (topology["ports"].get(ends[r]) or {}).get("status") == "free"
-                       for r in (a, b))
+    usable = _usable(topology, phys, a, b, held_ports) if phys else None
     index = first_free_strand(edge, cable_type, claimed, usable)
     if index is None:
         raise RouteError(f"Trunk '{e['id']}' has no free {cable_type} strand left.")
@@ -515,7 +534,8 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
     # ITA carries none (domain None), and is then one unlabelled leg.
     legs = sorted({e["domain"] for e in topology["edges"]}, key=lambda x: (x is None, str(x)))
     for d in ([domain] if domain else legs or [None]):
-        g = _build_graph(topology, cable_type, domain=d)
+        g = _build_graph(topology, cable_type, domain=d,
+                         held_ports={src_port_id, dst_port_id})
         if src_rack not in g or dst_rack not in g:
             attempts.append(f"domain {d}: no {cable_type} uplink with spare capacity")
             continue
@@ -525,12 +545,9 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
             attempts.append(f"domain {d}: no path with available capacity")
             continue
 
-        segments, total = [], 0.0
-        for a, b in zip(hops, hops[1:]):
-            e = g.get_edge_data(a, b)
-            total += e["length_m"]
-            segments.append(_segment(e, a, b, cable_type))
-        tightest = min(s["remaining_before"] for s in segments)
+        legs_of = [g.get_edge_data(a, b) for a, b in zip(hops, hops[1:])]
+        total = sum(e["length_m"] for e in legs_of)
+        tightest = min(e["remaining"] for e in legs_of)
         # shortest run wins; on a tie, take the leg with more headroom left
         candidates.append(((round(total, 1), -tightest), d, hops, g))
 
@@ -684,7 +701,8 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
         route.update(shared_segments=[], fully_disjoint_from_previous=True, option_index=1)
         return [route]
 
-    g = _build_graph(topology, cable_type, domain=domain)
+    g = _build_graph(topology, cable_type, domain=domain,
+                     held_ports={src_port_id, dst_port_id})
     if src_rack not in g or dst_rack not in g:
         where = f" in domain {domain}" if domain else ""
         raise RouteError(f"No {cable_type} uplink with spare capacity{where}.")

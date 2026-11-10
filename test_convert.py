@@ -638,6 +638,30 @@ def engine_cases():
         offered = False
     check("a strand whose panel port is taken is never offered", not offered, "")
 
+    # a short trunk whose only "free" strand has a cord on its far panel port:
+    # not full by its own count, yet it carries nothing — routes go round it
+    # (code review, 2026-11-10: it made the planner fail instead)
+    def shortcut(far_status):
+        m4 = copy.deepcopy(base)
+        m4["edges"].append({"id": "R1<->R3", "from": "R1", "to": "R3", "domain": None,
+                            "cable_types": {"fiber": {"capacity": 1, "strands": {}}},
+                            "length_m": 1.0, "strand_ports": {
+                                "fiber": {"1": {"R1": "R1:P1:10", "R3": "R3:P4:10"}}}})
+        m4["ports"]["R3:P4:10"]["status"] = far_status
+        got = []
+        for plan in (lambda: pathengine.resolve_route_options("R1:SW:7", "R3:SRV:3", count=1,
+                                                              topology=m4)[0],
+                     lambda: pathengine.resolve_path("R1:SW:7", "R3:SRV:3", topology=m4)):
+            try:
+                got.append(plan()["hop_racks"])
+            except pathengine.RouteError as err:
+                got.append(str(err))
+        return got
+    check("a trunk with a free strand on free panel ports is taken when it is shortest",
+          shortcut("free") == [["R1", "R3"], ["R1", "R3"]], shortcut("free"))
+    check("...and with no usable strand, both planners route round it instead of failing",
+          shortcut("used") == [["R1", "R2", "R3"], ["R1", "R2", "R3"]], shortcut("used"))
+
     # a stale plan is caught before it is committed
     m3 = copy.deepcopy(base)
     r3 = pathengine.resolve_route_options("R1:SW:7", "R3:SRV:3", count=1, topology=m3)[0]
