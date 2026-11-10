@@ -1082,7 +1082,9 @@ function renderRack(){
                   style="top:${(U - d.u_start) * H + 1}px;height:${d.u_size * H - 2}px"
                   data-dev="${escapeHtml(d.id)}" title="${escapeHtml(d.label || "")}">
                <span class="nm">${escapeHtml(d.name)}</span>
-               <span class="po">${used}/${ports.length}</span>
+               ${d.no_port_data
+                 ? `<span class="po" title="ITA לא החזיר את רשימת הפורטים של הרכיב הזה — מספר הפורטים לא ידוע">?</span>`
+                 : `<span class="po">${used}/${ports.length}</span>`}
              </div>`;
   }
 

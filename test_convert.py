@@ -289,6 +289,13 @@ def loose_site(out, rack_ids=True):
       SW2:1 - OUT5, in ANOTHER rack that is also named R1
       SW2:2, SW2:3 - OUT6, OUT7, in two racks outside the copy, both named RZ
       SW2:4, SW2:5 - two devices named ODF, both in rack RX
+
+    And what the diagnostic lines (C5-C9) look for:
+      SW2:6 - P A:9        a port number past the end of its cassette (A has 6)
+      SW2:7 - P B:4 rear   a path that ends on a panel's REAR port
+      P A:5 - OUT A:2      a cable on no path: front seen, the map port stays free
+      SW2:1 - OUT5         a second, different path between the same two ports
+      Q lists cassette B before A; the SW2:1 cable says OS2
     rack_ids=False: the ends of copied devices carry no path, so nothing
     shows that the paths name racks by the same ids as the tree.
     """
@@ -314,6 +321,7 @@ def loose_site(out, rack_ids=True):
     put("SW2", "network", "R1", "SW2", [("m", 8)], u=11)
     put("NN", "patch-panel", "R1", "NN", u=30)
     put("P", "patch-panel", "R1", "P", [("A", 6), ("B", 6)], u=40)
+    put("Q", "patch-panel", "R1", "Q", [("B", 6), ("A", 6)], u=41)
     pdus = ["PDU-a1", "PDU-b2", "PDU-c3", "PDU-d4"]
     for aid in pdus:
         put(aid, "rack-mount-pdu", "R1", "PDU")
@@ -337,13 +345,24 @@ def loose_site(out, rack_ids=True):
            ("SW2", 2): e("OUT6", 1, "A", ("RZ-one", "RZ")),
            ("SW2", 3): e("OUT7", 1, "A", ("RZ-two", "RZ")),
            ("SW2", 4): e("ODF-x1", 1, "A", rx, name="ODF"),
-           ("SW2", 5): e("ODF-y2", 1, "A", rx, name="ODF")}
+           ("SW2", 5): e("ODF-y2", 1, "A", rx, name="ODF"),
+           ("SW2", 6): e("P", 9, "A"),
+           ("SW2", 7): dict(e("P", 4, "B"), rearPort=True)}
     for (sw, n), other in sorted(far.items()):
         c = {"id": f"s-{sw}-{n}", "source": e(sw, n, f"{sw}-m"), "destination": other,
-             "cableType": {"length": 3}}
+             "cableType": {"length": 3, **({"name": "OS2 duplex"} if (sw, n) == ("SW2", 1)
+                                           else {})}}
         nets[sw]["portConfigurations"][0]["connectionsAndPaths"].append(
             {"connection": c, "networkPath": {"connections": [c], "beginItem": c["source"],
                                               "endItem": c["destination"]}})
+    alt = {"id": "s-alt", "source": e("SW2", 1, "SW2-m"),
+           "destination": e("OUT5", 1, "A", ("R1-other", "R1")), "cableType": {"length": 5}}
+    nets["SW2"]["portConfigurations"][0]["connectionsAndPaths"].append(
+        {"connection": alt, "networkPath": {"connections": [alt], "beginItem": alt["source"],
+                                            "endItem": alt["destination"]}})
+    nets["P"]["portConfigurations"][0]["connectionsAndPaths"].append(
+        {"connection": {"id": "p-loose", "source": e("P", 5, "A"),
+                        "destination": e("OUT", 2, "A", rx), "cableType": {"length": 3}}})
     for aid, n in nets.items():
         (out / "network" / f"{aid}.json").write_text(json.dumps(n), encoding="utf-8")
     (out / "manifest.json").write_text(json.dumps(
@@ -381,6 +400,43 @@ def cassette_cases():
           "ports on two different paths (check in ITA)" not in conv.notes
           and conv.notes["connection ends on an unknown cassette"] == 2, dict(conv.notes))
     name_cases(conv, m)
+    diagnose_cases(conv, m)
+
+
+def diagnose_cases(conv, m):
+    """The lines that say WHY ports look shifted or taken twice on a real
+    copy, before anything is changed: counts, type words and field names only."""
+    d = ita_convert.diagnose(conv)
+    check("five diagnostic lines, C5 to C9, each short enough to type",
+          [x[:2] for x in d] == ["C5", "C6", "C7", "C8", "C9"]
+          and all(len(x) <= 120 for x in d), d)
+    check("C5: the types the copy took as racks, racks with nothing copied in them, rack numbers",
+          d[0] == "C5 racks types=rack:1 empty=0 num=none", d)
+    check("C6: devices ITA gave no ports for, by type, and how many are seen from the far side",
+          d[1] == "C6 noNet=5 types=rack-mount-pdu:4,patch-panel:1 seen=1 inDevice=0", d)
+    check("C7: how ends found their cassette, cassette shapes, numbers past a cassette, order",
+          d[2] == "C7 match=id:15,name:3,extra:4 cas=s1n6x4,s1n8x2 outRange=1 order=1", d)
+    check("C8: ports taken in ITA and in the map; panel ports taken with no front cable and "
+          "free with one; paths ending on a rear port; a second path between two ports",
+          d[3] == "C8 used ita=? map=17 noFront=1 frontFree=1 endRear=1 samePair=1", d)
+    check("C9: where single/multi mode is written, as field names and counts",
+          d[4] == "C9 SM/MM: cable.name:SMx1", d)
+    check("the four lines typed back so far are unchanged",
+          len(ita_convert.type_back(m, conv.notes, conv.shape)) == 4, "")
+    check("diagnosing makes no port and no device", (len(m["ports"]), len(m["devices"]))
+          == (len(conv.topology["ports"]), len(conv.topology["devices"]))
+          and ita_convert.diagnose(conv) == d, "")
+    D = m["devices"]
+    flagged = sorted(k for k, v in D.items() if v.get("no_port_data"))
+    check("a copied device ITA gave no ports for is marked so (the screen shows '?', not 0/0)",
+          flagged == ["R1:NN"] + [f"R1:PDU#PDU-{x}" for x in ("a1", "b2", "c3", "d4")],
+          flagged)
+    import bulkplan
+    check("...and none of its ports is ever offered: not as a free port, not as a transit port",
+          all(bulkplan.free_port_on_device(m, k, "fiber") is None for k in flagged)
+          and all(not str(pathengine._pick_transit_port(m, "R1", "fiber", set())
+                          or "").startswith(("R1:NN:", "R1:PDU")) for _ in (0,)),
+          [bulkplan.free_port_on_device(m, k, "fiber") for k in flagged])
 
 
 def name_cases(conv, m):

@@ -118,6 +118,10 @@ class Converter:
         missing = self.manifest.get("network_missing") or []
         if missing:
             self.notes["devices whose ports/connections were not copied"] += len(missing)
+        self.missing = {str(a) for a in missing}
+        # for diagnose(): what the map dropped or guessed, kept out of the notes
+        self.diag = Counter()
+        self.dropped = set()          # (port pair, cables) of a second path between two ports
         self.topology = {"meta": {}, "pods": {}, "racks": {}, "devices": {},
                          "ports": {}, "edges": [], "circuits": {}}
         self.rack_of_asset = {}       # ITA rack uuid -> map rack id
@@ -167,21 +171,26 @@ class Converter:
             self.rack_of_asset[aid] = rid
 
     # -- every connection end, read before any port is made -------------------
-    def _every_end(self):
-        """Each END the copy names: every one collect() and the two builders
-        turn into a port (and the ends of a cable that is on no path, which
-        get none)."""
+    def _every_path(self):
+        """(connections, networkPath) for every entry in every answer copied."""
         for body in self.network.values():
             for pc in body.get("portConfigurations") or []:
                 for cp in pc.get("connectionsAndPaths") or []:
                     np = cp.get("networkPath") or {}
-                    for c in [cp.get("connection")] + list(np.get("connections") or []):
-                        if c:
-                            yield c.get("source") or {}
-                            yield c.get("destination") or {}
-                    if np.get("connections") and np.get("beginItem") and np.get("endItem"):
-                        yield np["beginItem"]
-                        yield np["endItem"]
+                    yield [c for c in [cp.get("connection")] + list(np.get("connections") or [])
+                           if c], np
+
+    def _every_end(self):
+        """Each END the copy names: every one collect() and the two builders
+        turn into a port (and the ends of a cable that is on no path, which
+        get none)."""
+        for conns, np in self._every_path():
+            for c in conns:
+                yield c.get("source") or {}
+                yield c.get("destination") or {}
+            if np.get("connections") and np.get("beginItem") and np.get("endItem"):
+                yield np["beginItem"]
+                yield np["endItem"]
 
     def gather_ends(self):
         """Which port numbers the copy names on each cassette of each device.
@@ -331,6 +340,11 @@ class Converter:
         }
         if external:
             dev["external"] = True
+        elif aid in self.missing:
+            # ITA gave no port list (404/501 on the first real runs): its port
+            # count is unknown, not 0 — the screen shows "?", and since every
+            # picker walks a device's ports by its counts, none is ever offered
+            dev["no_port_data"] = True
         if dev["type"].endswith("patch_panel"):
             for m in mods:
                 self.shape["panel ports by connector"][_kind(m["connector"])] += m["count"]
@@ -378,6 +392,14 @@ class Converter:
             mods.append(m)
         index = m["offset"] + number - m["start"] + 1
         return self._add_port(dev, index, m["media"], m.get("connector"))
+
+    def _where(self, end):
+        """(map device, port index) an end names, or None — making nothing."""
+        did = self.device_of_asset.get(str(end.get("assetId")))
+        m = self._module_for(did, end)[0] if did else None
+        if m is None:
+            return None
+        return did, m["offset"] + int(end.get("portNumber") or 0) - m["start"] + 1
 
     def _module_for(self, did, end):
         """The cassette of DID an end names, and how it was found: "id" or
@@ -440,6 +462,8 @@ class Converter:
                     if np.get("connections") and np.get("beginItem") and np.get("endItem"):
                         key = tuple(sorted((self.port_of(np["beginItem"]),
                                             self.port_of(np["endItem"]))))
+                        if key in paths and _cables(paths[key]) != _cables(np):
+                            self.dropped.add((key, _cables(np)))    # only the first is kept
                         paths.setdefault(key, np)
         return connections, paths
 
@@ -508,6 +532,9 @@ class Converter:
                 steps = [(c.get("source") or {}, c.get("destination") or {}, c) for c in conns]
             n += 1
             cid = f"CIR-{n:04d}"
+            # a path ending on a panel's REAR marks that panel port taken,
+            # though ITA takes a panel port only when its front is connected
+            self.diag["endRear"] += sum(1 for x in (np["beginItem"], np["endItem"]) if _rear(x))
             a_port, b_port = self.port_of(np["beginItem"]), self.port_of(np["endItem"])
             rack = lambda pid: self.topology["ports"][pid]["rack"]      # noqa: E731
             hops = [rack(a_port)]
@@ -606,6 +633,10 @@ def _kind(connector):
 
 def _rear(end):
     return bool(end.get("rearPort") or end.get("readPort"))
+
+
+def _cables(np):
+    return frozenset(str(c.get("id")) for c in np.get("connections") or [] if c)
 
 
 def _path_rack(end):
@@ -896,6 +927,107 @@ def type_back(topology, notes, shape=None):
     ]
 
 
+def _count(counter, key=None, sep=":"):
+    """{'a': 2, 'b': 1} -> 'a:2,b:1' (most first), 'none' when empty."""
+    items = sorted(counter.items(), key=key or (lambda kv: (-kv[1], str(kv[0]))))
+    return ",".join(f"{k}{sep}{n}" for k, n in items if n) or "none"
+
+
+def _fit(line, width=120):
+    return line if len(line) <= width else line[:width - 3] + "..."
+
+
+def diagnose(conv):
+    """Five more lines to type back (C5-C9), for what the first real runs
+    left open: 8 racks where there are 7, ports taken in the wrong places
+    on one panel, an extra fiber on two, and where single/multi mode is
+    written. They say where ITA and the map part ways, so a fix follows the
+    evidence. Counts, ITA type words and field names only; makes nothing."""
+    topo, tree = conv.topology, conv.tree
+    copied = {did: topo["devices"][did] for aid, did in conv.device_of_asset.items()
+              if not topo["devices"][did].get("external")}
+    panel = lambda did: copied[did]["type"].endswith("patch_panel")       # noqa: E731
+
+    # C5: what was taken as a rack, and the rack's own numbers (which is U?)
+    racks = list(conv.rack_of_asset)
+    full = {d["rack"] for d in copied.values()}
+    nums = defaultdict(Counter)
+    for a in racks:
+        for k, v in (conv.assets.get(a) or {}).items():
+            if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and re.search(r"height|unit", k, re.I)):
+                nums[k][f"{v:g}"] += 1
+    c5 = (f"C5 racks types={_count(Counter(tree[a]['type'] for a in racks))} "
+          f"empty={sum(1 for a in racks if conv.rack_of_asset[a] not in full)} num="
+          + (";".join(f"{k}:" + ",".join(f"{v}x{n}" for v, n in sorted(c.items()))
+                      for k, c in sorted(nums.items())) or "none"))
+
+    # C6: devices ITA gave no ports for; devices that stand in another device
+    nonet = [a for a, did in conv.device_of_asset.items()
+             if topo["devices"][did].get("no_port_data")]
+    inside = sum(1 for a, did in conv.device_of_asset.items()
+                 if did in copied and copied[did]["u_start"] is None
+                 and tree.get(tree.get(a, {}).get("parent") or "", {}).get("type")
+                 and not CONTAINER.search(tree[tree[a]["parent"]]["type"]))
+    c6 = (f"C6 noNet={len(nonet)} types={_count(Counter(tree[a]['type'] for a in nonet))} "
+          f"seen={sum(1 for a in nonet if a in conv.ends)} inDevice={inside}")
+
+    # C7: how each end of a copied device found its cassette
+    once = {}
+    for end in conv._every_end():
+        did = conv.device_of_asset.get(str(end.get("assetId")))
+        if did in copied:
+            once[(did, _module(end), end.get("connectorType"),
+                  int(end.get("portNumber") or 0), _rear(end))] = end
+    how, out_range = Counter(), 0
+    for (did, *_), end in once.items():
+        m, h = conv._module_for(did, end)
+        how[h or "none"] += 1
+        n = int(end.get("portNumber") or 0)
+        if m is not None and not m.get("extra") and not m["start"] <= n < m["start"] + m["count"]:
+            out_range += 1                  # lands on the NEXT cassette's ports
+    listed = {did: [m for m in conv.modules.get(did, []) if not m.get("extra")]
+              for did in copied}
+    shapes = Counter(f"s{m['start']}n{m['count']}" for ms in listed.values() for m in ms)
+    names = [[str(m["conf"].get("name") or m.get("id")) for m in ms] for ms in listed.values()]
+    order = ("id", "name", "media", "single", "extra", "none")
+    c7 = (f"C7 match={_count(how, key=lambda kv: order.index(kv[0]))} "
+          f"cas={_count(shapes, key=lambda kv: _natural(kv[0]), sep='x')} outRange={out_range} "
+          f"order={sum(1 for n in names if n != sorted(n, key=_natural))}")
+
+    # C8: ports taken — in ITA, in the map, and on panels by the front-only rule
+    counted = [m["conf"]["portsUsed"] for ms in listed.values() for m in ms
+               if isinstance(m["conf"].get("portsUsed"), (int, float))
+               and not isinstance(m["conf"].get("portsUsed"), bool)]
+    used = {p for p, v in topo["ports"].items() if v["status"] == "used"}
+    in_listed = sum(1 for did, ms in listed.items() for m in ms
+                    for i in range(m["offset"] + 1, m["offset"] + m["count"] + 1)
+                    if f"{did}:{i}" in used)
+    front = set()
+    for (did, *_), end in once.items():
+        where = None if _rear(end) or not panel(did) else conv._where(end)
+        if where:
+            front.add(f"{where[0]}:{where[1]}")
+    taken = {p for p in used if topo["ports"][p]["device"] in copied
+             and panel(topo["ports"][p]["device"])}
+    c8 = (f"C8 used ita={int(sum(counted)) if counted else '?'} map={in_listed} "
+          f"noFront={len(taken - front)} frontFree={len(front - used)} "
+          f"endRear={conv.diag['endRear']} samePair={len(conv.dropped)}")
+
+    # C9: where single/multi mode is written
+    cables = {}
+    for conns, _ in conv._every_path():
+        for c in conns:
+            cables[str(c.get("id"))] = c.get("cableType") or {}
+    c9 = "C9 SM/MM: " + _modes(
+        [("record.", conv.assets.get(a)) for a, did in conv.device_of_asset.items()
+         if did in copied]
+        + [("cassette.", m["conf"]) for ms in listed.values() for m in ms]
+        + [("end.", e) for e in once.values()]
+        + [("cable.", c) for c in cables.values()])
+    return [_fit(x) for x in (c5, c6, c7, c8, c9)]
+
+
 def block(lines):
     """The few lines to type back by hand; the full screen above stays."""
     bar = "-" * 44
@@ -926,7 +1058,7 @@ def main():
     for line in summary(topology, conv.notes, conv.shape):
         print(line)
     print(f"\nWritten next to the copy ({out.name}). It stays on this machine.\n")
-    for line in block(type_back(topology, conv.notes, conv.shape)):
+    for line in block(type_back(topology, conv.notes, conv.shape) + diagnose(conv)):
         print(line)
 
 
