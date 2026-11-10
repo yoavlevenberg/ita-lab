@@ -407,21 +407,25 @@ def cassette_cases():
 
 
 def jumper_site(out):
-    """A jumper panel as the user describes them (2026-11-10): cassettes of
-    six, A1-A6 then B1-B6. Here ITA's answer lists ONE port group of 12 while
-    the connections name cassette A or B and a port 1-6 — one way ITA may
-    record it, and one that would take B5 for port 5. Not known yet; the
-    diagnostics must show it if it is so.
+    """Jumper panels as the user describes them (2026-11-10): rows numbered
+    from the bottom, four cassettes of six in a row (A-D, 24 ports), so
+    "A02 port 3" is cassette A of row 2, port 3. How ITA records that is not
+    known yet; the diagnostics must tell the ways apart.
 
-      SW:1 - J A:2      SW:2 - J B:5      J: one port group, 12 ports
+      SW:1 - J A:2      SW:2 - J B:5      J: ITA lists ONE port group of 12,
+                                             the connections name A or B
+      K: lists its cassettes row by row (A01, B01, A02, B02) — an order a
+         technician counts in, not a fault
+      J's ends carry ITA's own connector word, FIBER_LC_OM4_REGULAR
     """
     (out / "assets").mkdir(parents=True)
     (out / "network").mkdir()
     tree = {"site": {"parent": None, "type": "location"},
             "R1": {"parent": "site", "type": "rack"},
             "SW": {"parent": "R1", "type": "network"},
-            "J": {"parent": "R1", "type": "patch-panel"}}
-    for aid, u in (("R1", None), ("SW", 10), ("J", 40)):
+            "J": {"parent": "R1", "type": "patch-panel"},
+            "K": {"parent": "R1", "type": "patch-panel"}}
+    for aid, u in (("R1", None), ("SW", 10), ("J", 40), ("K", 38)):
         rec = {"id": aid, "type": tree[aid]["type"], "name": aid}
         if u:
             rec["rackMounted"] = {"unitPosition": u, "unitHeight": 1}
@@ -429,7 +433,8 @@ def jumper_site(out):
 
     def e(aid, port, module):
         return {"assetId": aid, "networkModule": module, "portNumber": port, "rearPort": False,
-                "connectorType": "LC", "assetName": aid, "assetType": tree[aid]["type"]}
+                "connectorType": "FIBER_LC_OM4_REGULAR" if aid == "J" else "LC",
+                "assetName": aid, "assetType": tree[aid]["type"]}
     cps = []
     for n, (cas, port) in ((1, ("A", 2)), (2, ("B", 5))):
         c = {"id": f"j{n}", "source": e("SW", n, "SW-m"), "destination": e("J", port, cas),
@@ -441,6 +446,10 @@ def jumper_site(out):
             {"portConfiguration": {"id": f"{aid}-m", "name": "m", "connectorType": "LC",
                                    "portCount": n, "portStart": 1},
              "connectionsAndPaths": held}]}), encoding="utf-8")
+    (out / "network" / "K.json").write_text(json.dumps({"portConfigurations": [
+        {"portConfiguration": {"id": f"K-{c}", "name": c, "connectorType": "LC",
+                               "portCount": 6, "portStart": 1},
+         "connectionsAndPaths": []} for c in ("A01", "B01", "A02", "B02")]}), encoding="utf-8")
     (out / "manifest.json").write_text(json.dumps(
         {"synced_at": "test", "complete": True, "network_missing": [], "tree": tree}),
         encoding="utf-8")
@@ -458,6 +467,10 @@ def jumper_cases():
     check("C7: ends that name a cassette label (A, B) the device's list lacks, guessed onto "
           "its one port group, are counted with their highest port number",
           "match=id:2,media:2 " in d[2] and " lblGuess=2 lblMax=5 " in d[2], d)
+    check("C7: cassettes listed row by row (A01, B01, A02...) are in order",
+          " order=0 " in d[2], d)
+    check("C9 finds the fiber grade in ITA's own connector words (FIBER_LC_OM4_REGULAR)",
+          d[4] == "C9 SM/MM: end.connectorType:MMx2", d)
     e = ita_convert.explain(conv, 40)
     check("--explain-u shows the cassette labels the ends name next to how they were matched",
           e[1] == "E1 match: media=2 named=A,B", e)

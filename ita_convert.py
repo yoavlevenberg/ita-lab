@@ -675,6 +675,17 @@ def _listed(mods, module, connector):
     return None, None
 
 
+def _in_order(names):
+    """Cassette names in an order a technician counts in: by name (A, B, C),
+    or row by row for jumper panels — A01, B01, C01, D01, A02 (the user,
+    2026-11-10: rows numbered from the bottom, cassettes A-D in a row)."""
+    if names == sorted(names, key=_natural):
+        return True
+    rows = [re.match(r"^([A-Za-z]+)(\d+)$", n) for n in names]
+    return all(rows) and names == sorted(
+        names, key=lambda n: (int(re.match(r"^[A-Za-z]+(\d+)$", n).group(1)), n.upper()))
+
+
 def _natural(text):
     """Sort key: A2 before A10, B after A."""
     return [(0, int(p)) if p.isdigit() else (1, p) for p in re.split(r"(\d+)", str(text)) if p]
@@ -733,8 +744,11 @@ def summary(topology, notes, shape=None):
 # any fix, this shows what ITA said and what the map made of it, side by
 # side, in port numbers only. Nothing here changes the map.
 
-SM = re.compile(r"\b(OS ?[12]|SMF?|single[- ]?mode|9/125)\b", re.I)
-MM = re.compile(r"\b(OM ?[1-5]|MMF?|multi[- ]?mode|50/125|62\.5/125)\b", re.I)
+# not \b: ITA's own connector words join with "_" (FIBER_LC_OM4_REGULAR),
+# which \b counts as part of a word, so OM4 there was never found
+_ALONE = r"(?<![A-Za-z0-9]){}(?![A-Za-z0-9])"
+SM = re.compile(_ALONE.format(r"(OS ?[12]|SMF?|single[- ]?mode|9/125)"), re.I)
+MM = re.compile(_ALONE.format(r"(OM ?[1-5]|MMF?|multi[- ]?mode|50/125|62\.5/125)"), re.I)
 # a cassette name short enough to be a label (A, B, 1, M2) and nothing more
 LABEL = re.compile(r"^[A-Za-z]{0,3}\d{0,3}$")
 
@@ -1012,7 +1026,7 @@ def diagnose(conv):
     common = Counter(dict(shapes.most_common(4)))
     more = len(shapes) - len(common)
     c7 = (f"C7 match={_count(how, key=lambda kv: order.index(kv[0]))} outRange={out_range} "
-          f"order={sum(1 for n in names if n != sorted(n, key=_natural))} "
+          f"order={sum(1 for n in names if not _in_order(n))} "
           f"lblGuess={len(guessed)} lblMax={max(guessed, default=0)} "
           f"cas={_count(common, sep='x')}" + (f"+{more}" if more else ""))
 
