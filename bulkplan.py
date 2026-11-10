@@ -791,17 +791,19 @@ def validate(topology, demands, new_devices=()):
         # possible connection (a single patch lead, no trunk consumed) and is
         # exactly what the placement planner aims for.
 
+        # the exact same connection first: it also clashes on both ports, and
+        # "row 2 already asks for this" says more than "port taken by row 2"
+        pair = tuple(sorted((src, dst)))
+        if pair in seen_pairs:
+            fault(d, "duplicate_row",
+                  f"this exact connection is already requested on row {seen_pairs[pair]}")
+            continue
+
         clash = sorted({claimed_by[p] for p in (src, dst) if p in claimed_by})
         if clash:
             fault(d, "duplicate_port",
                   "a port on this row is already taken by row "
                   + ", ".join(str(r) for r in clash))
-            continue
-
-        pair = tuple(sorted((src, dst)))
-        if pair in seen_pairs:
-            fault(d, "duplicate_row",
-                  f"this exact connection is already requested on row {seen_pairs[pair]}")
             continue
         seen_pairs[pair] = d["row"]
         claimed_by[src] = claimed_by[dst] = d["row"]

@@ -1287,6 +1287,10 @@ def main():
                     7: "cable_mismatch", 8: "same_port", 9: "incomplete"},
           str(kinds))
     check("preflight blames the LATER row of a duplicated port", 2 not in kinds, str(kinds))
+    again = bulkplan.validate(T, [demand(2, fa[0], fb[0]), demand(3, fb[0], fa[0])])
+    check("a row that repeats an earlier row is called a repeat, not a port clash",
+          {i["row"]: i["kind"] for i in again["issues"]} == {3: "duplicate_row"},
+          str(again["issues"]))
 
     planned = bulkplan.plan(T, sheet)
     check("the plan agrees with the preflight, row for row",
