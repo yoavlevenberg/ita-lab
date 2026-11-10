@@ -121,7 +121,8 @@ class Converter:
                          "ports": {}, "edges": [], "circuits": {}}
         self.rack_of_asset = {}       # ITA rack uuid -> map rack id
         self.device_of_asset = {}     # ITA device uuid -> map device id
-        self.modules = {}             # map device id -> [(keys, offset, count, media)]
+        self.modules = {}             # map device id -> its cassettes, in port order
+        self.ends = {}                # ITA device uuid -> {(cassette, connector): numbers}
 
     # -- the tree ------------------------------------------------------------
     def _ancestor(self, aid, pattern):
@@ -157,6 +158,56 @@ class Converter:
                 "domain": None,
             }
             self.rack_of_asset[aid] = rid
+
+    # -- every connection end, read before any port is made -------------------
+    def _every_end(self):
+        """Each END the copy names: the ones collect() and the two builders
+        turn into ports, no more."""
+        for body in self.network.values():
+            for pc in body.get("portConfigurations") or []:
+                for cp in pc.get("connectionsAndPaths") or []:
+                    np = cp.get("networkPath") or {}
+                    for c in [cp.get("connection")] + list(np.get("connections") or []):
+                        if c:
+                            yield c.get("source") or {}
+                            yield c.get("destination") or {}
+                    if np.get("connections") and np.get("beginItem") and np.get("endItem"):
+                        yield np["beginItem"]
+                        yield np["endItem"]
+
+    def gather_ends(self):
+        """Which port numbers the copy names on each cassette of each device.
+        Read first, so a cassette the device's own answer did not list —
+        always so for a device outside the copy, or one ITA gave no answer
+        for — gets a range of its own, sized once. Sized as the ends came,
+        cassette B of such a panel landed on cassette A's ports, and one
+        range could run into the next (code review, 2026-11-10)."""
+        for end in self._every_end():
+            self.ends.setdefault(str(end.get("assetId")), OrderedDict()).setdefault(
+                (_module(end), end.get("connectorType")), set()).add(
+                int(end.get("portNumber") or 0))
+
+    def _unlisted(self, aid, mods, top):
+        """The cassettes the copy's connections name on a device that its own
+        answer did not list, each with a range past every listed port — never
+        the bare port number, which is cassette 1's port of that number. Laid
+        out in name order; numbered from 1, or from 0 where a port 0 is seen."""
+        seen = {}
+        for (module, connector), numbers in (self.ends.get(aid) or {}).items():
+            if _listed(mods, module, connector)[0] is None:
+                got = seen.setdefault(module or f"?{connector}",
+                                      {"connector": connector, "numbers": set()})
+                got["numbers"] |= numbers
+        extras = []
+        for key in sorted(seen, key=_natural):
+            numbers, connector = seen[key]["numbers"], seen[key]["connector"]
+            start = min(1, min(numbers))
+            count = max(numbers) - start + 1
+            extras.append({"keys": {key}, "offset": top, "count": count, "start": start,
+                           "media": media_of(connector), "connector": connector,
+                           "extra": True})
+            top += count
+        return extras
 
     # -- devices and their ports ---------------------------------------------
     def build_devices(self):
@@ -214,10 +265,14 @@ class Converter:
                 self.shape["panel ports by connector"][_kind(m["connector"])] += m["count"]
         self.topology["devices"][did] = dev
         self.device_of_asset[aid] = did
-        self.modules[did] = mods
         for m in mods:
             for i in range(1, m["count"] + 1):
                 self._add_port(dev, m["offset"] + i, m["media"], m["connector"])
+        # cassettes only connections name: a port of theirs exists once named
+        extras = self._unlisted(aid, mods, offset)
+        if mods and extras and not external:
+            self.notes["connection ends on an unknown cassette"] += len(extras)
+        self.modules[did] = mods + extras
         return did
 
     def _add_port(self, dev, index, media, connector=None):
@@ -239,42 +294,34 @@ class Converter:
         did = self.device_of_asset.get(aid) or self._stub(end)
         dev = self.topology["devices"][did]
         number = int(end.get("portNumber") or 0)
-        mods = self.modules.get(did) or []
         m, how = self._module_for(did, end)
-        module = str(end.get("networkModule")) if end.get("networkModule") is not None else None
         if m is None:
-            # A cassette the device's own record did not list (always so for a
-            # stub). It gets a number range of its own past every known port —
-            # never the bare port number, which is cassette 1's port of that number.
-            if mods and not dev.get("external"):
-                self.notes["connection ends on an unknown cassette"] += 1
-            top = max([x["offset"] + x["count"] for x in mods] + [0])
-            m = {"keys": {module or f"?{end.get('connectorType')}"}, "offset": top,
-                 "count": 0, "start": 0, "media": media_of(end.get("connectorType")),
+            # gather_ends() saw every end, so this is not reached; an end from
+            # anywhere else still gets a range of its own, past every known port
+            mods = self.modules.setdefault(did, [])
+            m = {"keys": {_module(end) or f"?{end.get('connectorType')}"},
+                 "offset": max([x["offset"] + x["count"] for x in mods] + [0]),
+                 "count": number - min(1, number) + 1, "start": min(1, number),
+                 "media": media_of(end.get("connectorType")),
                  "connector": end.get("connectorType"), "extra": True}
-            self.modules.setdefault(did, []).append(m)
+            mods.append(m)
         index = m["offset"] + number - m["start"] + 1
-        if m.get("extra"):
-            m["count"] = max(m["count"], number - m["start"] + 1)
         return self._add_port(dev, index, m["media"], m.get("connector"))
 
     def _module_for(self, did, end):
         """The cassette of DID an end names, and how it was found: "id" or
         "name" (networkModule is that cassette's id or name), "media" (the
-        only cassette with that connector), "single" (the device has one), or
-        None. --explain counts these: a guess is where a shift would start."""
+        only listed cassette with that connector), "single" (the device lists
+        one), "extra" (a cassette only connections name), or None. --explain
+        counts these: a guess is where a shift would start."""
         mods = self.modules.get(did) or []
-        module = str(end.get("networkModule")) if end.get("networkModule") is not None else None
-        for m in mods:
-            if module is not None and module in m["keys"]:
-                return m, ("extra" if m.get("extra") else
-                           "id" if module == m.get("id") else "name")
-        same = [m for m in mods if media_of(m["connector"]) == media_of(end.get("connectorType"))]
-        if len(same) == 1:
-            return same[0], "media"
-        if len(mods) == 1:
-            return mods[0], "single"
-        return None, None
+        m, how = _listed([x for x in mods if not x.get("extra")], _module(end),
+                         end.get("connectorType"))
+        if m is None:
+            key = _module(end) or f"?{end.get('connectorType')}"
+            m = next((x for x in mods if x.get("extra") and key in x["keys"]), None)
+            how = "extra" if m else None
+        return m, how
 
     def _stub(self, end):
         """A device outside the copy: placed in a stub rack named from the
@@ -459,6 +506,7 @@ class Converter:
 
     def convert(self):
         self.build_racks()
+        self.gather_ends()
         self.build_devices()
         connections, paths = self.collect()
         self.build_trunks(connections)
@@ -489,6 +537,31 @@ def _kind(connector):
 
 def _rear(end):
     return bool(end.get("rearPort") or end.get("readPort"))
+
+
+def _module(end):
+    """The cassette an end names, as text; None when it names none."""
+    return str(end.get("networkModule")) if end.get("networkModule") is not None else None
+
+
+def _listed(mods, module, connector):
+    """Which of MODS — the cassettes a device's own answer listed — an end
+    names, and how: by "id" or "name", else the only one with that connector
+    ("media"), else the only one ("single"). (None, None): none of them."""
+    for m in mods:
+        if module is not None and module in m["keys"]:
+            return m, "id" if module == m.get("id") else "name"
+    same = [m for m in mods if media_of(m["connector"]) == media_of(connector)]
+    if len(same) == 1:
+        return same[0], "media"
+    if len(mods) == 1:
+        return mods[0], "single"
+    return None, None
+
+
+def _natural(text):
+    """Sort key: A2 before A10, B after A."""
+    return [(0, int(p)) if p.isdigit() else (1, p) for p in re.split(r"(\d+)", str(text)) if p]
 
 
 def _rack_units(record):

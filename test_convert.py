@@ -274,6 +274,90 @@ def small_site(out):
         encoding="utf-8")
 
 
+def loose_site(out):
+    """Ends on cassettes the copy holds no list of: a panel outside the copy
+    (always so), a copied panel ITA gave no answer for (404/501 on the first
+    real runs), and cassettes a panel's own answer did not list.
+
+      SW:1 - OUT A:1   SW:2 - OUT B:1   SW:3 - OUT A:6   SW:8 - OUT C:0
+                                                  OUT: outside the copy, rack RX
+      SW:4 - NN m:3                               NN: in R1, no answer from ITA
+      SW:5 - P Z:2     SW:6 - P Y:1     SW:7 - P Z:4     P: lists cassettes A, B
+    """
+    (out / "assets").mkdir(parents=True)
+    (out / "network").mkdir()
+    tree = {"site": {"parent": None, "type": "location"}}
+    nets = {}
+
+    def put(aid, kind, parent, name, mods=None, u=None):
+        tree[aid] = {"parent": parent, "type": kind}
+        rec = {"id": aid, "type": kind, "name": name}
+        if u:
+            rec["rackMounted"] = {"unitPosition": u, "unitHeight": 1}
+        (out / "assets" / f"{aid}.json").write_text(json.dumps(rec), encoding="utf-8")
+        if mods is not None:
+            nets[aid] = {"portConfigurations": [
+                {"portConfiguration": {"id": f"{aid}-{m}", "name": m, "connectorType": "LC",
+                                       "portCount": n, "portStart": 1},
+                 "connectionsAndPaths": []} for m, n in mods]}
+
+    put("R1", "rack", "site", "R1")
+    put("SW", "network", "R1", "SW", [("m", 8)], u=10)
+    put("NN", "patch-panel", "R1", "NN", u=30)
+    put("P", "patch-panel", "R1", "P", [("A", 6), ("B", 6)], u=40)
+
+    def e(aid, port, module, rack=None):
+        end = {"assetId": aid, "networkModule": module, "portNumber": port, "rearPort": False,
+               "connectorType": "LC", "assetName": aid,
+               "assetType": tree[aid]["type"] if aid in tree else "patch-panel"}
+        if rack:
+            end["assetPath"] = [{"elementType": "rack", "id": rack[0], "name": rack[1]}]
+        return end
+
+    far = {1: e("OUT", 1, "A", ("RX-uuid", "RX")), 2: e("OUT", 1, "B", ("RX-uuid", "RX")),
+           3: e("OUT", 6, "A", ("RX-uuid", "RX")), 8: e("OUT", 0, "C", ("RX-uuid", "RX")),
+           4: e("NN", 3, "m"),
+           5: e("P", 2, "Z"), 6: e("P", 1, "Y"), 7: e("P", 4, "Z")}
+    for n, other in sorted(far.items()):
+        c = {"id": f"s{n}", "source": e("SW", n, "SW-m"), "destination": other,
+             "cableType": {"length": 3}}
+        nets["SW"]["portConfigurations"][0]["connectionsAndPaths"].append(
+            {"connection": c, "networkPath": {"connections": [c], "beginItem": c["source"],
+                                              "endItem": c["destination"]}})
+    for aid, n in nets.items():
+        (out / "network" / f"{aid}.json").write_text(json.dumps(n), encoding="utf-8")
+    (out / "manifest.json").write_text(json.dumps(
+        {"synced_at": "test", "complete": True, "network_missing": ["NN"], "tree": tree}),
+        encoding="utf-8")
+
+
+def cassette_cases():
+    """Where a connection end lands when the copy has no list of the
+    device's cassettes (code review, 2026-11-10)."""
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_loose_"))
+    try:
+        loose_site(tmp / "s")
+        conv = ita_convert.Converter(tmp / "s")
+        m = conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    far = {n: m["ports"][f"R1:SW:{n}"]["peer"] for n in range(1, 9)}
+    check("two cassettes of a panel outside the copy never share a port (A1 is not B1)",
+          len({far[1], far[2], far[3], far[8]}) == 4, far)
+    check("...port N of its first cassette is map port N, the next cassette follows it",
+          (far[1], far[3], far[2]) == ("RX:OUT:1", "RX:OUT:6", "RX:OUT:7"), far)
+    check("...and a cassette is numbered from 0 only where a port 0 is seen",
+          far[8] == "RX:OUT:8", far)
+    check("a copied panel ITA gave no answer for: port 3, seen from the far side, is port 3",
+          far[4] == "R1:NN:3", far)
+    check("cassettes a panel's answer did not list get ranges that never overlap",
+          len({far[5], far[6], far[7]}) == 3
+          and all(int(far[n].rsplit(":", 1)[1]) > 12 for n in (5, 6, 7)), far)
+    check("...so no port is reported on two paths because of it, and each is noted once",
+          "ports on two different paths (check in ITA)" not in conv.notes
+          and conv.notes["connection ends on an unknown cassette"] == 2, dict(conv.notes))
+
+
 def review_cases():
     tmp = Path(tempfile.mkdtemp(prefix="ita_convert_small_"))
     try:
@@ -326,7 +410,7 @@ def review_cases():
     p5 = ex[:ex.index(next(l for l in ex[1:] if l.startswith("E0")))]
     check("--explain-u: one panel, cassette by cassette, ITA's ports beside the map's",
           p5[0].startswith("E0 U39 type=patch-panel net=yes cassettes=2 ports=49")
-          and "ita_used=?" in p5[0] and "extra=6" in p5[0]
+          and "ita_used=?" in p5[0] and "extra=5" in p5[0]
           and p5[1] == "E1 match: extra=1 id=2"
           and "K1 A start=1 n=24 LC used=? | front 5 | rear - | map 5" in p5
           and "K2 B start=0 n=24 LC used=? | front 0 | rear - | map 0" in p5
@@ -357,6 +441,7 @@ def review_cases():
     check("...in counts and short words: no name from the site",
           not any(d.split(":")[-1] in " ".join(tb) for d in m["devices"] if len(d) > 6), tb)
     mpo_cases()
+    cassette_cases()
 
 
 def mpo_cases():
