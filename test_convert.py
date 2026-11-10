@@ -274,7 +274,7 @@ def small_site(out):
         encoding="utf-8")
 
 
-def loose_site(out):
+def loose_site(out, rack_ids=True):
     """Ends on cassettes the copy holds no list of: a panel outside the copy
     (always so), a copied panel ITA gave no answer for (404/501 on the first
     real runs), and cassettes a panel's own answer did not list.
@@ -283,6 +283,14 @@ def loose_site(out):
                                                   OUT: outside the copy, rack RX
       SW:4 - NN m:3                               NN: in R1, no answer from ITA
       SW:5 - P Z:2     SW:6 - P Y:1     SW:7 - P Z:4     P: lists cassettes A, B
+
+    And names that repeat, as they do on the real site:
+      four devices named PDU in R1
+      SW2:1 - OUT5, in ANOTHER rack that is also named R1
+      SW2:2, SW2:3 - OUT6, OUT7, in two racks outside the copy, both named RZ
+      SW2:4, SW2:5 - two devices named ODF, both in rack RX
+    rack_ids=False: the ends of copied devices carry no path, so nothing
+    shows that the paths name racks by the same ids as the tree.
     """
     (out / "assets").mkdir(parents=True)
     (out / "network").mkdir()
@@ -303,44 +311,60 @@ def loose_site(out):
 
     put("R1", "rack", "site", "R1")
     put("SW", "network", "R1", "SW", [("m", 8)], u=10)
+    put("SW2", "network", "R1", "SW2", [("m", 8)], u=11)
     put("NN", "patch-panel", "R1", "NN", u=30)
     put("P", "patch-panel", "R1", "P", [("A", 6), ("B", 6)], u=40)
+    pdus = ["PDU-a1", "PDU-b2", "PDU-c3", "PDU-d4"]
+    for aid in pdus:
+        put(aid, "rack-mount-pdu", "R1", "PDU")
 
-    def e(aid, port, module, rack=None):
+    def e(aid, port, module, rack=None, name=None):
         end = {"assetId": aid, "networkModule": module, "portNumber": port, "rearPort": False,
-               "connectorType": "LC", "assetName": aid,
+               "connectorType": "LC", "assetName": name or aid,
                "assetType": tree[aid]["type"] if aid in tree else "patch-panel"}
+        if aid in tree and rack_ids:
+            rack = ("R1", "R1")
         if rack:
             end["assetPath"] = [{"elementType": "rack", "id": rack[0], "name": rack[1]}]
         return end
 
-    far = {1: e("OUT", 1, "A", ("RX-uuid", "RX")), 2: e("OUT", 1, "B", ("RX-uuid", "RX")),
-           3: e("OUT", 6, "A", ("RX-uuid", "RX")), 8: e("OUT", 0, "C", ("RX-uuid", "RX")),
-           4: e("NN", 3, "m"),
-           5: e("P", 2, "Z"), 6: e("P", 1, "Y"), 7: e("P", 4, "Z")}
-    for n, other in sorted(far.items()):
-        c = {"id": f"s{n}", "source": e("SW", n, "SW-m"), "destination": other,
+    rx = ("RX-uuid", "RX")
+    far = {("SW", 1): e("OUT", 1, "A", rx), ("SW", 2): e("OUT", 1, "B", rx),
+           ("SW", 3): e("OUT", 6, "A", rx), ("SW", 8): e("OUT", 0, "C", rx),
+           ("SW", 4): e("NN", 3, "m"),
+           ("SW", 5): e("P", 2, "Z"), ("SW", 6): e("P", 1, "Y"), ("SW", 7): e("P", 4, "Z"),
+           ("SW2", 1): e("OUT5", 1, "A", ("R1-other", "R1")),
+           ("SW2", 2): e("OUT6", 1, "A", ("RZ-one", "RZ")),
+           ("SW2", 3): e("OUT7", 1, "A", ("RZ-two", "RZ")),
+           ("SW2", 4): e("ODF-x1", 1, "A", rx, name="ODF"),
+           ("SW2", 5): e("ODF-y2", 1, "A", rx, name="ODF")}
+    for (sw, n), other in sorted(far.items()):
+        c = {"id": f"s-{sw}-{n}", "source": e(sw, n, f"{sw}-m"), "destination": other,
              "cableType": {"length": 3}}
-        nets["SW"]["portConfigurations"][0]["connectionsAndPaths"].append(
+        nets[sw]["portConfigurations"][0]["connectionsAndPaths"].append(
             {"connection": c, "networkPath": {"connections": [c], "beginItem": c["source"],
                                               "endItem": c["destination"]}})
     for aid, n in nets.items():
         (out / "network" / f"{aid}.json").write_text(json.dumps(n), encoding="utf-8")
     (out / "manifest.json").write_text(json.dumps(
-        {"synced_at": "test", "complete": True, "network_missing": ["NN"], "tree": tree}),
-        encoding="utf-8")
+        {"synced_at": "test", "complete": True, "network_missing": ["NN"] + pdus,
+         "tree": tree}), encoding="utf-8")
+
+
+def loose(**how):
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_loose_"))
+    try:
+        loose_site(tmp / "s", **how)
+        conv = ita_convert.Converter(tmp / "s")
+        return conv, conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def cassette_cases():
     """Where a connection end lands when the copy has no list of the
     device's cassettes (code review, 2026-11-10)."""
-    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_loose_"))
-    try:
-        loose_site(tmp / "s")
-        conv = ita_convert.Converter(tmp / "s")
-        m = conv.convert()
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    conv, m = loose()
     far = {n: m["ports"][f"R1:SW:{n}"]["peer"] for n in range(1, 9)}
     check("two cassettes of a panel outside the copy never share a port (A1 is not B1)",
           len({far[1], far[2], far[3], far[8]}) == 4, far)
@@ -356,6 +380,40 @@ def cassette_cases():
     check("...so no port is reported on two paths because of it, and each is noted once",
           "ports on two different paths (check in ITA)" not in conv.notes
           and conv.notes["connection ends on an unknown cassette"] == 2, dict(conv.notes))
+    name_cases(conv, m)
+
+
+def name_cases(conv, m):
+    """Names repeat on the real site: rows and racks across rooms, devices
+    in one rack (first real runs: 8 devices of one name were counted as 28
+    and named ...#2#2#2). The id ITA gives tells them apart."""
+    D = m["devices"]
+    check("devices sharing a name in a rack are told apart by their own id, each noted once",
+          {d for d in D if ":PDU" in d} == {f"R1:PDU#PDU-{x}" for x in ("a1", "b2", "c3", "d4")}
+          and {"RX:ODF#ODF-x1", "RX:ODF#ODF-y2"} <= set(D)
+          and conv.notes["devices sharing a name in one rack"] == 6,
+          (sorted(D), dict(conv.notes)))
+    check("...and keep their plain name for the screen",
+          all(d["name"] == "PDU" for k, d in D.items() if ":PDU" in k), "")
+    check("a rack outside the copy that shares a copied rack's name stays outside it",
+          D.get("R1#R1-oth:OUT5", {}).get("rack") == "R1#R1-oth"
+          and m["racks"].get("R1#R1-oth", {}).get("external")
+          and not any(d.get("external") for d in D.values() if d["rack"] == "R1"),
+          (sorted(D), sorted(m["racks"])))
+    check("two racks outside the copy that share a name are two racks",
+          D.get("RZ#RZ-one:OUT6", {}).get("rack") == "RZ#RZ-one"
+          and D.get("RZ#RZ-two:OUT7", {}).get("rack") == "RZ#RZ-two"
+          and D["RX:OUT"]["rack"] == "RX", sorted(m["racks"]))
+    conv2, m2 = loose(rack_ids=False)
+    check("with nothing to show that paths name racks by the tree's ids, the name decides, "
+          "and it is noted",
+          m2["devices"].get("R1:OUT5", {}).get("rack") == "R1"
+          and conv2.notes["outside devices put in a copied rack by its name"] == 1
+          and "outside devices put in a copied rack by its name" not in conv.notes
+          and "RZ#RZ-two:OUT7" in m2["devices"], (sorted(m2["devices"]), dict(conv2.notes)))
+    tb = ita_convert.type_back(m2, conv2.notes, conv2.shape)
+    check("...in a short word of its own on the typed-back line",
+          "nameRack=1" in tb[3] and "extDev=6" in tb[3] and "dupDev=6" in tb[3], tb)
 
 
 def review_cases():

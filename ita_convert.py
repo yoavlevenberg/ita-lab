@@ -68,6 +68,7 @@ ROOM = re.compile(r"room", re.I)
 CONTAINER = re.compile(r"location|site|building|floor|room|row|rack(?![-_ ]?mount)|cage|zone"
                        r"|folder|unsupported", re.I)
 DEFAULT_RACK_U = 42
+NOWHERE = "(outside the copy)"     # the stub rack of a device whose path names no rack
 
 
 def media_of(connector):
@@ -123,6 +124,10 @@ class Converter:
         self.device_of_asset = {}     # ITA device uuid -> map device id
         self.modules = {}             # map device id -> its cassettes, in port order
         self.ends = {}                # ITA device uuid -> {(cassette, connector): numbers}
+        self.outside = OrderedDict()  # ITA uuid of a device outside the copy -> one end of it
+        self.path_racks = Counter()   # do paths name a copied device's rack by its tree id?
+        self.stub_rack = {}           # outside device -> (map rack id, ITA rack id, by name only)
+        self.device_id = {}           # ITA device uuid -> map id, where the name is shared
 
     # -- the tree ------------------------------------------------------------
     def _ancestor(self, aid, pattern):
@@ -138,12 +143,14 @@ class Converter:
 
     def build_racks(self):
         racks = [a for a, t in self.tree.items() if RACK.search(t["type"])]
-        names = Counter(self._name(a) for a in racks)
+        named = defaultdict(list)
+        for aid in racks:
+            named[self._name(aid)].append(aid)
         position = Counter()
         for aid in racks:
             name = self._name(aid)
-            rid = name if names[name] == 1 else f"{name}#{aid[:6]}"
-            if names[name] > 1:
+            rid = name if len(named[name]) == 1 else _apart(name, named[name])[aid]
+            if len(named[name]) > 1:
                 self.notes["racks sharing a name (uuid added)"] += 1
             parent = self.tree[aid].get("parent")
             row = self._name(parent) if parent and ROW.search(self.tree[parent]["type"]) else None
@@ -161,8 +168,9 @@ class Converter:
 
     # -- every connection end, read before any port is made -------------------
     def _every_end(self):
-        """Each END the copy names: the ones collect() and the two builders
-        turn into ports, no more."""
+        """Each END the copy names: every one collect() and the two builders
+        turn into a port (and the ends of a cable that is on no path, which
+        get none)."""
         for body in self.network.values():
             for pc in body.get("portConfigurations") or []:
                 for cp in pc.get("connectionsAndPaths") or []:
@@ -183,9 +191,70 @@ class Converter:
         cassette B of such a panel landed on cassette A's ports, and one
         range could run into the next (code review, 2026-11-10)."""
         for end in self._every_end():
-            self.ends.setdefault(str(end.get("assetId")), OrderedDict()).setdefault(
+            aid = str(end.get("assetId"))
+            self.ends.setdefault(aid, OrderedDict()).setdefault(
                 (_module(end), end.get("connectorType")), set()).add(
                 int(end.get("portNumber") or 0))
+            rack, home = _path_rack(end), self._home(aid)
+            if home is None:
+                # a device outside the copy: keep the end whose path names its rack
+                if aid not in self.outside or (rack and not _path_rack(self.outside[aid])):
+                    self.outside[aid] = end
+            elif rack and rack.get("id") is not None:
+                self.path_racks["same" if str(rack["id"]) == home else "other"] += 1
+
+    def _home(self, aid):
+        """The copied rack (its ITA id) a copied device stands in; None for
+        anything build_devices() does not add."""
+        t = self.tree.get(aid)
+        if t is None or CONTAINER.search(t["type"]):
+            return None
+        return self._ancestor(aid, RACK)
+
+    def plan_names(self):
+        """Names repeat on the real site — racks across rooms, devices within
+        a rack — and the id ITA gives is what tells two of them apart. Decided
+        here, before any device is made, so a map id never depends on the
+        order things were read in. (First real runs: 8 devices of one name in
+        a rack became ...#2#2#2 and were counted as 28, and a rack outside the
+        copy joined whichever rack had its name.)
+
+        A device outside the copy goes in the rack its path names. That is a
+        copied rack only when the path gives a copied rack's id. Where nothing
+        in the copy shows that paths name racks by the tree's ids, the name is
+        all there is: the one copied rack of that name takes the device, and
+        that is noted."""
+        proven = self.path_racks["same"] > 0 and not self.path_racks["other"]
+        copied = defaultdict(list)                  # rack name -> the copied racks of that name
+        for aid in self.rack_of_asset:
+            copied[self._name(aid)].append(aid)
+        homes, outside = {}, defaultdict(set)       # rack name -> the outside racks of that name
+        for aid, end in self.outside.items():
+            rack = _path_rack(end)
+            name = str(rack.get("name")).strip() if rack else NOWHERE
+            pid = str(rack["id"]) if rack and rack.get("id") is not None else None
+            if pid in self.rack_of_asset:
+                self.stub_rack[aid] = (self.rack_of_asset[pid], pid, False)
+            elif rack and not proven and len(copied.get(name, ())) == 1:
+                self.stub_rack[aid] = (self.rack_of_asset[copied[name][0]], pid, True)
+            else:
+                homes[aid] = (name, pid)
+                outside[name].add(pid)
+        for aid, (name, pid) in homes.items():
+            alone = len(outside[name]) == 1 and not copied.get(name)
+            ids = {i for i in outside[name] if i} | set(copied.get(name, ()))
+            self.stub_rack[aid] = (name if alone or pid is None else _apart(name, ids)[pid],
+                                   pid, False)
+        twins = defaultdict(list)                   # (rack, name) -> the devices of that name there
+        for aid in self.tree:
+            if self._home(aid):
+                twins[(self.rack_of_asset[self._home(aid)], self._name(aid))].append(aid)
+        for aid, end in self.outside.items():
+            twins[(self.stub_rack[aid][0], str(end.get("assetName") or aid).strip())].append(aid)
+        for (rack, name), aids in twins.items():
+            if len(aids) > 1:
+                for aid, label in _apart(name, aids).items():
+                    self.device_id[aid] = f"{rack}:{label}"
 
     def _unlisted(self, aid, mods, top):
         """The cassettes the copy's connections name on a device that its own
@@ -223,8 +292,10 @@ class Converter:
 
     def _add_device(self, aid, rack, record, net, external=False):
         name = str(record.get("name") or aid).strip()
-        did = f"{rack}:{name}"
-        while did in self.topology["devices"]:
+        did = self.device_id.get(aid) or f"{rack}:{name}"
+        if aid in self.device_id:
+            self.notes["devices sharing a name in one rack"] += 1
+        while did in self.topology["devices"]:      # plan_names() saw them all: not reached
             did += "#2"
             self.notes["devices sharing a name in one rack"] += 1
         mods, offset, counts = [], 0, Counter()
@@ -324,25 +395,22 @@ class Converter:
         return m, how
 
     def _stub(self, end):
-        """A device outside the copy: placed in a stub rack named from the
-        path ITA put on the connection end."""
-        path = end.get("assetPath") or []
-        rack = next((p for p in path if RACK.search(str(p.get("elementType", "")))), None)
-        rname = str(rack.get("name") if rack else "(outside the copy)").strip()
-        rid = self.rack_of_asset.get(str(rack.get("id"))) if rack else None
-        if rid is None:
-            rid = rname
-            if rid not in self.topology["racks"]:
-                self.topology["racks"][rid] = {
-                    "id": rid, "uuid": rack.get("id") if rack else None, "pod": None,
-                    "row": None, "room": None, "position": 0, "is_eor": False,
-                    "is_mda": False, "u_height": DEFAULT_RACK_U, "domain": None,
-                    "external": True}
-                self.notes["racks outside the copy (stubs)"] += 1
-            if rack:
-                self.rack_of_asset[str(rack.get("id"))] = rid
+        """A device outside the copy, in the rack plan_names() found for it:
+        a copied rack, or a stub rack named from the path ITA put on the end."""
+        aid = str(end.get("assetId"))
+        end = self.outside.get(aid, end)
+        rid, uuid, by_name = self.stub_rack.get(aid) or (NOWHERE, None, False)
+        if rid not in self.topology["racks"]:
+            self.topology["racks"][rid] = {
+                "id": rid, "uuid": uuid, "pod": None,
+                "row": None, "room": None, "position": 0, "is_eor": False,
+                "is_mda": False, "u_height": DEFAULT_RACK_U, "domain": None,
+                "external": True}
+            self.notes["racks outside the copy (stubs)"] += 1
+        if by_name:
+            self.notes["outside devices put in a copied rack by its name"] += 1
         self.notes["devices outside the copy (stubs)"] += 1
-        return self._add_device(str(end.get("assetId")), rid,
+        return self._add_device(aid, rid,
                                 {"name": end.get("assetName"), "type": end.get("assetType")},
                                 None, external=True)
 
@@ -507,6 +575,7 @@ class Converter:
     def convert(self):
         self.build_racks()
         self.gather_ends()
+        self.plan_names()
         self.build_devices()
         connections, paths = self.collect()
         self.build_trunks(connections)
@@ -537,6 +606,19 @@ def _kind(connector):
 
 def _rear(end):
     return bool(end.get("rearPort") or end.get("readPort"))
+
+
+def _path_rack(end):
+    """The rack on the path ITA put on a connection end, or None."""
+    return next((p for p in end.get("assetPath") or []
+                 if isinstance(p, dict) and RACK.search(str(p.get("elementType", "")))), None)
+
+
+def _apart(name, ids):
+    """{id: NAME#<the id's first six characters>} — the whole id where those
+    repeat — so things that share a name stay apart."""
+    short = Counter(str(i)[:6] for i in ids)
+    return {i: f"{name}#{i if short[str(i)[:6]] > 1 else str(i)[:6]}" for i in ids}
 
 
 def _module(end):
@@ -776,6 +858,7 @@ SHORT = (("THE COPY IS INCOMPLETE", "INCOMPLETE"),
          ("connection ends on an unknown cassette", "unkCassette"),
          ("racks outside the copy", "extRack"),
          ("devices outside the copy", "extDev"),
+         ("outside devices put in a copied rack", "nameRack"),
          ("rear-to-rear links inside one rack", "rearRear"),
          ("MPO/MTP trunk links", "mpo"),
          ("paths whose cables do not chain", "noChain"),
