@@ -403,6 +403,64 @@ def cassette_cases():
           and conv.notes["connection ends on an unknown cassette"] == 2, dict(conv.notes))
     name_cases(conv, m)
     diagnose_cases(conv, m)
+    jumper_cases()
+
+
+def jumper_site(out):
+    """A jumper panel as the user describes them (2026-11-10): cassettes of
+    six, A1-A6 then B1-B6. Here ITA's answer lists ONE port group of 12 while
+    the connections name cassette A or B and a port 1-6 — one way ITA may
+    record it, and one that would take B5 for port 5. Not known yet; the
+    diagnostics must show it if it is so.
+
+      SW:1 - J A:2      SW:2 - J B:5      J: one port group, 12 ports
+    """
+    (out / "assets").mkdir(parents=True)
+    (out / "network").mkdir()
+    tree = {"site": {"parent": None, "type": "location"},
+            "R1": {"parent": "site", "type": "rack"},
+            "SW": {"parent": "R1", "type": "network"},
+            "J": {"parent": "R1", "type": "patch-panel"}}
+    for aid, u in (("R1", None), ("SW", 10), ("J", 40)):
+        rec = {"id": aid, "type": tree[aid]["type"], "name": aid}
+        if u:
+            rec["rackMounted"] = {"unitPosition": u, "unitHeight": 1}
+        (out / "assets" / f"{aid}.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    def e(aid, port, module):
+        return {"assetId": aid, "networkModule": module, "portNumber": port, "rearPort": False,
+                "connectorType": "LC", "assetName": aid, "assetType": tree[aid]["type"]}
+    cps = []
+    for n, (cas, port) in ((1, ("A", 2)), (2, ("B", 5))):
+        c = {"id": f"j{n}", "source": e("SW", n, "SW-m"), "destination": e("J", port, cas),
+             "cableType": {"length": 2}}
+        cps.append({"connection": c, "networkPath": {"connections": [c], "beginItem": c["source"],
+                                                      "endItem": c["destination"]}})
+    for aid, n, held in (("SW", 2, cps), ("J", 12, [])):
+        (out / "network" / f"{aid}.json").write_text(json.dumps({"portConfigurations": [
+            {"portConfiguration": {"id": f"{aid}-m", "name": "m", "connectorType": "LC",
+                                   "portCount": n, "portStart": 1},
+             "connectionsAndPaths": held}]}), encoding="utf-8")
+    (out / "manifest.json").write_text(json.dumps(
+        {"synced_at": "test", "complete": True, "network_missing": [], "tree": tree}),
+        encoding="utf-8")
+
+
+def jumper_cases():
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_jumper_"))
+    try:
+        jumper_site(tmp / "s")
+        conv = ita_convert.Converter(tmp / "s")
+        conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    d = ita_convert.diagnose(conv)
+    check("C7: ends that name a cassette label (A, B) the device's list lacks, guessed onto "
+          "its one port group, are counted with their highest port number",
+          "match=id:2,media:2 " in d[2] and " lblGuess=2 lblMax=5 " in d[2], d)
+    e = ita_convert.explain(conv, 40)
+    check("--explain-u shows the cassette labels the ends name next to how they were matched",
+          e[1] == "E1 match: media=2 named=A,B", e)
 
 
 def diagnose_cases(conv, m):
@@ -417,7 +475,8 @@ def diagnose_cases(conv, m):
     check("C6: devices ITA gave no ports for, by type, and how many are seen from the far side",
           d[1] == "C6 noNet=5 types=rack-mount-pdu:4,patch-panel:1 seen=1 inDevice=0", d)
     check("C7: how ends found their cassette, cassette shapes, numbers past a cassette, order",
-          d[2] == "C7 match=id:16,name:3,extra:4 outRange=1 order=1 cas=s1n6x4,s1n8x2", d)
+          d[2] == "C7 match=id:16,name:3,extra:4 outRange=1 order=1 lblGuess=0 lblMax=0 "
+                  "cas=s1n6x4,s1n8x2", d)
     check("C8: ports taken in ITA and in the map; panel ports taken with no front cable and "
           "free with one; paths ending on a rear port; a second path between two ports",
           d[3] == "C8 used ita=? map=18 noFront=1 frontFree=1 endRear=1 samePair=1", d)
@@ -808,7 +867,7 @@ def main():
     # that would send a real-data fix the wrong way
     d = ita_convert.diagnose(conv)
     check("on a clean copy the diagnostic lines flag nothing",
-          "outRange=0 order=0" in d[2]
+          "outRange=0 order=0 lblGuess=0" in d[2]
           and " noFront=0 frontFree=0 endRear=0 samePair=0" in d[3], d)
     check("...and every line is typed back whole, the flags before the long lists",
           all(len(x) <= 120 and not x.endswith("...") for x in d), d)

@@ -836,7 +836,11 @@ def explain(conv, u, rack=None):
         lines.append(f"E0 U{u} type={conv.tree[aid]['type']} net={'yes' if has_net else 'no'} "
                      f"cassettes={len(mods)} ports={len(ports)} ita_used={conf_used} "
                      f"map_used={len(used)} extra={sum(m['count'] for m in extra)}")
-        lines.append(f"E1 match: " + " ".join(f"{k}={v}" for k, v in sorted(how.items())))
+        # the cassette labels (A, B, 1) the ends name — short labels only
+        named = sorted({_module(e) for e in once.values()
+                        if _module(e) and LABEL.match(_module(e))}, key=_natural)
+        lines.append(f"E1 match: " + " ".join(f"{k}={v}" for k, v in sorted(how.items()))
+                     + (f" named={','.join(named)}" if named else ""))
         lines.append("E2 cassette fields: " + _names([m["conf"] for m in mods]))
         lines.append("E3 cable fields: " + _names(cables))
         lines.append("E4 SM/MM: " + _modes(
@@ -982,13 +986,18 @@ def diagnose(conv):
         if did in copied:
             once[(did, _module(end), end.get("connectorType"),
                   int(end.get("portNumber") or 0), _rear(end))] = end
-    how, out_range = Counter(), 0
+    how, out_range, guessed = Counter(), 0, []
     for (did, *_), end in once.items():
         m, h = conv._module_for(did, end)
         how[h or "none"] += 1
         n = int(end.get("portNumber") or 0)
         if m is not None and not m.get("extra") and not m["start"] <= n < m["start"] + m["count"]:
             out_range += 1                  # lands on the NEXT cassette's ports
+        if h in ("media", "single") and LABEL.match(_module(end) or "-"):
+            # names cassette A or B, which the device's own list does not have,
+            # and was put on its only group: if the panel is A1-A6, B1-B6
+            # (the user, 2026-11-10) and ports run 1-6, B5 was taken for 5
+            guessed.append(n)
     listed = {did: [m for m in conv.modules.get(did, []) if not m.get("extra")]
               for did in copied}
     shapes = Counter(f"s{m['start']}n{m['count']}" for ms in listed.values() for m in ms)
@@ -1004,6 +1013,7 @@ def diagnose(conv):
     more = len(shapes) - len(common)
     c7 = (f"C7 match={_count(how, key=lambda kv: order.index(kv[0]))} outRange={out_range} "
           f"order={sum(1 for n in names if n != sorted(n, key=_natural))} "
+          f"lblGuess={len(guessed)} lblMax={max(guessed, default=0)} "
           f"cas={_count(common, sep='x')}" + (f"+{more}" if more else ""))
 
     # C8: ports taken — in ITA, in the map, and on panels by the front-only rule
