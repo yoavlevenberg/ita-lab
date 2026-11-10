@@ -252,7 +252,10 @@ class Converter:
         for aid, (name, pid) in homes.items():
             alone = len(outside[name]) == 1 and not copied.get(name)
             ids = {i for i in outside[name] if i} | set(copied.get(name, ()))
-            self.stub_rack[aid] = (name if alone or pid is None else _apart(name, ids)[pid],
+            # a rack whose path gives no id still gets a name of its own: the
+            # bare name may be a copied rack's, and the device is not in it
+            self.stub_rack[aid] = (name if alone else
+                                   _apart(name, ids)[pid] if pid else f"{name}#noid",
                                    pid, False)
         twins = defaultdict(list)                   # (rack, name) -> the devices of that name there
         for aid in self.tree:
@@ -989,11 +992,19 @@ def diagnose(conv):
     listed = {did: [m for m in conv.modules.get(did, []) if not m.get("extra")]
               for did in copied}
     shapes = Counter(f"s{m['start']}n{m['count']}" for ms in listed.values() for m in ms)
-    names = [[str(m["conf"].get("name") or m.get("id")) for m in ms] for ms in listed.values()]
+    # out of order: only cassettes named like labels (A, B, A1, 2), whose
+    # order a technician counts in; "SFP", "RJ45" or "fiber" say nothing of it
+    names = [n for n in ([str(m["conf"].get("name") or "") for m in ms]
+                         for ms in listed.values())
+             if len(n) > 1 and all(x and LABEL.match(x) for x in n)]
     order = ("id", "name", "media", "single", "extra", "none")
-    c7 = (f"C7 match={_count(how, key=lambda kv: order.index(kv[0]))} "
-          f"cas={_count(shapes, key=lambda kv: _natural(kv[0]), sep='x')} outRange={out_range} "
-          f"order={sum(1 for n in names if n != sorted(n, key=_natural))}")
+    # the flags first and the shapes last, and only the four most common:
+    # a full site has dozens of shapes, and a cut line lost the flags
+    common = Counter(dict(shapes.most_common(4)))
+    more = len(shapes) - len(common)
+    c7 = (f"C7 match={_count(how, key=lambda kv: order.index(kv[0]))} outRange={out_range} "
+          f"order={sum(1 for n in names if n != sorted(n, key=_natural))} "
+          f"cas={_count(common, sep='x')}" + (f"+{more}" if more else ""))
 
     # C8: ports taken — in ITA, in the map, and on panels by the front-only rule
     counted = [m["conf"]["portsUsed"] for ms in listed.values() for m in ms
@@ -1003,11 +1014,18 @@ def diagnose(conv):
     in_listed = sum(1 for did, ms in listed.items() for m in ms
                     for i in range(m["offset"] + 1, m["offset"] + m["count"] + 1)
                     if f"{did}:{i}" in used)
+    # a cable in the front: the end of a CONNECTION, never a path's begin or
+    # end item — those name the path's ends, and on a bare trunk fiber they
+    # are the panel ports at either end with nothing plugged in front
     front = set()
-    for (did, *_), end in once.items():
-        where = None if _rear(end) or not panel(did) else conv._where(end)
-        if where:
-            front.add(f"{where[0]}:{where[1]}")
+    for conns, _ in conv._every_path():
+        for c in conns:
+            for end in (c.get("source") or {}, c.get("destination") or {}):
+                did = conv.device_of_asset.get(str(end.get("assetId")))
+                where = (conv._where(end) if did in copied and panel(did) and not _rear(end)
+                         else None)
+                if where:
+                    front.add(f"{where[0]}:{where[1]}")
     taken = {p for p in used if topo["ports"][p]["device"] in copied
              and panel(topo["ports"][p]["device"])}
     c8 = (f"C8 used ita={int(sum(counted)) if counted else '?'} map={in_listed} "

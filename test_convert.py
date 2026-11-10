@@ -289,6 +289,7 @@ def loose_site(out, rack_ids=True):
       SW2:1 - OUT5, in ANOTHER rack that is also named R1
       SW2:2, SW2:3 - OUT6, OUT7, in two racks outside the copy, both named RZ
       SW2:4, SW2:5 - two devices named ODF, both in rack RX
+      SW2:8 - OUT8, in a rack named R1 whose path gives no id
 
     And what the diagnostic lines (C5-C9) look for:
       SW2:6 - P A:9        a port number past the end of its cassette (A has 6)
@@ -347,7 +348,8 @@ def loose_site(out, rack_ids=True):
            ("SW2", 4): e("ODF-x1", 1, "A", rx, name="ODF"),
            ("SW2", 5): e("ODF-y2", 1, "A", rx, name="ODF"),
            ("SW2", 6): e("P", 9, "A"),
-           ("SW2", 7): dict(e("P", 4, "B"), rearPort=True)}
+           ("SW2", 7): dict(e("P", 4, "B"), rearPort=True),
+           ("SW2", 8): e("OUT8", 1, "A", (None, "R1"))}
     for (sw, n), other in sorted(far.items()):
         c = {"id": f"s-{sw}-{n}", "source": e(sw, n, f"{sw}-m"), "destination": other,
              "cableType": {"length": 3, **({"name": "OS2 duplex"} if (sw, n) == ("SW2", 1)
@@ -415,10 +417,10 @@ def diagnose_cases(conv, m):
     check("C6: devices ITA gave no ports for, by type, and how many are seen from the far side",
           d[1] == "C6 noNet=5 types=rack-mount-pdu:4,patch-panel:1 seen=1 inDevice=0", d)
     check("C7: how ends found their cassette, cassette shapes, numbers past a cassette, order",
-          d[2] == "C7 match=id:15,name:3,extra:4 cas=s1n6x4,s1n8x2 outRange=1 order=1", d)
+          d[2] == "C7 match=id:16,name:3,extra:4 outRange=1 order=1 cas=s1n6x4,s1n8x2", d)
     check("C8: ports taken in ITA and in the map; panel ports taken with no front cable and "
           "free with one; paths ending on a rear port; a second path between two ports",
-          d[3] == "C8 used ita=? map=17 noFront=1 frontFree=1 endRear=1 samePair=1", d)
+          d[3] == "C8 used ita=? map=18 noFront=1 frontFree=1 endRear=1 samePair=1", d)
     check("C9: where single/multi mode is written, as field names and counts",
           d[4] == "C9 SM/MM: cable.name:SMx1", d)
     check("the four lines typed back so far are unchanged",
@@ -456,6 +458,9 @@ def name_cases(conv, m):
           and m["racks"].get("R1#R1-oth", {}).get("external")
           and not any(d.get("external") for d in D.values() if d["rack"] == "R1"),
           (sorted(D), sorted(m["racks"])))
+    check("...nor one whose path names it without an id",
+          D.get("R1#noid:OUT8", {}).get("rack") == "R1#noid"
+          and m["racks"]["R1#noid"].get("external"), (sorted(D), sorted(m["racks"])))
     check("two racks outside the copy that share a name are two racks",
           D.get("RZ#RZ-one:OUT6", {}).get("rack") == "RZ#RZ-one"
           and D.get("RZ#RZ-two:OUT7", {}).get("rack") == "RZ#RZ-two"
@@ -464,12 +469,13 @@ def name_cases(conv, m):
     check("with nothing to show that paths name racks by the tree's ids, the name decides, "
           "and it is noted",
           m2["devices"].get("R1:OUT5", {}).get("rack") == "R1"
-          and conv2.notes["outside devices put in a copied rack by its name"] == 1
+          and m2["devices"].get("R1:OUT8", {}).get("rack") == "R1"
+          and conv2.notes["outside devices put in a copied rack by its name"] == 2
           and "outside devices put in a copied rack by its name" not in conv.notes
           and "RZ#RZ-two:OUT7" in m2["devices"], (sorted(m2["devices"]), dict(conv2.notes)))
     tb = ita_convert.type_back(m2, conv2.notes, conv2.shape)
     check("...in a short word of its own on the typed-back line",
-          "nameRack=1" in tb[3] and "extDev=6" in tb[3] and "dupDev=6" in tb[3], tb)
+          "nameRack=2" in tb[3] and "extDev=7" in tb[3] and "dupDev=6" in tb[3], tb)
 
 
 def review_cases():
@@ -792,6 +798,14 @@ def main():
 
     check("racks: the same set, nothing added, nothing lost",
           set(m["racks"]) == set(t["racks"]), set(m["racks"]) ^ set(t["racks"]))
+    # a clean copy: whatever the diagnostic lines flag on it is a false alarm
+    # that would send a real-data fix the wrong way
+    d = ita_convert.diagnose(conv)
+    check("on a clean copy the diagnostic lines flag nothing",
+          "outRange=0 order=0" in d[2]
+          and " noFront=0 frontFree=0 endRear=0 samePair=0" in d[3], d)
+    check("...and every line is typed back whole, the flags before the long lists",
+          all(len(x) <= 120 and not x.endswith("...") for x in d), d)
     check("racks keep their row from the tree; pod and EOR are left for the site config",
           all(m["racks"][r]["row"] == f"{t['racks'][r]['pod']}-{t['racks'][r]['row']}"
               and m["racks"][r]["pod"] is None for r in t["racks"]), "")
