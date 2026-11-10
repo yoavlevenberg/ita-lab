@@ -105,6 +105,7 @@ def classify(topology, edge):
 
 
 def _trunk_rows(topology):
+    import pathengine                   # its rule for a strand on real panel ports
     for edge in topology["edges"]:
         kind = classify(topology, edge)
         for media, ct in edge["cable_types"].items():
@@ -112,6 +113,13 @@ def _trunk_rows(topology):
             used = len(ct.get("strands") or {})
             if not cap:
                 continue
+            phys = pathengine.physical_strands(edge, media)
+            if phys:
+                # on a map from ITA a cord in a strand's panel port takes the
+                # strand though no circuit is recorded on it — as the planner sees it
+                usable = pathengine._usable(topology, phys, edge["from"], edge["to"])
+                taken = ct.get("strands") or {}
+                used = sum(1 for i in range(1, cap + 1) if str(i) in taken or not usable(i))
             yield {
                 "id": edge["id"], "media": media, "kind": kind,
                 "kind_he": TRUNK_KINDS[kind],

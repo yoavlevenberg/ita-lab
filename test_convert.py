@@ -643,6 +643,12 @@ def engine_cases():
     except pathengine.RouteError:
         offered = False
     check("a strand whose panel port is taken is never offered", not offered, "")
+    import capacity
+    row = lambda t: next(r for r in capacity._trunk_rows(t)                 # noqa: E731
+                         if r["id"] == "R1<->R2" and r["media"] == "fiber")
+    check("...and the capacity report counts it taken too, not only strands with a circuit",
+          (row(base)["used"], row(m2)["used"], row(m2)["remaining"]) == (1, 2, 0),
+          (row(base), row(m2)))
 
     # a short trunk whose only "free" strand has a cord on its far panel port:
     # not full by its own count, yet it carries nothing — routes go round it
