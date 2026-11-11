@@ -41,7 +41,10 @@ python server.py --map ita_cache\<שם>\topology.json
 
 - `ita_sync.py` מעתיק ל-`ita_cache\<שם>\` את הנכסים ואת תשובות network-paths.
 - `ita_convert.py` בונה מהעותק `topology.json` באותו פורמט שהמנוע מנתב עליו.
-  בסוף: בלוק "TYPE BACK ONLY THESE LINES" — `C1`–`C4` סיכום, `C5`–`C9` אבחון.
+  בסוף: בלוק "TYPE BACK ONLY THESE LINES" — `C1`–`C4` סיכום, `C5`–`C10` אבחון.
+  אם ההמרה נכשלת מודפסת שורה אחת, `C0 failed: <סוג השגיאה> at <קובץ:שורה>` — בלי הערך
+  שעליו נכשלה (הוא יכול להיות שם אמיתי). `--trace` מראה את ה-traceback המלא של Python:
+  לקרוא שם, לא להקליד חזרה.
 - `--explain-u <U>` (ועם כמה ארונות גם `--explain-rack "<שם>"`) מראה רכיב אחד
   קסטה-קסטה: מה ITA אמר ומה המפה עשתה, במספרי פורטים בלבד. לא כותב כלום.
 - `ita_cache/` ו-`probe_out/` לא נכנסים ל-git ולא יוצאים מהרשת הסגורה. קובץ

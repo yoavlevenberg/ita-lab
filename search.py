@@ -40,6 +40,7 @@ import re
 import fuzzy
 import layout
 import serials
+from pathengine import port_span
 
 RACK_RE = re.compile(r"^[A-D]\d{1,2}-[SN]\d{1,2}$", re.I)
 POD_RE = re.compile(r"^[A-D]\d{1,2}$", re.I)
@@ -65,10 +66,10 @@ def _port_hit(topology, port_id, why):
 
 def _device_hit(topology, dev, why, free=None):
     if free is None:
-        total = dev["fiber_ports"] + dev["copper_ports"]
+        total = port_span(dev)
         free = sum(1 for i in range(1, total + 1)
                    if topology["ports"].get(f"{dev['id']}:{i}", {}).get("status") == "free")
-    total = dev["fiber_ports"] + dev["copper_ports"]
+    total = port_span(dev)
     return {
         "kind": "device", "id": dev["id"], "why": why,
         "title": f"{dev['rack']} · {dev['name']}",
@@ -154,7 +155,7 @@ def search(topology, query, limit=MAX_RESULTS):
                 if pid in ports:
                     add(_port_hit(topology, pid, f"פורט {index} של סיריאל {serial}"), 0)
                 else:
-                    total = dev["fiber_ports"] + dev["copper_ports"]
+                    total = port_span(dev)
                     add({**_device_hit(topology, dev, f"סיריאל {serial}"),
                          "note": f"אין פורט {index} — לרכיב יש {total}"}, 0)
             else:

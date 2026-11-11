@@ -206,6 +206,7 @@
   }
   .p:hover{transform:scale(1.14); z-index:2}
   .p.free{border-color:#2c6b36; background:#122a17; color:#7ee495}
+  .p.na{color:var(--muted); cursor:default; border-style:dashed}
   .p.used{border-color:#7d2b28; background:#2a1414; color:#ff9d97}
   .p.transit{border-color:#7a5a1c; background:#2a2110; color:#f0cd76}
   .p.src{border-color:var(--src); background:#0d2d4d; color:#9fd0ff; box-shadow:0 0 0 1px var(--src)}
@@ -1120,6 +1121,8 @@ function renderDevice(){
   const d = T.devices[sel.device], ports = portsByDevice[d.id];
   const fib = ports.filter(p => p.type === "fiber");
   const cu  = ports.filter(p => p.type === "copper");
+  // a map from ITA: USB, stacking, a connector word the map does not know
+  const other = ports.filter(p => p.type !== "fiber" && p.type !== "copper");
   const used = ports.filter(p => p.status === "used");
 
   $("devTitle").innerHTML = `רכיב <span class="mono" style="color:var(--text)">${escapeHtml(d.name)}</span>`;
@@ -1134,6 +1137,7 @@ function renderDevice(){
 
   html += portGroup("פורטי סיב (Fiber / LC)", fib);
   html += portGroup("פורטי נחושת (Copper / RJ45)", cu);
+  html += portGroup("פורטים אחרים (לא סיב ולא נחושת — מוצגים, לא לתכנון)", other);
 
   if (used.length){
     html += `<div class="grp"><h3>פורטים תפוסים — לאן כל אחד מגיע</h3>
@@ -1158,16 +1162,21 @@ function renderDevice(){
     n.onclick = () => { sel.focusPort = n.dataset.port; showExistingCircuit(n.dataset.cir); });
 }
 
+// A cable is planned on fiber and copper ports only (the engine refuses the rest).
+function plannable(p){ return p.type === "fiber" || p.type === "copper"; }
+
 function portGroup(title, ports){
   if (!ports.length) return "";
   let h = `<div class="grp"><h3>${title} — ${ports.length}</h3><div class="ports">`;
   for (const p of ports){
-    let cls = p.status === "free" ? "free" : (p.role === "transit" ? "transit" : "used");
+    let cls = p.status === "free" ? (plannable(p) ? "free" : "na")
+                                  : (p.role === "transit" ? "transit" : "used");
     if (sel.src === p.id) cls = "src";
     if (sel.dst === p.id) cls = "dst";
     if (sel.focusPort === p.id) cls += " focus";
     const tip = p.status === "free"
-      ? `${p.id} — פנוי (לחץ לבחירה)`
+      ? (plannable(p) ? `${p.id} — פנוי (לחץ לבחירה)`
+                      : `${p.id} — לא סיב ולא נחושת: לא מתכננים עליו חיבור`)
       : `${p.id} — ${p.circuit}` + (p.peer ? ` → ${p.peer_location || locate(p.peer)}` : " (מעבר)");
     h += `<div class="p ${cls}" data-port="${p.id}" title="${tip}">${p.index}</div>`;
   }
@@ -1289,6 +1298,7 @@ function clickPort(portId){
     renderDevice();
     return;
   }
+  if (!plannable(p)){ renderDevice(); return; }     // shown, never an end of a new cable
   // A truncated connection is waiting for a far end, so a click on a free port
   // is most likely aimed at finishing it. Offered, never assumed.
   if (openCircuit && T.circuits[openCircuit] && T.circuits[openCircuit].partial){

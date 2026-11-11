@@ -406,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             for d in TOPOLOGY["devices"].values():
                 if d["rack"] != rid:
                     continue
-                for i in range(1, d["fiber_ports"] + d["copper_ports"] + 1):
+                for i in range(1, pathengine.port_span(d) + 1):
                     p = TOPOLOGY["ports"].get(f"{d['id']}:{i}")
                     if p is None:
                         continue

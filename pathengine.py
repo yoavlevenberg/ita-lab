@@ -189,6 +189,15 @@ def _port(topology, port_id):
     return p
 
 
+def _plannable(port_id, port):
+    """A map converted from ITA also holds ports that are neither fiber nor
+    copper (USB, stacking, a connector word nothing here knows). They are
+    shown, with what is plugged into them; no patch cord is planned on one."""
+    if port["type"] not in ("fiber", "copper"):
+        raise RouteError(f"Port {port_id} is neither fiber nor copper (its connector type "
+                         f"is not one the map knows), so no cable is planned on it.")
+
+
 # --------------------------------------------------------------------------
 # trunk strands  (port-to-port model)
 # --------------------------------------------------------------------------
@@ -297,6 +306,15 @@ def _build_graph(topology, cable_type, domain=None, held_ports=()):
     return g
 
 
+def port_span(dev):
+    """The highest port number on a device: its ports are <device>:1..N.
+    On the synthetic map N is fiber + copper. A device converted from ITA may
+    also list ports that are neither (other_ports) in between, in ITA's own
+    order; left out of N, a walk over the device stopped that many ports short
+    and its last ports were never seen (a real row had 33 such, 2026-11-09)."""
+    return dev["fiber_ports"] + dev["copper_ports"] + dev.get("other_ports", 0)
+
+
 def devices_by_rack(topology):
     """rack id -> its devices, grouped once per map and cached on it.
 
@@ -338,7 +356,7 @@ def _pick_transit_port(topology, rack_id, cable_type, exclude):
             rank = _TRANSIT_DEVICE_PREFERENCE.index(dev["type"])
         except ValueError:
             rank = len(_TRANSIT_DEVICE_PREFERENCE)
-        for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1):
+        for i in range(1, port_span(dev) + 1):
             port_id = f"{dev['id']}:{i}"
             p = ports.get(port_id)
             if (p is not None and p["type"] == cable_type
@@ -399,6 +417,8 @@ def direct_route(topology, src_port_id, dst_port_id):
         raise RouteError(f"Source port {src_port_id} is already in use.")
     if dst["status"] != "free":
         raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    _plannable(src_port_id, src)
+    _plannable(dst_port_id, dst)
     if src["type"] != dst["type"]:
         raise RouteError(f"Cable type mismatch: source is {src['type']}, "
                          f"destination is {dst['type']}. Both ends must be the "
@@ -516,6 +536,8 @@ def resolve_path(src_port_id, dst_port_id, domain=None, topology=None):
         raise RouteError(f"Source port {src_port_id} is already in use.")
     if dst["status"] != "free":
         raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    _plannable(src_port_id, src)
+    _plannable(dst_port_id, dst)
     if src["type"] != dst["type"]:
         raise RouteError(f"Cable type mismatch: source is {src['type']}, destination is "
                          f"{dst['type']}. Both ends must be the same media.")
@@ -690,6 +712,8 @@ def resolve_route_options(src_port_id, dst_port_id, domain=None, count=2, topolo
         raise RouteError(f"Source port {src_port_id} is already in use.")
     if dst["status"] != "free":
         raise RouteError(f"Destination port {dst_port_id} is already in use.")
+    _plannable(src_port_id, src)
+    _plannable(dst_port_id, dst)
     if src["type"] != dst["type"]:
         raise RouteError(f"Cable type mismatch: source is {src['type']}, destination is "
                          f"{dst['type']}. Both ends must be the same media.")

@@ -30,7 +30,7 @@ from pathlib import Path
 
 import workorder
 from pathengine import (load_topology, resolve_path, describe_port,
-                        devices_by_rack, RouteError)
+                        devices_by_rack, port_span, RouteError)
 
 
 def _ports_of(T, dev):
@@ -38,7 +38,7 @@ def _ports_of(T, dev):
     <device>:<index>, so this costs the device's own ports instead of all
     120,256 on the map."""
     out = []
-    for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1):
+    for i in range(1, port_span(dev) + 1):
         p = T["ports"].get(f"{dev['id']}:{i}")
         if p is not None:
             out.append(p)

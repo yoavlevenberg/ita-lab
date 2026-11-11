@@ -393,7 +393,7 @@ def free_port_on_device(topology, device_id, cable_type, exclude=()):
     if not dev:
         return None
     ports = topology["ports"]
-    for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1):
+    for i in range(1, pathengine.port_span(dev) + 1):
         pid = f"{device_id}:{i}"
         p = ports.get(pid)
         if (p is not None and p["status"] == "free"
@@ -608,7 +608,7 @@ def validate(topology, demands, new_devices=()):
                 dev_id = known_serials.get(serial)
                 dev = topology["devices"][dev_id]
                 pool[key] = sum(
-                    1 for i in range(1, dev["fiber_ports"] + dev["copper_ports"] + 1)
+                    1 for i in range(1, pathengine.port_span(dev) + 1)
                     if ports[f"{dev_id}:{i}"]["type"] == media
                     and ports[f"{dev_id}:{i}"]["status"] == "free")
         return pool[key]
@@ -1114,7 +1114,7 @@ def _resolve_endpoints(topology, demands):
                     dev = topology["devices"][index[serial]]
                     d["malformed"] = (f"device {serial} ({dev['label']}) has no port "
                                       f"{wanted} — it has "
-                                      f"{dev['fiber_ports'] + dev['copper_ports']}")
+                                      f"{pathengine.port_span(dev)}")
                 else:
                     d["malformed"] = unknown_port_message(topology, port)
                 break

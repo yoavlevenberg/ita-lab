@@ -38,7 +38,7 @@ UNIT POSITION
 The map counts a device from its TOP U (u_start 42, 1U = U42). ITA's
 unitPosition is taken as the BOTTOM U, the common convention; if devices show
 up shifted by their own height minus one, the server says the top, and
---unit-top flips it. To be confirmed on the first real copy.
+--unit-top flips it. The first real copy (2026-11-09) came out in place as is.
 
 A PARTIAL COPY
 --------------
@@ -55,11 +55,23 @@ import json
 import re
 import sys
 import time
+import traceback
 from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
 
-FIBER = re.compile(r"\b(LC|SC|ST|FC|MPO|MTP|E2000|MU|SFP|QSFP|fib(er|re)|optic)", re.I)
-COPPER = re.compile(r"\b(RJ-?45|RJ-?11|8P8C|CAT ?\d|copper|UTP|STP|110)", re.I)
+# A connector word is read token by token. Not \b: ITA's own words join with
+# "_" (FIBER_LC_OM4_REGULAR), which \b counts as part of a word, so LC there
+# was never found; and not a bare prefix, which took STP, STACKING and SCSI
+# for the fiber connectors ST and SC. The polish and "duplex" written onto a
+# plug's name (LCDuplex, SCAPC) are still that plug.
+_ALONE = r"(?<![A-Za-z0-9]){}(?![A-Za-z0-9])"
+_PLUG = r"({})([AU]?PC)?(DUPLEX|SIMPLEX)?"
+FIBER_WORD = re.compile(r"fib(er|re)|optic", re.I)
+COPPER_WORD = re.compile(r"copper", re.I)
+FIBER = re.compile(_ALONE.format(
+    "(" + _PLUG.format("LC|SC|ST|FC|E2000|MU") + r"|(MPO|MTP)\d*|Q?SFP(P|\d+)?)"), re.I)
+COPPER = re.compile(_ALONE.format(r"(RJ-?45|RJ-?11|8P8C|CAT[ _-]?\d[A-Za-z]?|UTP|STP|110)"),
+                    re.I)
 # "rack", but not "rack-mount-pdu": a PDU mounted in a rack is a device
 # (the first real run, 2026-11-09, counted two PDUs as racks)
 RACK = re.compile(r"rack(?![-_ ]?mount)", re.I)
@@ -73,8 +85,10 @@ NOWHERE = "(outside the copy)"     # the stub rack of a device whose path names 
 
 def media_of(connector):
     c = str(connector or "")
-    if FIBER.search(c):
-        return "fiber"
+    if COPPER_WORD.search(c):               # the word itself says it
+        return "copper"
+    if FIBER_WORD.search(c) or FIBER.search(c) or SM.search(c) or MM.search(c):
+        return "fiber"                      # ...or names a plug, or a fiber grade
     if COPPER.search(c):
         return "copper"
     return "other"
@@ -341,6 +355,10 @@ class Converter:
             "fiber_ports": counts["fiber"], "copper_ports": counts["copper"],
             "serial": str(record.get("serialNumber") or ""),
         }
+        if counts["other"]:
+            # listed in between the others, in ITA's order: without the count
+            # a walk over the device's ports stops that many short of its end
+            dev["other_ports"] = counts["other"]
         if external:
             dev["external"] = True
         elif aid in self.missing:
@@ -628,10 +646,17 @@ def _kind(connector):
     """A connector type as a short generic word for the SHAPE lines — LC, MPO,
     RJ45 — so nothing a site typed in free text reaches the screen."""
     c = str(connector or "")
-    for word in ("MPO", "MTP", "LC", "SC", "ST", "FC", "E2000", "MU", "QSFP", "SFP", "RJ45"):
-        if re.search(word.replace("RJ45", r"RJ-?45"), c, re.I):
+    for word, pattern in KINDS:
+        if pattern.search(c):
             return word
-    return "other" if c else "none"
+    return media_of(c) if c else "none"     # FIBER_REGULAR: fiber, the plug not said
+
+
+KINDS = [(w, re.compile(_ALONE.format(p), re.I)) for w, p in (
+    ("MPO", r"MPO\d*"), ("MTP", r"MTP\d*"), ("LC", _PLUG.format("LC")),
+    ("SC", _PLUG.format("SC")), ("ST", _PLUG.format("ST")), ("FC", _PLUG.format("FC")),
+    ("E2000", _PLUG.format("E2000")), ("MU", _PLUG.format("MU")),
+    ("QSFP", r"QSFP(P|\d+)?"), ("SFP", r"SFP(P|\d+)?"), ("RJ45", r"RJ-?45"))]
 
 
 def _rear(end):
@@ -744,11 +769,9 @@ def summary(topology, notes, shape=None):
 # any fix, this shows what ITA said and what the map made of it, side by
 # side, in port numbers only. Nothing here changes the map.
 
-# not \b: ITA's own connector words join with "_" (FIBER_LC_OM4_REGULAR),
-# which \b counts as part of a word, so OM4 there was never found
-_ALONE = r"(?<![A-Za-z0-9]){}(?![A-Za-z0-9])"
-SM = re.compile(_ALONE.format(r"(OS ?[12]|SMF?|single[- ]?mode|9/125)"), re.I)
-MM = re.compile(_ALONE.format(r"(OM ?[1-5]|MMF?|multi[- ]?mode|50/125|62\.5/125)"), re.I)
+# token by token, like the connector words (_ALONE): OM4 in FIBER_LC_OM4_REGULAR
+SM = re.compile(_ALONE.format(r"(OS[ _]?[12]|SMF?|single[-_ ]?mode|9/125)"), re.I)
+MM = re.compile(_ALONE.format(r"(OM[ _]?[1-5]|MMF?|multi[-_ ]?mode|50/125|62\.5/125)"), re.I)
 # a cassette name short enough to be a label (A, B, 1, M2) and nothing more
 LABEL = re.compile(r"^[A-Za-z]{0,3}\d{0,3}$")
 
@@ -958,12 +981,42 @@ def _fit(line, width=120):
     return line if len(line) <= width else line[:width - 3] + "..."
 
 
+# What a port with an unknown connector is, as one generic word — never the
+# site's own word. "?enum" is a constant in ITA's style (FIBER_LC_OM4_REGULAR)
+# that nothing here knows, "?text" free text, "none" no connector type at all.
+OTHER = [(w, re.compile(p, re.I)) for w, p in (
+    ("usb", r"USB"), ("serial", r"SERIAL|CONSOLE|RS-?232|DB-?9"),
+    ("power", r"POWER|" + _ALONE.format(r"(C13|C14|C19|C20|IEC|NEMA)")),
+    ("coax", r"COAX|" + _ALONE.format("BNC")), ("video", r"HDMI|DISPLAY|KVM|"
+                                                 + _ALONE.format(r"(VGA|DVI)")),
+    ("stack", r"STACK"), ("dac", r"TWINAX|" + _ALONE.format(r"(DAC|CX4)")),
+    ("unknown", r"UNKNOWN|UNDEFINED|GENERIC|OTHER|" + _ALONE.format(r"(NONE|N/?A)")))]
+ENUM = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
+
+
+def _other_kind(connector):
+    c = str(connector or "").strip()
+    if not c:
+        return "none"
+    return next((w for w, p in OTHER if p.search(c)), "?enum" if ENUM.match(c) else "?text")
+
+
+def _failed(exc):
+    """Where an error happened: its type and the lines it came through, the
+    innermost first. Never its text — Python's message for a bad key or a bad
+    number IS the value, and on real data that can be a name."""
+    frames = traceback.extract_tb(exc.__traceback__)[::-1][:4]
+    return (f"{type(exc).__name__} at "
+            + " < ".join(f"{Path(f.filename).name}:{f.lineno}" for f in frames))
+
+
 def diagnose(conv):
-    """Five more lines to type back (C5-C9), for what the first real runs
+    """Six more lines to type back (C5-C10), for what the first real runs
     left open: 8 racks where there are 7, ports taken in the wrong places
-    on one panel, an extra fiber on two, and where single/multi mode is
-    written. They say where ITA and the map part ways, so a fix follows the
-    evidence. Counts, ITA type words and field names only; makes nothing."""
+    on one panel, an extra fiber on two, where single/multi mode is written,
+    and what the ports with an unknown connector are. They say where ITA and
+    the map part ways, so a fix follows the evidence. Counts, ITA type words
+    and field names only; makes nothing."""
     topo, tree = conv.topology, conv.tree
     copied = {did: topo["devices"][did] for aid, did in conv.device_of_asset.items()
               if not topo["devices"][did].get("external")}
@@ -1067,7 +1120,18 @@ def diagnose(conv):
         + [("cassette.", m["conf"]) for ms in listed.values() for m in ms]
         + [("end.", e) for e in once.values()]
         + [("cable.", c) for c in cables.values()])
-    return [_fit(x) for x in (c5, c6, c7, c8, c9)]
+
+    # C10: the ports whose connector is neither fiber nor copper — they are
+    # shown, never planned on; "?enum" says ITA has a word the map should know
+    other, words = Counter(), set()
+    for ms in listed.values():
+        for m in ms:
+            if m["media"] == "other":
+                other[_other_kind(m["connector"])] += m["count"]
+                words.add(str(m["connector"] or ""))
+    c10 = (f"C10 other ports={sum(other.values())} words={len(words)} "
+           f"kinds={_count(other, key=lambda kv: kv[0])}")
+    return [_fit(x) for x in (c5, c6, c7, c8, c9, c10)]
 
 
 def block(lines):
@@ -1076,7 +1140,7 @@ def block(lines):
     return [bar, "TYPE BACK ONLY THESE LINES:"] + list(lines) + [bar]
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
     ap.add_argument("--cache", required=True, help="one site's folder under ita_cache/")
     ap.add_argument("--out", help="where to write the map (default: <cache>/topology.json)")
@@ -1088,11 +1152,32 @@ def main():
     ap.add_argument("--explain-rack", metavar="NAME",
                     help="with --explain-u, when the copy holds several racks: the rack's "
                          "exact name, as in ITA")
-    args = ap.parse_args()
-    conv = Converter(args.cache, unit_top=args.unit_top)
-    topology = conv.convert()
+    ap.add_argument("--trace", action="store_true",
+                    help="on an error, show Python's own traceback. It can print real "
+                         "names: read it there, do not type it back")
+    args = ap.parse_args(argv)
+    if not (Path(args.cache) / "manifest.json").exists():
+        print("no manifest.json in that folder — is --cache the folder ita_sync.py made "
+              "(ita_cache\\<name>)?")
+        return 1
+
+    def failed(line, exc):
+        if args.trace:
+            raise exc
+        for text in block([f"{line} failed: {_failed(exc)}"]):
+            print(text)
+        return 1
+    try:
+        conv = Converter(args.cache, unit_top=args.unit_top)
+        topology = conv.convert()
+    except Exception as e:      # noqa: BLE001 — whatever it is, say where and not what
+        return failed("C0", e)
     if args.explain_u is not None:
-        for line in block(explain(conv, args.explain_u, args.explain_rack)):
+        try:
+            lines = explain(conv, args.explain_u, args.explain_rack)
+        except Exception as e:  # noqa: BLE001
+            return failed("E0", e)
+        for line in block(lines):
             print(line)
         return 0
     out = Path(args.out) if args.out else Path(args.cache) / "topology.json"
@@ -1100,7 +1185,13 @@ def main():
     for line in summary(topology, conv.notes, conv.shape):
         print(line)
     print(f"\nWritten next to the copy ({out.name}). It stays on this machine.\n")
-    for line in block(type_back(topology, conv.notes, conv.shape) + diagnose(conv)):
+    try:
+        more = diagnose(conv)
+    except Exception as e:      # noqa: BLE001 — the map is written; C1-C4 still go out
+        if args.trace:
+            raise
+        more = [f"C5 failed: {_failed(e)}"]
+    for line in block(type_back(topology, conv.notes, conv.shape) + more):
         print(line)
 
 

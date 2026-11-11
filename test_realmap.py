@@ -129,10 +129,49 @@ def main():
         server.TOPOLOGY, server.STORE = keep
         shutil.rmtree(tmp, ignore_errors=True)
 
+    mixed_checks()
     content_checks()
     ui_checks()
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} real-map checks passed")
     raise SystemExit(0 if all(RESULTS) else 1)
+
+
+def mixed_checks():
+    """A device whose answer lists ports that are neither fiber nor copper in
+    between the others (a real row had 33, 2026-11-09): every port of it
+    reaches the page, and none of those is planned on."""
+    _, m = test_convert.mixed()
+    pathengine.seed_circuit_seq(m)
+    tmp = Path(tempfile.mkdtemp(prefix="ita_realmap_mixed_"))
+    keep = (server.TOPOLOGY, server.STORE)
+    server.TOPOLOGY = m
+    server.STORE = storage.open_store("json", path=tmp / "topology.json")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    c = Client(srv.server_port)
+    try:
+        st, rack = c.json("GET", "/api/rack?id=R1")
+        got = rack.get("ports", {}) if isinstance(rack, dict) else {}
+        check("GET /api/rack gives every port of a device, the last ones too, when some "
+              "are neither fiber nor copper",
+              st == 200 and {f"R1:SW:{i}" for i in range(1, 11)} <= set(got)
+              and got.get("R1:SW:7", {}).get("status") == "used", (st, sorted(got)))
+        st, out = c.json("POST", "/api/route", {"src": "R1:SW:1", "dst": "R1:SW:2"})
+        check("POST /api/route plans nothing on a port that is neither",
+              st == 200 and isinstance(out, dict) and out.get("status") == "failed"
+              and "neither fiber nor copper" in out.get("reason", ""), (st, out))
+        st, out = c.json("POST", "/api/route", {"src": "R1:SW:8", "dst": "R1:P:2"})
+        check("...and still plans on the device's last fiber port", st == 200
+              and isinstance(out, dict) and bool(out.get("options")), (st, out))
+        st, out = c.json("GET", "/api/search?q=SW")
+        hit = next((h for h in out.get("results", []) if h.get("kind") == "device"),
+                   {}) if isinstance(out, dict) else {}
+        check("GET /api/search counts all of the device's ports",
+              " 9/10 " in hit.get("sub", ""), (st, out))
+    finally:
+        srv.shutdown()
+        server.TOPOLOGY, server.STORE = keep
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def ui_checks():
@@ -160,6 +199,11 @@ def ui_checks():
     check("ui: an Excel row shows one route at a time too, and choose names it by its strands",
           "renderRowOption(row, d.options[pos], pos, d)" in rows and "d.options.map(" not in rows
           and "fingerprint:" in ui and "fetchRowDetail(row, 1)" in ui, "")
+    dev = ui[ui.index("function renderDevice()"):ui.index("function locate(")]
+    click = ui[ui.index("function clickPort("):ui.index("function clickPort(") + 700]
+    check("ui: ports that are neither fiber nor copper are drawn, and a click picks none",
+          'p.type !== "fiber" && p.type !== "copper"' in dev and "portGroup(" in dev
+          and "if (!plannable(p))" in click, "")
     check("ui: no 'domain null' on a map without A/B legs",
           not re.search(r'>domain \$\{(?:route|c|e|meta)\.domain\}<', ui), "")
 

@@ -25,8 +25,11 @@ route on it — the point of the whole exercise.
     python test_convert.py
 """
 
+import contextlib
 import copy
+import io
 import json
+import re
 import shutil
 import tempfile
 from collections import Counter, defaultdict
@@ -404,6 +407,8 @@ def cassette_cases():
     name_cases(conv, m)
     diagnose_cases(conv, m)
     jumper_cases()
+    connector_cases()
+    failure_cases()
 
 
 def jumper_site(out):
@@ -476,12 +481,187 @@ def jumper_cases():
           e[1] == "E1 match: media=2 named=A,B", e)
 
 
+def mixed_site(out, port_count=4):
+    """A switch whose answer lists ports that are neither fiber nor copper in
+    between the ones that are — a real row had 33 such ports (2026-11-09) —
+    in ITA's own connector words, which join with "_".
+
+      SW: USB x2, STACKING x2, FIBER_LC_OM4_REGULAR x4, COPPER_RJ45_STP x2
+          -> map ports 1-2, 3-4, 5-8, 9-10
+      SW fiber 3 (map port 7) - P:1          P: FIBER_REGULAR x4
+    """
+    (out / "assets").mkdir(parents=True)
+    (out / "network").mkdir()
+    tree = {"site": {"parent": None, "type": "location"},
+            "R1": {"parent": "site", "type": "rack"},
+            "SW": {"parent": "R1", "type": "network"},
+            "P": {"parent": "R1", "type": "patch-panel"}}
+    for aid, u in (("R1", None), ("SW", 10), ("P", 40)):
+        rec = {"id": aid, "type": tree[aid]["type"], "name": aid}
+        if u:
+            rec["rackMounted"] = {"unitPosition": u, "unitHeight": 1}
+        (out / "assets" / f"{aid}.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    def e(aid, port, module, connector):
+        return {"assetId": aid, "networkModule": module, "portNumber": port, "rearPort": False,
+                "connectorType": connector, "assetName": aid, "assetType": tree[aid]["type"]}
+    c = {"id": "x1", "source": e("SW", 3, "SW-fib", "FIBER_LC_OM4_REGULAR"),
+         "destination": e("P", 1, "P-m", "FIBER_REGULAR"), "cableType": {"length": 2}}
+    held = [{"connection": c, "networkPath": {"connections": [c], "beginItem": c["source"],
+                                              "endItem": c["destination"]}}]
+    groups = (("usb", "USB", 2), ("stk", "STACKING", 2),
+              ("fib", "FIBER_LC_OM4_REGULAR", port_count), ("cu", "COPPER_RJ45_STP", 2))
+    (out / "network" / "SW.json").write_text(json.dumps({"portConfigurations": [
+        {"portConfiguration": {"id": f"SW-{k}", "name": k, "connectorType": word,
+                               "portCount": n, "portStart": 1},
+         "connectionsAndPaths": held if k == "fib" else []} for k, word, n in groups]}),
+        encoding="utf-8")
+    (out / "network" / "P.json").write_text(json.dumps({"portConfigurations": [
+        {"portConfiguration": {"id": "P-m", "name": "m", "connectorType": "FIBER_REGULAR",
+                               "portCount": 4, "portStart": 1},
+         "connectionsAndPaths": []}]}), encoding="utf-8")
+    (out / "manifest.json").write_text(json.dumps(
+        {"synced_at": "test", "complete": True, "network_missing": [], "tree": tree}),
+        encoding="utf-8")
+
+
+def mixed():
+    tmp = Path(tempfile.mkdtemp(prefix="ita_convert_mixed_"))
+    try:
+        mixed_site(tmp / "s")
+        conv = ita_convert.Converter(tmp / "s")
+        return conv, conv.convert()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def connector_cases():
+    """A connector word, read token by token; and a device's ports that are
+    neither fiber nor copper (found looking for what to fix before the next
+    transfer, 2026-11-11)."""
+    words = {
+        # ITA's own words join with "_"
+        "FIBER_LC_OM4_REGULAR": ("fiber", "LC"), "FIBER_REGULAR": ("fiber", "fiber"),
+        "FIBER_MULTIMODE": ("fiber", "fiber"), "COPPER_RJ45_STP": ("copper", "RJ45"),
+        # a word that only states the grade is fiber all the same
+        "MULTIMODE": ("fiber", "fiber"), "SINGLE_MODE": ("fiber", "fiber"),
+        "OM4": ("fiber", "fiber"), "3.5MM": ("other", "other"),
+        "SFP_PLUS": ("fiber", "SFP"), "PANEL_MPO12": ("fiber", "MPO"),
+        # the start of another word is not a connector
+        "RJ45 STP": ("copper", "RJ45"), "CAT6 STP": ("copper", "copper"),
+        "STACKING": ("other", "other"), "SCSI": ("other", "other"), "USB": ("other", "other"),
+        "FAST_ETHERNET": ("other", "other"),
+        # and the plain ones stay what they were
+        "LC": ("fiber", "LC"), "LC/UPC": ("fiber", "LC"), "SC-APC": ("fiber", "SC"),
+        "SFP+": ("fiber", "SFP"), "QSFP28": ("fiber", "QSFP"), "MPO-12": ("fiber", "MPO"),
+        # the polish or "duplex" written onto the plug's name is still that plug
+        "LCDuplex": ("fiber", "LC"), "SCAPC": ("fiber", "SC"), "LC/UPC Duplex": ("fiber", "LC"),
+        "RJ45": ("copper", "RJ45"), "RJ-45": ("copper", "RJ45"), "CAT 6A": ("copper", "copper"),
+        "Fibre Channel": ("fiber", "fiber"), "": ("other", "none"), None: ("other", "none"),
+    }
+    got = {w: (ita_convert.media_of(w), ita_convert._kind(w)) for w in words}
+    check("a connector word is read token by token: STP is not ST, MULTIMODE is not MU, "
+          "and LC is found inside FIBER_LC_OM4_REGULAR",
+          got == words, {w: (words[w], got[w]) for w in words if got[w] != words[w]})
+
+    grades = {w: ("SM" if ita_convert.SM.search(w) else "")
+              + ("MM" if ita_convert.MM.search(w) else "")
+              for w in ("FIBER_SINGLE_MODE", "FIBER_MULTI_MODE", "FIBER_LC_OS_2", "FIBER_REGULAR")}
+    check("single/multi mode is found in ITA's style of word too (SINGLE_MODE, OS_2)",
+          grades == {"FIBER_SINGLE_MODE": "SM", "FIBER_MULTI_MODE": "MM",
+                     "FIBER_LC_OS_2": "SM", "FIBER_REGULAR": ""}, grades)
+
+    conv, m = mixed()
+    sw = m["devices"]["R1:SW"]
+    check("ports that are neither fiber nor copper are counted on the device",
+          (sw["fiber_ports"], sw["copper_ports"], sw.get("other_ports")) == (4, 2, 4)
+          and "other_ports" not in m["devices"]["R1:P"], sw)
+    check("...and the device's port numbers run over all of them, in ITA's order",
+          pathengine.port_span(sw) == 10 and pathengine.port_span(m["devices"]["R1:P"]) == 4
+          and [m["ports"][f"R1:SW:{i}"]["type"] for i in (2, 4, 5, 8, 9)]
+          == ["other", "other", "fiber", "fiber", "copper"]
+          and m["ports"]["R1:SW:7"]["status"] == "used", pathengine.port_span(sw))
+    # every fiber port of the cabinet but SW's last one is taken or excluded
+    exclude = {f"R1:P:{i}" for i in range(1, 5)} | {"R1:SW:5", "R1:SW:6"}
+    try:
+        picked = pathengine._pick_transit_port(m, "R1", "fiber", exclude)
+    except pathengine.RouteError as err:
+        picked = repr(err)
+    check("the engine reaches a device's last ports, past the ones that are neither",
+          picked == "R1:SW:8", picked)
+    refused = []
+    for plan in (lambda: pathengine.resolve_route_options("R1:SW:1", "R1:SW:2", topology=m),
+                 lambda: pathengine.direct_route(m, "R1:SW:1", "R1:SW:2"),
+                 lambda: pathengine.resolve_path("R1:SW:1", "R1:SW:2", topology=m)):
+        try:
+            plan()
+            refused.append("planned")
+        except pathengine.RouteError as err:
+            refused.append("neither fiber nor copper" in str(err))
+    check("...and they are shown, never planned on: no patch cord between two USB ports",
+          refused == [True, True, True], refused)
+    d = ita_convert.diagnose(conv)
+    check("C10 says what the ports with an unknown connector are, in generic words",
+          d[5] == "C10 other ports=4 words=2 kinds=stack:2,usb:2", d)
+
+
+def failure_cases():
+    """An error on real data must not put a real name on the screen: Python's
+    own message for a bad value IS the value."""
+    secret = "HALL-7-REAL-NAME"
+
+    def run(argv, spoil=None, breaks=None):
+        tmp = Path(tempfile.mkdtemp(prefix="ita_convert_fail_"))
+        keep = ita_convert._modes
+        try:
+            mixed_site(tmp / "s", port_count=spoil or 4)
+            if breaks:
+                def boom(*a, **k):
+                    raise KeyError(secret)
+                ita_convert._modes = boom
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                try:
+                    code = ita_convert.main(["--cache", str(tmp / "s")] + argv)
+                except BaseException as err:        # noqa: BLE001 — a traceback is the failure
+                    code = f"raised {type(err).__name__}: {err}"
+            return code, out.getvalue(), (tmp / "s" / "topology.json").exists()
+        finally:
+            ita_convert._modes = keep
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    code, text, wrote = run([], spoil=secret)
+    check("a conversion that fails says where — the error's type and line numbers — "
+          "and never the value it choked on",
+          code == 1 and "C0 failed: ValueError at ita_convert.py:" in text
+          and secret not in text and not wrote, (code, text))
+    code, text, wrote = run([], breaks=True)
+    check("a diagnostic line that fails does not take the map or C1-C4 with it",
+          not code and wrote and "\nC1 racks=1 " in text and "\nC4 notes: " in text
+          and re.search(r"\nC5 failed: KeyError at \S+:\d+ < ita_convert\.py:\d+", text)
+          and secret not in text, (code, text))
+    code, text, wrote = run(["--explain-u", "10"], breaks=True)
+    check("...nor does --explain-u print the value",
+          code == 1
+          and re.search(r"\nE0 failed: KeyError at \S+:\d+ < ita_convert\.py:\d+", text)
+          and secret not in text, (code, text))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        try:
+            code = ita_convert.main(["--cache", str(Path(tempfile.gettempdir()) / secret)])
+        except BaseException as err:                # noqa: BLE001
+            code = f"raised {type(err).__name__}"
+    check("a folder with no copy in it is said plainly, without the folder's name",
+          code == 1 and "no manifest.json" in out.getvalue() and secret not in out.getvalue(),
+          (code, out.getvalue()))
+
+
 def diagnose_cases(conv, m):
     """The lines that say WHY ports look shifted or taken twice on a real
     copy, before anything is changed: counts, type words and field names only."""
     d = ita_convert.diagnose(conv)
-    check("five diagnostic lines, C5 to C9, each short enough to type",
-          [x[:2] for x in d] == ["C5", "C6", "C7", "C8", "C9"]
+    check("six diagnostic lines, C5 to C10, each short enough to type",
+          [x.split()[0] for x in d] == ["C5", "C6", "C7", "C8", "C9", "C10"]
           and all(len(x) <= 120 for x in d), d)
     check("C5: the types the copy took as racks, racks with nothing copied in them, rack numbers",
           d[0] == "C5 racks types=rack:1 empty=0 num=none", d)

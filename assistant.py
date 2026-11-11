@@ -34,6 +34,7 @@ from collections import Counter
 import fuzzy
 import placement
 import serials
+from pathengine import port_span
 
 RACK_RE = re.compile(r"\b([A-D])\s*-?\s*(\d)\s*-?\s*([SN])\s*(\d{1,2})\b", re.I)
 POD_RE = re.compile(r"\b([A-D])\s*(\d)\b", re.I)
@@ -282,7 +283,7 @@ def answer_locate(ask):
         d = T["devices"][dev_id]
         free = sum(1 for p in T["ports"].values()
                    if p["device"] == dev_id and p["status"] == "free")
-        total = d["fiber_ports"] + d["copper_ports"]
+        total = port_span(d)
         found.append(f"**{s}** — {d['label']} ({d['type']}), במסד **{d['rack']}** "
                      f"ב־U{d['u_start']}"
                      + (f"–U{d['u_start'] - d['u_size'] + 1}" if d["u_size"] > 1 else "")
